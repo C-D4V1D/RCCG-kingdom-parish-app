@@ -113,3 +113,15 @@ test('the minutes before the Clerk AI takes over come from Automations > Box con
     } finally { s.restore(); }
   }
 });
+
+test('a satellite parish signal always goes to the box (whatever Kingdom\'s handler), the AI only when the box is silent', async () => {
+  for (const [handler, pingAgoMin, to, fallback] of [['clerk_ai', 5, 'box', null], ['box', 5, 'box', null], ['clerk_ai', 45, 'clerk_ai', 'box_silent']]) {
+    const s = stub({ handler, pingAgoMin });
+    try {
+      const r = await deliverMonthEndEvent(env(), { ...event, parish: '659840', satellite: true });
+      assert.equal(r.to, to, `${handler} ${pingAgoMin}`);
+      if (to === 'box') assert.equal(s.calls.find(c => c.url === `${BOX}/events`).body.parish, '659840');
+      if (fallback) assert.equal(s.calls.find(c => c.url === AI).body.fallback, fallback);
+    } finally { s.restore(); }
+  }
+});

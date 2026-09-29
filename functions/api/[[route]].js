@@ -1016,6 +1016,7 @@ function publicUser(userRow) {
     name: userRow.name,
     role: userRow.role,
     email: userRow.email || '',
+    parishCode: userRow.parish_code || '',
   };
 }
 
@@ -1952,6 +1953,157 @@ async function saveFurtherReport(DB, periodEnd, body) {
   return ok(publicFurther(row));
 }
 
+// ── SATELLITE PARISHES (/api/sat/...) ────────────────────────────
+// The Area's other parishes (e.g. Sanctuary of Favour 659840) use the same app with a 'satellite' sign-in that
+// sees only Sunday records and Attendance. Each parish has its OWN D1 database (binding SAT_<code>), with the
+// same tables as Kingdom's, so Kingdom's attendance rules, collection gates, remittance maths and month-end
+// signal all run unchanged on it, and nothing of theirs can reach Kingdom's reports. Sign-ins, the
+// cut-off dates, remittance rates and each parish's quotas live in Kingdom's database and are copied into the
+// parish database (syncSatelliteSettings) before every satellite request.
+const SATELLITE_ROLE = 'satellite';
+const SAT_CODE_RE = /^\d{4,8}$/;
+const SATELLITE_MAIN_ROUTES = new Set(['auth', 'change-pin', 'sat']);
+// /api/sat/<route>: what a satellite sign-in may reach in its parish database (method lists).
+const SATELLITE_ROUTES = {
+  income: ['GET', 'POST', 'PUT', 'DELETE'],
+  attendance: ['GET', 'PUT', 'POST'],
+  'attendance-further': ['GET', 'PUT'],
+  settings: ['GET'],
+  context: ['GET'],
+  remittances: ['GET'],   // compute-remit.js reads it (a parish records no remittances: an empty list)
+};
+// Kingdom settings copied into each parish database (same cut-offs and rates for the whole Area).
+const SAT_SHARED_SETTING_KEYS = ['remCutoffDatesByYear', 'remCutoffDates', 'remittanceRates'];
+
+const _userParishColumnReady = new WeakSet();   // per database binding
+async function ensureUserParishColumn(DB) {
+  if (_userParishColumnReady.has(DB)) return;
+  try {
+    const { results } = await DB.prepare(`PRAGMA table_info(users)`).all();
+    if (!(results || []).some(r => r.name === 'parish_code')) {
+      await DB.prepare(`ALTER TABLE users ADD COLUMN parish_code TEXT DEFAULT ''`).run();
+    }
+    _userParishColumnReady.add(DB);
+  } catch (e) {
+    console.error('[sat] users.parish_code:', e?.message || e);
+  }
+}
+
+async function setUserParish(DB, id, parishCode) {
+  await ensureUserParishColumn(DB);
+  await DB.prepare(`UPDATE users SET parish_code=? WHERE id=?`).bind(parishCode || '', id).run();
+}
+
+// A satellite pastor corrects a saved Sunday in place (Kingdom deletes and re-enters; a parish database has no
+// deposits, petty cash or bank records hanging off the row, so the amounts can simply be replaced).
+const SAT_INCOME_FIELDS = {
+  membersTithe: 'members_tithe', ministersTithe: 'ministers_tithe', thanksgiving: 'thanksgiving', sundaySchool: 'sunday_school',
+  slo: 'slo', crm: 'crm', workersOffering: 'workers_offering', firstFruit: 'first_fruit', childrenOffering: 'children_offering',
+  weekendOffering: 'weekend_offering', holyCommunionOffering: 'holy_communion_offering',
+};
+async function updateSatelliteIncome(DB, id, data) {
+  const row = await DB.prepare(`SELECT * FROM income WHERE id=?`).bind(id).first();
+  if (!row) return err('That Sunday record was not found.', 404);
+  const sets = [], vals = [];
+  let total = 0;
+  for (const [key, col] of Object.entries(SAT_INCOME_FIELDS)) {
+    if (!(col in row)) continue;
+    const v = data?.[key] === undefined ? Number(row[col] || 0) : Number(data[key]);
+    if (!Number.isFinite(v) || v < 0) return err(`${key} must be a number of 0 or more`, 400);
+    sets.push(`${col}=?`); vals.push(v); total += v;
+  }
+  sets.push('total_collection=?'); vals.push(Math.round(total * 100) / 100);
+  if ('recorded_by' in row && data?.recordedBy) { sets.push('recorded_by=?'); vals.push(String(data.recordedBy).slice(0, 80)); }
+  await DB.prepare(`UPDATE income SET ${sets.join(',')} WHERE id=?`).bind(...vals, id).run();
+  return ok({ id, updated: true, totalCollection: Math.round(total * 100) / 100 });
+}
+
+function satelliteDb(env, code) {
+  return SAT_CODE_RE.test(String(code || '')) ? (env[`SAT_${code}`] || null) : null;
+}
+
+async function kingdomSettingsRows(DB, keys) {
+  const { results } = await DB.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`).bind(...keys).all();
+  const out = {};
+  for (const r of (results || [])) out[r.key] = r.value;
+  return out;
+}
+
+/** The parish's entry in Kingdom's satParishes setting ({code, name, active, ...}), or null. */
+async function satelliteParishInfo(DB, code) {
+  const rows = await kingdomSettingsRows(DB, ['satParishes']);
+  const list = safeJsonParse(rows.satParishes, []);
+  return (Array.isArray(list) ? list : []).find(p => String(p?.code) === String(code)) || null;
+}
+
+const _satReady = new WeakMap();   // parish database binding -> time it was last prepared (schema + settings)
+const SAT_SYNC_MS = 60 * 1000;
+
+/** Creates the parish database's tables once, then keeps its shared settings in step with Kingdom's. */
+async function prepareSatelliteDb(KDB, SDB, code, parish) {
+  const last = _satReady.get(SDB) || 0;
+  if (Date.now() - last < SAT_SYNC_MS) return;
+  if (!last) await handleInit(SDB);   // CREATE TABLE IF NOT EXISTS …: harmless when the tables exist
+  const k = await kingdomSettingsRows(KDB, [...SAT_SHARED_SETTING_KEYS, 'satQuotas', 'satLineLabels']);
+  const quotas = safeJsonParse(k.satQuotas, {}) || {};
+  const want = {};
+  for (const key of SAT_SHARED_SETTING_KEYS) if (k[key] !== undefined) want[key] = k[key];
+  want.quotaList = JSON.stringify(Array.isArray(quotas[code]) ? quotas[code] : []);
+  want.quotas = JSON.stringify({});   // no Kingdom default quotas: only this parish's quota list counts
+  want.churchName = String(parish?.name || `Parish ${code}`);
+  want.satLineLabels = k.satLineLabels !== undefined ? k.satLineLabels : JSON.stringify({});
+  want.satParish = JSON.stringify({ code, name: parish?.name || '', active: parish?.active !== false });
+  const have = await kingdomSettingsRows(SDB, Object.keys(want));
+  for (const [key, value] of Object.entries(want)) {
+    if (canonicalSettingValue(have[key]) !== canonicalSettingValue(value)) {
+      await SDB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(key, value).run();
+    }
+  }
+  _satReady.set(SDB, Date.now());
+}
+
+async function routeSatelliteRequest(context, { url, method, parts, authz }) {
+  const { env } = context;
+  const KDB = env.DB;
+  // Which parish: a pastor's own; the IT admin or the box's read-only key name one with ?parish=.
+  let code = '';
+  const user = authz.finance;
+  if (user?.role === SATELLITE_ROLE) {
+    await ensureUserParishColumn(KDB);
+    const row = await KDB.prepare(`SELECT parish_code, name FROM users WHERE id=?`).bind(user.id).first();
+    code = String(row?.parish_code || '');
+    if (row?.name && !user.name) user.name = row.name;
+  } else if (user?.role === 'it_admin' || authz.automation) {
+    code = String(url.searchParams.get('parish') || '');
+  } else {
+    return finAuthErr('forbidden', 403, 'Satellite parish records are for their pastors and the IT administrator.');
+  }
+  const SDB = satelliteDb(env, code);
+  if (!SDB) return err(`Parish ${code || '(none)'} is not set up in the app yet.`, 404);
+  const parish = await satelliteParishInfo(KDB, code);
+  if (user?.role === SATELLITE_ROLE && parish && parish.active === false) {
+    return finAuthErr('forbidden', 403, 'Your parish is paused in the app. Please contact the Area office.');
+  }
+
+  const sub = parts.slice(1);
+  const route = sub[0] || '';
+  const param = sub[1] || null;
+  const allowed = SATELLITE_ROUTES[route];
+  if (!allowed || !allowed.includes(method)) return err('Not found', 404);
+
+  await prepareSatelliteDb(KDB, SDB, code, parish);
+  if (route === 'context') {
+    return ok({ code, name: parish?.name || `Parish ${code}`, active: parish?.active !== false,
+                user: user ? { id: user.id, name: user.name || '', role: user.role } : null });
+  }
+  const satContext = {
+    ...context,
+    satParish: code,
+    waitUntil: p => (typeof context.waitUntil === 'function' ? context.waitUntil(p) : undefined),
+  };
+  return routeApiRequest(satContext, { DB: SDB, url, method, path: sub.join('/'), parts: sub, route, param, authz });
+}
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
@@ -1985,6 +2137,23 @@ export async function onRequest(context) {
     return err('Could not check your sign-in right now. Please try again in a moment.', 503);
   }
   if (authz.response) return authz.response;
+  // Satellite parish pastors see only their own parish's two pages (Sunday records, Attendance): every other
+  // route is refused, reads included. Their parish's data lives in its own database, reached through /api/sat.
+  if (authz.finance?.role === SATELLITE_ROLE && !SATELLITE_MAIN_ROUTES.has(route)) {
+    return finAuthErr('forbidden', 403, 'Your sign-in is for your parish\'s Sunday records and attendance only.');
+  }
+  // The box's scripts (compute-remit.js, att-fill.js) read the app with the read-only key; X-Sat-Parish points the
+  // same unchanged requests (/api/income, /api/settings, …) at that parish's database.
+  const satHeader = authz.automation ? String(request.headers.get('X-Sat-Parish') || '').trim() : '';
+  if (satHeader && route !== 'sat') {
+    url.searchParams.set('parish', satHeader);
+    const satRes = await routeSatelliteRequest(context, { url, method, parts: ['sat', ...parts], authz });
+    return satRes;
+  }
+  if (route === 'sat') {
+    const satRes = await routeSatelliteRequest(context, { url, method, parts, authz });
+    return authz.renewedToken ? withResponseHeader(satRes, 'X-Finance-Token', authz.renewedToken) : satRes;
+  }
   const res = await routeApiRequest(context, { DB, url, method, path, parts, route, param, authz });
   // A 12-hourly re-check renews the token in place — no extra round trip.
   return authz.renewedToken ? withResponseHeader(res, 'X-Finance-Token', authz.renewedToken) : res;
@@ -1999,6 +2168,15 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       try { body = await request.json(); } catch { body = {}; }
     } else if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       body = {};
+    }
+
+    // Satellite parishes record Sunday collections only (no bank/petty-cash splits); the recorder is the
+    // signed-in person. See routeSatelliteRequest.
+    if (context.satParish && route === 'income' && body && (method === 'POST' || method === 'PUT')) {
+      body.source = 'sunday_collection';
+      body.bankTransferAmount = 0;
+      body.directPettyCash = 0;
+      if (authz?.finance?.name) body.recordedBy = authz.finance.name;
     }
 
     // ── /api/init ──────────────────────────────────────────────
@@ -2221,6 +2399,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
         queueCutoffCollectionWebhook(context, DB, env, body, result);
         return result;
       }
+      if (method === 'PUT'  &&  param && context.satParish) return await updateSatelliteIncome(DB, param, body);
       if (method === 'PUT'  &&  param) return await updateIncome(DB, param, body);
       if (method === 'DELETE' && param) return await deleteIncome(DB, param);
     }
@@ -4038,7 +4217,8 @@ async function handleInit(DB) {
 
 // ── USERS ─────────────────────────────────────────────────────────
 async function getUsers(DB) {
-  const { results } = await DB.prepare(`SELECT id,name,role,email FROM users ORDER BY role, name`).all();
+  await ensureUserParishColumn(DB);
+  const { results } = await DB.prepare(`SELECT id,name,role,email,parish_code FROM users ORDER BY role, name`).all();
   return ok((results || []).map(publicUser));
 }
 
@@ -4046,13 +4226,16 @@ async function createUser(DB, data) {
   const { name, role, pin, email = '' } = data;
   if (!name || !role || !pin) return err('name, role, and pin are required', 400);
   if (!isValidPin(pin)) return err('pin must be 4-6 digits', 400);
+  const parishCode = role === SATELLITE_ROLE ? String(data.parishCode || '').trim() : '';
+  if (role === SATELLITE_ROLE && !SAT_CODE_RE.test(parishCode)) return err('A satellite parish user needs its parish code', 400);
   const id = newId('u');
   const hashedPin = await hashPin(pin);
   await DB.prepare(`INSERT INTO users (id,name,role,pin,email) VALUES (?,?,?,?,?)`)
     .bind(id, name, role, hashedPin, email).run();
+  if (parishCode) await setUserParish(DB, id, parishCode);
   // A default PIN handed out by the IT Admin must be replaced at first sign-in.
   if (data.mustChangePin) await setUserMustChangePin(DB, id, true);
-  return ok(publicUser({ id, name, role, email }));
+  return ok(publicUser({ id, name, role, email, parish_code: parishCode }));
 }
 
 async function updateUser(DB, id, data) {
@@ -4067,7 +4250,12 @@ async function updateUser(DB, id, data) {
     .bind(name, role, email, pin, id).run();
   // A PIN reset by the IT Admin is a new default PIN — make the user choose their own.
   if (pinReset && data.mustChangePin !== false) await setUserMustChangePin(DB, id, true);
-  return ok(publicUser({ id, name, role, email }));
+  let parishCode = row.parish_code || '';
+  if (role !== SATELLITE_ROLE) parishCode = '';
+  else if (data.parishCode !== undefined) parishCode = String(data.parishCode || '').trim();
+  if (role === SATELLITE_ROLE && !SAT_CODE_RE.test(parishCode)) return err('A satellite parish user needs its parish code', 400);
+  if (parishCode !== (row.parish_code || '')) await setUserParish(DB, id, parishCode);
+  return ok(publicUser({ id, name, role, email, parish_code: parishCode }));
 }
 
 // must_change_pin is read/written with its own statements (and never fatally) so a
@@ -4147,8 +4335,13 @@ async function loginUser(DB, data, request, env) {
 // Names for the login screen's "select your name" list (signatories share a role).
 // Public, so it returns only id, name and role — no emails.
 async function getLoginOptions(DB) {
-  const { results } = await DB.prepare(`SELECT id,name,role FROM users ORDER BY role, name`).all();
-  return ok((results || []).map(r => ({ id: r.id, name: r.name, role: r.role })));
+  await ensureUserParishColumn(DB);
+  const { results } = await DB.prepare(`SELECT id,name,role,parish_code FROM users ORDER BY role, name`).all();
+  let parishes = [];
+  try { parishes = safeJsonParse((await DB.prepare(`SELECT value FROM settings WHERE key='satParishes'`).first())?.value, []) || []; } catch { parishes = []; }
+  const pname = code => (parishes.find(p => String(p?.code) === String(code)) || {}).name || '';
+  return ok((results || []).map(r => ({ id: r.id, name: r.name, role: r.role, parishCode: r.parish_code || '',
+    ...(r.parish_code ? { parishName: pname(r.parish_code) } : {}) })));
 }
 
 async function deleteUser(DB, id) {
@@ -4491,7 +4684,7 @@ function requestOrigin(request) {
   try { return new URL(request.url).origin; } catch { return ''; }
 }
 
-async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
+async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', satParish = null) {
   if (!result || !result.ok) return;
   const saved = await result.clone().json().catch(() => null);
   if (!saved || !saved.id) return;
@@ -4511,11 +4704,12 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
     action: saved.merged ? 'updated' : 'created',
     recordId: saved.id,
     savedAt: new Date().toISOString(),
-    parish: REMIT_ACTION_PARISH,
+    parish: satParish || REMIT_ACTION_PARISH,
     month,
     links,
     linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
+  if (satParish) { payload.satellite = true; payload.links = null; payload.linksExpireAt = null; }  // the box sends a satellite's own buttons
   // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
   const sent = await deliverMonthEndEvent(env, payload);
   if (!sent.ok) {
@@ -4527,7 +4721,7 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '') {
 function queueCutoffCollectionWebhook(context, DB, env, data, result) {
   try {
     if (!monthEndConfigured(env) || !isSundayCollectionSource(data?.source)) return;
-    const job = sendCutoffCollectionWebhook(DB, env, data, result, requestOrigin(context?.request))
+    const job = sendCutoffCollectionWebhook(DB, env, data, result, requestOrigin(context?.request), context?.satParish || null)
       .catch(e => console.error('[remit-webhook] notify failed:', e?.message || e));
     if (typeof context?.waitUntil === 'function') context.waitUntil(job);
   } catch (e) {

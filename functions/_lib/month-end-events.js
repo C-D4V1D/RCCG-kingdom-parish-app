@@ -52,6 +52,22 @@ async function monthEndRoute(env) {
   }
 }
 
+/** True when the box has not reported in for the takeover minutes (Automations → Box connection; default 30). */
+async function satelliteBoxSilent(env) {
+  const token = watchdogToken(env);
+  if (!token) return true;
+  try {
+    const get = path => fetch(`${watchdogBase(env)}${path}`, { headers: { 'x-watchdog-token': token }, signal: timeoutSignal() });
+    const [c, h] = await Promise.all([get('/config'), get('/health')]);
+    const mins = Number((c.ok ? await c.json() : null)?.config?.automations?.supervisor?.ai_takeover_minutes);
+    const silentMs = Number.isFinite(mins) && mins >= 10 && mins <= 240 ? mins * 60 * 1000 : BOX_SILENT_MS;
+    const last = h.ok ? Date.parse((await h.json())?.last_ping || '') : NaN;
+    return !(Date.now() - last < silentMs);
+  } catch {
+    return true;
+  }
+}
+
 async function postToBox(env, event) {
   const token = watchdogToken(env);
   if (!token) return false;
@@ -91,6 +107,13 @@ export function monthEndConfigured(env) {
  * and `ok` says whether that delivery was accepted.
  */
 export async function deliverMonthEndEvent(env, payload) {
+  // A satellite parish's signal always goes to the box, which applies that parish's own "Month-end run by"
+  // (Automations → Parishes); only a silent or unreachable box sends it to the Clerk AI.
+  if (payload?.satellite) {
+    if (await satelliteBoxSilent(env)) return { ok: await postToClerkAi(env, { ...payload, fallback: 'box_silent' }), to: 'clerk_ai' };
+    if (await postToBox(env, { ...payload, handler: 'box' })) return { ok: true, to: 'box' };
+    return { ok: await postToClerkAi(env, { ...payload, fallback: 'box_unreachable' }), to: 'clerk_ai' };
+  }
   const { handler, silent } = await monthEndRoute(env);
   if (silent) {
     console.error(`[month-end] Clerk box silent too long; ${payload.event} goes to the Clerk AI instead`);
