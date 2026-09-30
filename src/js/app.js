@@ -4049,7 +4049,8 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
   const pctColor = paceClass === 'over' ? 'var(--danger)' : (paceClass === 'watch' ? '#B8860B' : 'var(--success)');
 
   // ── Ideal allocations (before waterfall) ──
-  const idealSetAside   = Math.max(0, totalNextPeriod - budgetRemaining);
+  const floatTarget     = Math.max(avail.parts.currentFloat || 0, totalNextPeriod);
+  const idealSetAside   = Math.max(0, floatTarget - budgetRemaining);
   const idealKnownBills = avail.parts.knownBillsSaved;
   const idealHeldBack   = avail.parts.heldBack;
 
