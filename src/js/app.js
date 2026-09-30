@@ -4098,9 +4098,9 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
   // ── Warning lines ──
   let warningHtml = '';
   if (shortFlags.setAside && shortFlags.knownBills) {
-    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">Fund is too low. Known bills and next period's budget are underfunded.</div>`;
+    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">Fund is too low. Known bills and ${esc(nextMo)} budget set-aside are underfunded.</div>`;
   } else if (shortFlags.setAside) {
-    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">No money for new spending. Next period's budget is underfunded by ${fmt(idealSetAside - dispSetAside)}.</div>`;
+    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">No money for new spending. ${esc(nextMo)} budget set-aside is underfunded by ${fmt(idealSetAside - dispSetAside)}.</div>`;
   }
 
   // ── Shortfall note helper ──
@@ -4126,8 +4126,8 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
   // ── Set-aside row ──
   const setAsideNote = shortFlags.setAside
     ? shortNote(dispSetAside, idealSetAside,
-        `⚠ Nothing available to reserve — ${fmt(idealSetAside)} needed for ${esc(nextMo)} budget is completely unfunded`,
-        `⚠ ${fmt(idealSetAside - dispSetAside)} short of fully funding ${esc(nextMo)} — only ${fmt(dispSetAside)} of ${fmt(idealSetAside)} needed can be reserved`)
+        `⚠ Nothing set aside — ${fmt(idealSetAside)} needed for ${esc(nextMo)} budget is completely unfunded`,
+        `⚠ ${fmt(idealSetAside - dispSetAside)} short — only ${fmt(dispSetAside)} of ${fmt(idealSetAside)} set aside for ${esc(nextMo)} budget`)
     : '';
 
   // ── Held-back row ──
@@ -4167,7 +4167,7 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
       </div>
       <div style="border-top:1px solid var(--border);padding-top:8px">
         ${row('Known bills saved' + knownBillsSub, dispKnownBills, shortFlags.knownBills ? 'var(--danger)' : '', knownBillsNote)}
-        ${row('Reserved for next period <span style="font-size:10px;color:var(--text3)">(' + esc(nextMo) + ': ' + fmt(totalNextPeriod) + ')</span>', dispSetAside, shortFlags.setAside ? 'var(--danger)' : '', setAsideNote)}
+        ${row('Set aside for ' + esc(nextMo) + ' budget <span style="font-size:10px;color:var(--text3)">(' + fmt(totalNextPeriod) + ')</span>', dispSetAside, shortFlags.setAside ? 'var(--danger)' : '', setAsideNote)}
         ${row('Held back for savings', dispHeldBack, shortFlags.heldBack ? 'var(--danger)' : '', heldBackNote)}
       </div>
       <div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
