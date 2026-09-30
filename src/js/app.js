@@ -4049,18 +4049,15 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
   const pctColor = paceClass === 'over' ? 'var(--danger)' : (paceClass === 'watch' ? '#B8860B' : 'var(--success)');
 
   // ── Ideal allocations (before waterfall) ──
-  // Float reserve mirrors the engine's freeForNewThings() formula:
-  //   freeNow = availableNow − max(currentFloat, nextPeriodFloat + cushion) − knownBillsSaved − heldBack
-  // so the four lines (setAside + knownBills + heldBack + available) sum exactly to the fund.
-  const floatReserve    = Math.max(avail.parts.currentFloat || 0, totalNextPeriod);
-  const idealSetAside   = floatReserve;
+  const floatTarget     = Math.max(avail.parts.currentFloat || 0, totalNextPeriod);
+  const idealSetAside   = Math.max(0, floatTarget - budgetRemaining);
   const idealKnownBills = avail.parts.knownBillsSaved;
   const idealHeldBack   = avail.parts.heldBack;
 
   let dispKnownBills = idealKnownBills;
   let dispSetAside   = idealSetAside;
   let dispHeldBack   = idealHeldBack;
-  let dispAvail      = fund - idealSetAside - idealKnownBills - idealHeldBack;
+  let dispAvail      = fund - budgetRemaining - idealSetAside - idealKnownBills - idealHeldBack;
   let shortFlags     = {};
 
   // ── Waterfall: cap in priority order (available → heldBack → setAside → knownBills) ──
@@ -4115,7 +4112,7 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
   // ── Budget remaining display ──
   const brNeg = budgetRemaining < 0;
   const brText = brNeg ? `−${fmt(Math.abs(budgetRemaining))}` : fmt(budgetRemaining);
-  const brColor = brNeg ? 'var(--danger)' : 'var(--text3)';
+  const brColor = brNeg ? 'var(--danger)' : color;
 
   // ── Known bills row ──
   const knownBillsNote = shortFlags.knownBills
@@ -4160,15 +4157,17 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
         <span style="font-size:11px;color:var(--text3)">of ${fmt(avail.budgetTotal)}</span>
       </div>
       ${renderBudgetBar(spentPct, markerPct, paceClass)}
-      <div style="font-size:11px;color:${brColor};margin-top:4px;text-align:right">${brText} remaining</div>
     </div>` : '';
 
   return `${budgetBar}
     <div style="margin-top:14px;padding:12px;background:var(--surface2, rgba(0,0,0,0.02));border-radius:10px;border:1px solid var(--border)">
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Fund allocation</div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)">Budget remaining</span>
+        <span style="font-size:16px;font-weight:800;color:${brColor}">${brText}</span>
+      </div>
       <div style="border-top:1px solid var(--border);padding-top:8px">
         ${row('Known bills saved' + knownBillsSub, dispKnownBills, shortFlags.knownBills ? 'var(--danger)' : '', knownBillsNote)}
-        ${row('Set aside for ' + esc(nextMo) + ' budget <span style="font-size:10px;color:var(--text3)">(' + fmt(totalNextPeriod) + ')</span>', dispSetAside, shortFlags.setAside ? 'var(--danger)' : '', setAsideNote)}
+        ${row('Reserved for next period <span style="font-size:10px;color:var(--text3)">(' + esc(nextMo) + ': ' + fmt(totalNextPeriod) + ')</span>', dispSetAside, shortFlags.setAside ? 'var(--danger)' : '', setAsideNote)}
         ${row('Held back for savings', dispHeldBack, shortFlags.heldBack ? 'var(--danger)' : '', heldBackNote)}
       </div>
       <div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
