@@ -364,6 +364,39 @@ test('POST /test-alert sends one test message (and needs the token)', async () =
   } finally { s.restore(); }
 });
 
+test('POST /notify is rejected without a valid token', async () => {
+  const env = createEnv({ config: JSON.stringify(alertConfig) });
+  const r = await worker.fetch(req('/notify', { method: 'POST', token: 'wrong', body: { type: 'bank_transaction_needs_review', text: 'hi' } }), env);
+  assert.equal(r.status, 401);
+});
+
+test('POST /notify requires both type and text', async () => {
+  const env = createEnv({ config: JSON.stringify(alertConfig) });
+  const noType = await readJson(await worker.fetch(req('/notify', { method: 'POST', body: { text: 'hi' } }), env));
+  assert.match(noType.error, /type and text are required/);
+  const noText = await readJson(await worker.fetch(req('/notify', { method: 'POST', body: { type: 'bank_transaction_needs_review' } }), env));
+  assert.match(noText.error, /type and text are required/);
+});
+
+test('POST /notify sends a Telegram message to whoever is routed for that type', async () => {
+  const s = tgStub();
+  try {
+    const cfg = { ...alertConfig, routing: { ...alertConfig.routing, bank_transaction_needs_review: { david: { telegram: true, email: false } } } };
+    const env = createEnv({ config: JSON.stringify(cfg) });
+    env.TELEGRAM_BOT_TOKEN = 'bot-key';
+    const r = await readJson(await worker.fetch(req('/notify', { method: 'POST', body: { type: 'bank_transaction_needs_review', text: 'A bank movement needs review.' } }), env));
+    assert.deepEqual(r, { ok: true, sent: 1, of: 1 });
+    assert.equal(s.sent[0].text, 'A bank movement needs review.');
+  } finally { s.restore(); }
+});
+
+test('POST /notify with nobody routed for the type still succeeds, with ok:false (no network needed)', async () => {
+  const env = createEnv({ config: JSON.stringify(alertConfig) }); // alertConfig has no routing for this type
+  env.TELEGRAM_BOT_TOKEN = 'bot-key';
+  const r = await readJson(await worker.fetch(req('/notify', { method: 'POST', body: { type: 'bank_transaction_needs_review', text: 'hi' } }), env));
+  assert.deepEqual(r, { ok: false, error: 'nobody is ticked for Telegram on bank_transaction_needs_review' });
+});
+
 test('GET /bank-balance is null before the box ever reports one', async () => {
   const env = createEnv();
   const r = await readJson(await worker.fetch(req('/bank-balance'), env));
