@@ -164,7 +164,7 @@ function stubOpenAiForStatement(items, ocrText = 'OCR transcript of the statemen
   return stubFetch((url, init) => {
     if (url === 'https://api.openai.com/v1/chat/completions') {
       const sentBody = JSON.parse(init.body);
-      assert.equal(sentBody.model, 'gpt-4o');
+      assert.equal(sentBody.model, 'gpt-6.1-sol');
       assert.ok(sentBody.messages?.[0]?.content?.some(b => b.type === 'image_url'));
       return jsonResponse(200, { choices: [{ message: { content: ocrText } }] });
     }

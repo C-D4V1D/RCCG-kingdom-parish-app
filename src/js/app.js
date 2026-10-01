@@ -16057,7 +16057,7 @@ function renderBankEmailAutomationSettings(s){
       <label class="form-label">Statement Upload Reads Photos With</label>
       <select id="set_bank_recon_ocr_provider" class="form-select">
         <option value="deepseek" ${(s.bank_recon_ocr_provider||'deepseek')==='deepseek'?'selected':''}>DeepSeek</option>
-        <option value="openai" ${s.bank_recon_ocr_provider==='openai'?'selected':''}>OpenAI (gpt-4o)</option>
+        <option value="openai" ${s.bank_recon_ocr_provider==='openai'?'selected':''}>OpenAI (GPT-6.1 Sol)</option>
       </select>
       <div class="form-hint">Which AI reads your uploaded bank statement photos on the Bank page's "Upload a statement" button. Switch this if one provider's reading isn't working well — requires that provider's key above to be configured.</div>
     </div>

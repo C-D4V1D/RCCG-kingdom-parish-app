@@ -8641,7 +8641,7 @@ async function ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
     body: JSON.stringify({
-      model: 'gpt-4o',
+      model: 'gpt-6.1-sol',
       messages: [{
         role: 'user',
         content: [
