@@ -635,9 +635,9 @@ function showReauthPrompt(resolve){
 }
 
 // One network attempt, wrapped in a timeout so a dead connection fails fast.
-async function _apiFetchOnce(path, opts){
+async function _apiFetchOnce(path, opts, timeoutMs=_REQUEST_TIMEOUT_MS){
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), _REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch('/api/'+path, { ...opts, headers: Auth.headers(opts.headers), signal: ctrl.signal });
     Auth.capture(res);
@@ -780,7 +780,7 @@ function apiPath(path){
   return isSatellite() && !/^(auth(\/|$)|change-pin)/.test(path) ? 'sat/' + path : path;
 }
 
-async function apiFetch(path, method='GET', body=null){
+async function apiFetch(path, method='GET', body=null, timeoutMs=_REQUEST_TIMEOUT_MS){
   const endpoint = path.split('/')[0];
   // Worked out here, before any await: a request queued as the user signs out still
   // goes to the route it was made for. The cache key carries the prefix so a
@@ -815,7 +815,7 @@ async function apiFetch(path, method='GET', body=null){
   const run = (async () => {
     for(let attempt = 0; ; attempt++){
       try {
-        const res = await _apiFetchOnce(fullPath, opts);
+        const res = await _apiFetchOnce(fullPath, opts, timeoutMs);
         if(!res.ok && method === 'GET' && res.status >= 500 && attempt < 2){
           await new Promise(r => setTimeout(r, 1000 * (2 * attempt + 1)));
           continue;
@@ -938,7 +938,7 @@ const DB = {
 
   getBankReconEntries()        { return apiFetch('bank-recon/entries'); },
   resolveBankReconEntry(id,d)  { return apiFetch(`bank-recon/entries/${id}/resolve`,'POST',d); },
-  uploadBankStatement(d)       { return apiFetch('bank-recon/statement','POST',d); },
+  uploadBankStatement(d,timeoutMs) { return apiFetch('bank-recon/statement','POST',d,timeoutMs); },
 
   getNotifications()           { return apiFetch('notifications'); },
   addNotification(title,body,type='info'){
@@ -12760,7 +12760,7 @@ async function renderBank(){
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
-      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries)}`;
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries,bankPortalBalance)}`;
 
   // Populates its own DOM region asynchronously after the page above is already
   // showing, so a slow/failed fetch never blocks the Bank page itself.
@@ -13195,8 +13195,46 @@ async function fetchPortalBankBalanceQuiet(){
   try { return await DB.getPortalBankBalance(); } catch { return { balance: null, checked_at: null }; }
 }
 
-function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[]){
+// The actual headline a "reconciliation" page exists for — real bank balance vs. the
+// app's computed balance vs. the difference — shown here too (not just on the Bank
+// Balance tile above the tabs) so it travels with you onto this tab, including after
+// the "Reconcile This Difference" button lands you here. Same figures, same thresholds
+// as renderPortalBalanceBlock, just laid out as its own prominent card instead of a
+// small KPI-tile addendum.
+function renderReconciliationHeadline(portal, appBalance){
+  const notChecked = !portal || portal.balance === null || portal.balance === undefined;
+  if(notChecked){
+    return `<div class="card">
+      <div class="card-header"><span class="card-title">Reconciliation Status</span></div>
+      <p style="font-size:13px;color:var(--text2)">The box hasn't reported a real balance check yet, so there's nothing to compare against your records here yet.</p>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '')" class="btn btn-sm">🔄 Check now</button>
+    </div>`;
+  }
+  const diff = appBalance - portal.balance;
+  const behind = diff < 0;
+  const aligned = Math.abs(diff) < 1;
+  const checkedAt = portal.checked_at ? `${fmtDate(portal.checked_at)} ${fmtTime(portal.checked_at)}` : '';
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Reconciliation Status</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div><div style="font-size:11px;color:var(--text3)">REAL BALANCE</div><div style="font-size:17px;font-weight:700">${fmt(portal.balance)}</div></div>
+      <div><div style="font-size:11px;color:var(--text3)">APP BALANCE</div><div style="font-size:17px;font-weight:700">${fmt(appBalance)}</div></div>
+    </div>
+    <div class="alert ${aligned?'alert-success':(behind?'alert-danger':'alert-warn')}" style="margin-bottom:0">
+      <span class="alert-icon">${aligned?'✓':'⚠'}</span>
+      <span>${aligned ? 'Reconciled — the app matches the real balance.' : `<strong>Difference: ${fmt(Math.abs(diff))}</strong> — the app is ${behind?'behind':'ahead of'} the real balance. See the movements below for what explains it.`}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);font-size:11.5px;margin-top:8px">
+      <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${portal.checked_at||''}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+    </div>
+  </div>`;
+}
+
+function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[],bankPortalBalance=null){
   return `
+    ${renderReconciliationHeadline(bankPortalBalance, bankBalance)}
+
     <div class="card">
       <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
       <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This reconciliation view shows how the computed bank balance is derived from all income, deposits, expenses, remittances, and withdrawals. Compare this with your actual bank statement.</span></div>
@@ -13370,20 +13408,29 @@ function showBankStatementUploadForm(){
 async function submitBankStatementUpload(btn){
   const files = Array.from(document.getElementById('bs_photo')?.files || []);
   if(!files.length){ showAlert('Please choose at least one image of the statement.','danger'); return; }
-  const restore = setBtnLoading(btn, files.length > 1 ? `Checking 1 of ${files.length}…` : 'Checking…');
+  const restore = setBtnLoading(btn, files.length > 1 ? `Preparing 1 of ${files.length}…` : 'Preparing…');
   try {
     const images = [];
     for(let i=0;i<files.length;i++){
-      // Update the spinner label in place — not another setBtnLoading call, which would
-      // re-snapshot the current (already-spinner) HTML as "original" and leave a second,
-      // orphaned auto-restore timer running past this one.
-      if(files.length > 1 && btn) btn.innerHTML = `<span class="btn-spinner-sm"></span> Checking ${i+1} of ${files.length}…`;
+      // This loop is just local compression (fast, in the browser) — update the spinner
+      // label in place, not another setBtnLoading call, which would re-snapshot the
+      // current (already-spinner) HTML as "original" and leave a second, orphaned
+      // auto-restore timer running past this one.
+      if(files.length > 1 && btn) btn.innerHTML = `<span class="btn-spinner-sm"></span> Preparing ${i+1} of ${files.length}…`;
       // Higher max dimension / quality than the deposit-slip compression (1200/0.75) —
       // a statement has more, smaller text that OCR needs to be able to read.
       const dataUrl = await compressPhoto(files[i], 1600, 0.85);
       images.push({ imageBase64: dataUrl.split(',')[1], mimeType: 'image/jpeg' });
     }
-    const res = await DB.uploadBankStatement({ images });
+    // The box now reads every photo at once (not one-by-one), so what's left is one
+    // wait, not N — label it as such rather than a stale "Preparing" from the loop above.
+    if(btn) btn.innerHTML = `<span class="btn-spinner-sm"></span> Reading statement…`;
+    // The box reads all photos in parallel, but AI replies are the slow part and
+    // real-world latency varies — a generous, photo-count-scaled ceiling (capped at 4
+    // minutes) rather than the normal 45s API timeout, which a multi-page statement
+    // (or just a slow reply) can easily exceed.
+    const timeoutMs = Math.min(240000, 60000 + files.length * 30000);
+    const res = await DB.uploadBankStatement({ images }, timeoutMs);
     closeModal();
     const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
     const pagesNote = files.length > 1 ? ` across ${files.length} pages` : '';

@@ -249,7 +249,7 @@ test('POST /api/bank-recon/statement: a failure on any one photo fails the whole
     body = await readJson(res);
   } finally { restore(); }
   assert.equal(res.status, 502);
-  assert.match(body.error, /photo 2 of 2/);
+  assert.match(body.error, /Could not read the statement/);
   const reconRows = DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get();
   assert.equal(reconRows.n, 0, 'nothing is filed when the upload fails partway through');
 });
