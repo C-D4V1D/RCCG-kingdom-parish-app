@@ -204,10 +204,10 @@ test('POST /api/bank-recon/statement: multiple photos are OCR\'d separately and 
         visionCallCount++;
         return jsonResponse(200, { choices: [{ message: { content: `PAGE-${visionCallCount}-TEXT` } }] });
       }
-      // The text-parse call: assert both pages' text arrived, in order, then return no items —
+      // The text-parse call: assert both pages' text arrived, in order, then return one line —
       // this test only cares about the OCR fan-out/join, not the matching that follows.
       assert.match(content, /PAGE-1-TEXT[\s\S]*PAGE-2-TEXT/);
-      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify([]) } }] });
+      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify([{ date: '2026-09-20', amount: 999, type: 'income', narration: 'x' }]) } }] });
     }
     throw new Error(`unexpected fetch in multi-page statement test: ${url}`);
   });
@@ -604,4 +604,35 @@ test('GET /api/bank-recon/entries: matchedDetails describes each matched record,
   assert.deepEqual(list.find(e => e.id === 'brc2').matchedDetails,
     [{ sourceTable: 'income', sourceId: 'i1', date: '2026-10-04', amount: 2000, description: 'donation: Bro. Ade' }]);
   assert.deepEqual(list.find(e => e.id === 'brc3').matchedDetails, []);
+});
+
+test('POST /api/bank-recon/statement: a photo with no readable transactions is a 422 error, not an empty success', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  const res = await uploadStatement(DB, admin, []);
+  assert.equal(res.status, 422);
+  assert.match(res.body.error, /No transactions could be read/);
+  assert.equal(reconCount(DB), 0);
+});
+
+test('parseStatementWithAI: a reply cut off for length is reported clearly', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  const restore = stubFetch((url, init) => {
+    const content = JSON.parse(init.body).messages?.[0]?.content;
+    if (Array.isArray(content)) return jsonResponse(200, { choices: [{ message: { content: 'rows' } }] });
+    assert.equal(JSON.parse(init.body).max_tokens, 8000);
+    return jsonResponse(200, { choices: [{ message: { content: '[{"date":"2026-' }, finish_reason: 'length' }] });
+  });
+  try {
+    const res = await onRequest({
+      request: req('bank-recon/statement', { method: 'POST', headers: bearer(admin), body: { imageBase64: 'x', mimeType: 'image/jpeg' } }),
+      env: baseEnv(DB),
+    });
+    const body = await readJson(res);
+    assert.ok(res.status >= 400);
+    assert.match(body.error, /too many lines/);
+  } finally { restore(); }
 });

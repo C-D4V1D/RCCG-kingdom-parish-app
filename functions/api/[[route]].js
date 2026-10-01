@@ -8847,6 +8847,14 @@ async function handleBankReconStatement(DB, env, authz, body) {
   if (parseRes.status !== 200 || !parsed || !Array.isArray(parsed.items)) {
     return err(parsed?.error || 'Could not parse the statement text', parseRes.status >= 400 ? parseRes.status : 502);
   }
+  // Nothing readable is a failure, not an empty success — otherwise "0 found" looks like the
+  // statement was processed. Show the start of what was read so a wrong/blurry photo is obvious.
+  const usableItems = parsed.items.filter(it => String(it?.date || '').slice(0, 10) && Math.abs(Number(it?.amount || 0)));
+  if (!usableItems.length) {
+    const seen = statementText.replace(/\s+/g, ' ').trim().slice(0, 140);
+    return err('No transactions could be read from the photo(s). Make sure each photo clearly shows the rows of the '
+      + 'statement (date, description, amount) and try again.' + (seen ? ` What was read began: "${seen}${statementText.length > 140 ? '…' : ''}"` : ''), 422);
+  }
 
   // Unlike the sweep, this path never depends on the Worker being reachable (the box being
   // down must never block an in-person statement upload) — use the default window directly.
@@ -9715,16 +9723,20 @@ async function parseStatementWithAI(env, DB, data) {
     return err('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.', 503);
   }
 
-  const prompt = `Parse this bank statement text and extract all transaction line items. Return a JSON array where each item has:\n- date: "YYYY-MM-DD" (best guess from statement)\n- amount: positive number (always positive)\n- type: "income" if credit/deposit/inflow, "expense" if debit/withdrawal/outflow\n- reference: transaction reference or narration code\n- narration: brief description of the transaction\n\nReturn ONLY a valid JSON array, no other text. If a field is unclear, use empty string or 0.\n\nBank statement text:\n${statementText.slice(0, 5000)}`;
+  const prompt = `Parse this bank statement text and extract all transaction line items. Return a JSON array where each item has:\n- date: "YYYY-MM-DD" (best guess from statement)\n- amount: positive number (always positive)\n- type: "income" if credit/deposit/inflow, "expense" if debit/withdrawal/outflow\n- reference: transaction reference or narration code\n- narration: brief description of the transaction\n\nReturn ONLY a valid JSON array, no other text. If a field is unclear, use empty string or 0.\n\nBank statement text:\n${statementText.slice(0, 24000)}`;
 
   try {
     const resp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 3000, temperature: 0.1 }),
+      body: JSON.stringify({ model: deepseekModel, messages: [{ role: 'user', content: prompt }], max_tokens: 8000, temperature: 0.1 }),
     });
     if (!resp.ok) throw new Error(`DeepSeek API error ${resp.status}`);
     const aiData = await resp.json();
+    // A reply cut off mid-array would otherwise fail as "invalid JSON" with no clue why.
+    if (aiData.choices?.[0]?.finish_reason === 'length') {
+      throw new Error('the statement has too many lines to read in one go — upload fewer pages at a time');
+    }
     const rawText = aiData.choices?.[0]?.message?.content || '[]';
     const cleanText = rawText.replace(/```json?\s*/gi, '').replace(/```\s*/gi, '').trim();
     const parsed = safeJsonParse(cleanText, null);

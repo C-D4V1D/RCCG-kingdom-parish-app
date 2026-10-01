@@ -13391,14 +13391,16 @@ function renderLastStatementUpload(){
   if(!r) return '';
   const total = r.itemCount||0, dup = r.duplicateCount||0, fresh = total - dup;
   const allDup = total > 0 && dup >= total;
-  const lines = allDup
+  const lines = total === 0
+    ? [`<strong>No transactions were found on the photo${r.pages>1?'s':''}.</strong> Nothing was added — try clearer photos of the statement rows.`]
+    : allDup
     ? [`<strong>This statement was already uploaded.</strong> All ${total} line${total===1?'':'s'} were already on file, so nothing new was added.`]
     : [
         `<strong>${fresh} new line${fresh===1?'':'s'} added</strong> from ${total} found on the statement${r.pages>1?` (${r.pages} pages)`:''}.`,
         dup ? `${dup} line${dup===1?' was':'s were'} already uploaded before, so skipped.` : '',
         `${r.autoCount||0} matched automatically${r.chargeCount?` (incl. ${r.chargeCount} bank charge${r.chargeCount===1?'':'s'} filed)`:''} · ${r.needsAttentionCount||0} need review · ${r.unrecordedCount||0} not in your records.`,
       ].filter(Boolean);
-  const cls = allDup ? 'alert-info' : ((r.needsAttentionCount||0)+(r.unrecordedCount||0) > 0 ? 'alert-warn' : 'alert-success');
+  const cls = total === 0 ? 'alert-danger' : allDup ? 'alert-info' : ((r.needsAttentionCount||0)+(r.unrecordedCount||0) > 0 ? 'alert-warn' : 'alert-success');
   return `<div class="alert ${cls}" style="margin-bottom:12px;align-items:flex-start">
       <span class="alert-icon">${allDup?'ℹ':'📄'}</span>
       <span style="flex:1;font-size:12.5px;line-height:1.5">${lines.map(l=>`<div>${l}</div>`).join('')}</span>
