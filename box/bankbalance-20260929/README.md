@@ -30,11 +30,14 @@ slot for this in the app's config, and it isn't expected to change.
 
 ## Install
 
-```
-curl -fsSL -o /tmp/bb/install.sh https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/bankbalance-20260929/install.sh
+Never between 07:25 and 09:05 (statement/memo runs).
+
+```bash
+cd /tmp && rm -rf bb && mkdir bb && cd bb && B=https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/bankbalance-20260929 && \
+for f in SHA256SUMS bankbalance.cjs patch.py install.sh undo.sh; do curl -fsSO "$B/$f" || echo "MISSING $f"; done && \
+sha256sum -c SHA256SUMS && bash install.sh --check
 ```
 
-(download the whole folder, `sha256sum -c SHA256SUMS`, then `bash install.sh --check`, then `bash install.sh`
-— same pattern as every other bundle here.) Not between 07:25 and 09:05.
+then `bash install.sh`.
 
 Undo: `bash /workspace/backups/bankbalance-20260929/undo.sh`

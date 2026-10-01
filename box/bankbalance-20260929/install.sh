@@ -47,7 +47,10 @@ print('   menu:', 'updated' if tg.call('setMyCommands', commands=c).get('ok') el
 ") || say "   note: the menu could not be updated (the /balance command still works)."
 
 say "== 6/6 Test: a real check against the RCCG portal right now (this also updates the app's figure)"
-node /workspace/tools/bankbalance.cjs check | sed 's/^/   /'
+OUT=$(node /workspace/tools/bankbalance.cjs check 2>&1); RC=$?
+echo "$OUT" | sed 's/^/   /'
+[ "$RC" -eq 0 ] || fail "the real balance check failed (see the line above). The box files are installed; fix the" \
+  "portal login/credentials, then run: node /workspace/tools/bankbalance.cjs check"
 
 say ""
 say "DONE. In Telegram, send /balance to the bot in a minute or two."
