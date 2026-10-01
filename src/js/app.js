@@ -19657,6 +19657,8 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.supervisor.ai_takeover_minutes', sup.ai_takeover_minutes ?? 30, 'Month-end goes to the Clerk AI when the box is silent for (minutes)', 10, 240)}
         </div>
         <p class="at-note">Now: a report about every ${esc(String(Math.round(automationsExpectedPingMinutes(config))))} minutes.</p>
+        <button class="btn btn-secondary" onclick="App.sendTestAlert(this)" style="margin-top:4px">🧪 Send test alert</button>
+        <p class="at-note">Sends the "Clerk box not reporting" message right now, to whoever is ticked for Box-down alert — so you can confirm it actually reaches Telegram, without waiting for a real outage.</p>
         ${saveBar}
       </div>
     </details>
@@ -20137,6 +20139,36 @@ async function syncSatParishesSetting(config){
   await DB.saveSettings({ satParishes: next });
 }
 
+async function sendTestAlert(btn){
+  // The Worker tests against the already-SAVED config in KV, not whatever is sitting in this
+  // form — sending while there are unsaved edits (e.g. a just-ticked recipient) would silently
+  // test the old settings and could report success for a change that was never actually saved.
+  if(state.automations?.config){
+    const pending = JSON.stringify(collectAutomationsConfig());
+    const saved = JSON.stringify(state.automations.config);
+    if(pending !== saved){
+      showAlert('You have unsaved changes. Press "Save changes" first, then send the test alert — otherwise it tests the old settings.', 'danger');
+      return;
+    }
+  }
+  const restore = btn ? setBtnLoading(btn, 'Sending…') : null;
+  try{
+    const res = await authFetch('/api/automations/test-alert', { method:'POST' });
+    const data = await res.json().catch(()=>({}));
+    if(res.ok && data.ok){
+      showAlert(`Test alert sent (${data.sent} of ${data.of} people ticked for Box-down alert). Check Telegram.`, 'success');
+    } else if(res.ok){
+      showAlert(`Could not send: ${data.error || 'unknown reason'}.`, 'danger');
+    } else {
+      showAlert(data.error || 'Could not send the test alert.', 'danger');
+    }
+  } catch(e){
+    showAlert(`Could not reach the server: ${e.message}`, 'danger');
+  } finally {
+    if(restore) restore();
+  }
+}
+
 async function saveAutomationsConfig(btn){
   if(state.automations?.saving) return;
   state.automations.saving = true;
@@ -20210,7 +20242,7 @@ return {
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
   renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, openAutomationGuide, onRemHandlerBoxClick,
-  addAutomationParish, deleteAutomationParish, saveAutomationsConfig,
+  addAutomationParish, deleteAutomationParish, saveAutomationsConfig, sendTestAlert,
   atRefreshPicks, atPortalToggle, atClearPortalPw, atCopyInvite, atCopyPin, atCreateLogin, atResetPin, atRemoveLogin, atAddParishPerson, atParishesToggle, atReloadArea,
   satQuotaCopyFirst, saveSatQuotas,
   _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,

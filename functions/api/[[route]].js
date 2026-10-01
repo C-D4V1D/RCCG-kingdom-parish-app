@@ -3300,7 +3300,7 @@ async function handleAutomations(env, authz, method, param, body) {
   if (!authz?.finance) {
     return err('Automations are only available to signed-in Finance users.', 403);
   }
-  if (param !== 'health' && param !== 'config') {
+  if (param !== 'health' && param !== 'config' && param !== 'test-alert') {
     return err(`Route not found: ${method} /api/automations/${param || ''}`, 404);
   }
   const role = authz.finance.role;
@@ -3311,6 +3311,14 @@ async function handleAutomations(env, authz, method, param, body) {
   if (param === 'health') {
     if (method !== 'GET') return err(`Route not found: ${method} /api/automations/health`, 404);
     const r = await callClerkWatchdog(env, '/health');
+    if (r.errorResponse) return r.errorResponse;
+    return passThroughWorkerJson(r);
+  }
+
+  if (param === 'test-alert') {
+    if (method !== 'POST') return err(`Route not found: ${method} /api/automations/test-alert`, 404);
+    if (role !== 'it_admin') return err('Only the IT administrator can send a test alert.', 403);
+    const r = await callClerkWatchdog(env, '/test-alert', { method: 'POST' });
     if (r.errorResponse) return r.errorResponse;
     return passThroughWorkerJson(r);
   }
