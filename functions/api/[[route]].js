@@ -8548,9 +8548,93 @@ function bankReconEntryFromRow(row) {
   };
 }
 
+const bankReconRefKey = (r) => `${r.sourceTable}:${r.sourceId}`;
+
+/**
+ * Keys ('sourceTable:sourceId') of every app record already ticked off against a bank line —
+ * i.e. referenced in matched_refs_json of an 'auto' or 'resolved' entry. One app record can
+ * only ever explain one bank line, so these are removed from the candidate pool before
+ * matching. Refs that only appear in a needs_attention entry's candidates_json are NOT
+ * counted (nothing has been decided for them yet). `excludeId` skips one entry (used by
+ * resolve, so an entry never conflicts with itself).
+ */
+async function bankReconUsedRefKeys(DB, excludeId = null) {
+  const { results } = await DB.prepare(
+    `SELECT id, matched_refs_json FROM bank_recon_entries WHERE status IN ('auto','resolved')`
+  ).all();
+  const used = new Map(); // key -> entry id that uses it
+  for (const row of results || []) {
+    if (excludeId && row.id === excludeId) continue;
+    for (const r of safeJsonParse(row.matched_refs_json, []) || []) {
+      if (r && r.sourceTable && r.sourceId) used.set(bankReconRefKey(r), row.id);
+    }
+  }
+  return used;
+}
+
+// Per-table lookup for matchedDetails: the columns to read and how to turn a row into the
+// { date, amount, description } shown next to a matched bank line. Amounts mirror
+// buildReconciliationCandidatePool (the bank-side part of a split payment), so the figure
+// shown is the one that was actually matched.
+const BANK_RECON_DETAIL_LOOKUPS = {
+  income: {
+    cols: 'id, date, bank_transfer_amount, source, donor_name, notes',
+    map: r => ({ date: (r.date || '').slice(0, 10), amount: Number(r.bank_transfer_amount || 0),
+      description: r.donor_name ? `${r.source || 'income'}: ${r.donor_name}` : (r.notes || r.source || '') }),
+  },
+  expenses: {
+    cols: 'id, date, amount, payment_method, bank_amount, description',
+    map: r => ({ date: (r.date || '').slice(0, 10),
+      amount: Number((r.payment_method === 'split' ? r.bank_amount : r.amount) || 0), description: r.description || '' }),
+  },
+  remittances: {
+    cols: 'id, paid_date, created_at, amount, payment_method, bank_amount, cash_amount, label, notes',
+    map: r => ({ date: (r.paid_date || r.created_at || '').slice(0, 10),
+      amount: Number(splitRemittancePaid({ amount: r.amount, paymentMethod: r.payment_method, bankAmount: r.bank_amount, cashAmount: r.cash_amount }).bank || 0),
+      description: r.label || r.notes || '' }),
+  },
+  cash_transactions: {
+    cols: 'id, date, amount, type, description',
+    map: r => ({ date: (r.date || '').slice(0, 10), amount: Number(r.amount || 0), description: r.description || r.type || '' }),
+  },
+  petty_cash: {
+    cols: 'id, created_at, amount, payment_method, bank_amount, purpose, notes',
+    map: r => ({ date: (r.created_at || '').slice(0, 10),
+      amount: Number((r.payment_method === 'split' ? r.bank_amount : r.amount) || 0), description: r.purpose || r.notes || '' }),
+  },
+};
+
 async function getBankReconEntries(DB) {
   const { results } = await DB.prepare(`SELECT * FROM bank_recon_entries ORDER BY date DESC, created_at DESC`).all();
-  return ok((results || []).map(bankReconEntryFromRow));
+  const entries = (results || []).map(bankReconEntryFromRow);
+
+  // One IN (...) query per source table (chunked under D1's 100-bound-parameter limit),
+  // never one query per ref.
+  const idsByTable = new Map();
+  for (const e of entries) {
+    for (const r of Array.isArray(e.matchedRefs) ? e.matchedRefs : []) {
+      if (!r || !BANK_RECON_DETAIL_LOOKUPS[r.sourceTable] || !r.sourceId) continue;
+      if (!idsByTable.has(r.sourceTable)) idsByTable.set(r.sourceTable, new Set());
+      idsByTable.get(r.sourceTable).add(String(r.sourceId));
+    }
+  }
+  const details = new Map(); // 'table:id' -> detail
+  for (const [table, idSet] of idsByTable) {
+    const { cols, map } = BANK_RECON_DETAIL_LOOKUPS[table];
+    const ids = [...idSet];
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      const { results: rows } = await DB.prepare(
+        `SELECT ${cols} FROM ${table} WHERE id IN (${chunk.map(() => '?').join(',')})`
+      ).bind(...chunk).all();
+      for (const row of rows || []) details.set(`${table}:${row.id}`, { sourceTable: table, sourceId: row.id, ...map(row) });
+    }
+  }
+  for (const e of entries) {
+    e.matchedDetails = (Array.isArray(e.matchedRefs) ? e.matchedRefs : []).map(r =>
+      details.get(bankReconRefKey(r)) || { sourceTable: r?.sourceTable, sourceId: r?.sourceId, missing: true });
+  }
+  return ok(entries);
 }
 
 async function resolveBankReconEntry(DB, authz, id, body) {
@@ -8561,9 +8645,38 @@ async function resolveBankReconEntry(DB, authz, id, body) {
     ? body.chosenRefs.filter(r => r && r.sourceTable && r.sourceId).map(r => ({ sourceTable: String(r.sourceTable), sourceId: String(r.sourceId) }))
     : [];
   if (!addNew && chosenRefs.length === 0) return err('chosenRefs is required (or set addNew:true)', 400);
+  if (!addNew) {
+    // One app record can only explain one bank line.
+    const used = await bankReconUsedRefKeys(DB, id);
+    const clash = chosenRefs.find(r => used.has(bankReconRefKey(r)));
+    if (clash) {
+      return err(`That record (${clash.sourceTable} ${clash.sourceId}) is already matched to another bank line `
+        + `(entry ${used.get(bankReconRefKey(clash))}). Unmatch that line first if this is the right one.`, 409);
+    }
+  }
   const now = new Date().toISOString();
   await DB.prepare(`UPDATE bank_recon_entries SET status='resolved', matched_refs_json=?, resolved_by=?, resolved_at=? WHERE id=?`)
     .bind(JSON.stringify(addNew ? [] : chosenRefs), authz?.finance?.name || authz?.finance?.id || '', now, id).run();
+  const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  return ok(bankReconEntryFromRow(updated));
+}
+
+/** "This bank line needs nothing from the app" (e.g. an internal transfer) — set aside. */
+async function ignoreBankReconEntry(DB, authz, id) {
+  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('Bank reconciliation entry not found', 404);
+  await DB.prepare(`UPDATE bank_recon_entries SET status='ignored', matched_refs_json='[]', resolved_by=?, resolved_at=? WHERE id=?`)
+    .bind(authz?.finance?.name || authz?.finance?.id || '', new Date().toISOString(), id).run();
+  const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  return ok(bankReconEntryFromRow(updated));
+}
+
+/** Undo a (wrong) match: back to 'unrecorded' with no refs, so those records are free again. */
+async function unmatchBankReconEntry(DB, id) {
+  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('Bank reconciliation entry not found', 404);
+  await DB.prepare(`UPDATE bank_recon_entries SET status='unrecorded', matched_refs_json='[]', candidates_json='[]', resolved_by='', resolved_at=NULL WHERE id=?`)
+    .bind(id).run();
   const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
   return ok(bankReconEntryFromRow(updated));
 }
@@ -8729,8 +8842,29 @@ async function handleBankReconStatement(DB, env, authz, body) {
   // down must never block an in-person statement upload) — use the default window directly.
   const windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS;
   const pool = await fetchReconciliationCandidatePool(DB);
+  // App records already ticked off against some bank line can never be matched again; each
+  // new auto match below is added too, so two identical lines can't both claim one record.
+  const usedRefs = await bankReconUsedRefKeys(DB);
 
-  let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0;
+  // Re-upload dedupe: statement lines already filed by an earlier upload (same date,
+  // direction, trimmed narration and amount within 0.005). Snapshotted before this upload
+  // and consumed one-for-one, so two genuinely identical lines on ONE statement are both
+  // filed, while re-uploading that statement files neither again.
+  const { results: priorStmtRows } = await DB.prepare(
+    `SELECT id, date, amount, direction, narration FROM bank_recon_entries WHERE balance_history_id LIKE 'stmt:%'`
+  ).all();
+  const priorStmt = (priorStmtRows || []).map(r => ({
+    date: String(r.date || '').slice(0, 10), amount: Number(r.amount || 0), direction: r.direction,
+    narration: String(r.narration || '').trim(), consumed: false,
+  }));
+  const takePriorStmtLine = (date, amount, direction, narration) => {
+    const hit = priorStmt.find(p => !p.consumed && p.date === date && p.direction === direction
+      && p.narration === narration && Math.abs(p.amount - amount) < 0.005);
+    if (hit) hit.consumed = true;
+    return !!hit;
+  };
+
+  let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0, duplicateCount = 0;
   for (const item of parsed.items) {
     const date = String(item.date || '').slice(0, 10);
     const amount = Math.abs(Number(item.amount || 0));
@@ -8738,16 +8872,20 @@ async function handleBankReconStatement(DB, env, authz, body) {
     const narration = String(item.narration || '').trim();
     const direction = item.type === 'expense' ? 'out' : 'in';
 
+    if (takePriorStmtLine(date, amount, direction, narration)) { duplicateCount++; continue; }
+
     // Bank-charge auto-filing: real narration text is only ever available here (the balance
     // sweep has none), and a charge is always money leaving the account.
     const chargeSubCategory = direction === 'out' ? classifyBankChargeNarration(narration, amount) : null;
     if (chargeSubCategory) {
-      // Dedupe within ±1 day so re-uploading an overlapping statement period never
-      // double-files the same charge.
-      const existing = await DB.prepare(
-        `SELECT id FROM expenses WHERE category='bank' AND amount=? AND date BETWEEN ? AND ?`
-      ).bind(amount, addDaysYmd(date, -1), addDaysYmd(date, 1)).first();
-      let expenseId = existing?.id;
+      // Reuse an existing same-amount bank-charge expense within ±1 day (e.g. one keyed in
+      // by hand) — but only one not already ticked off against another bank line; a second
+      // identical charge is a genuinely separate charge and gets its own expense.
+      const { results: existingCharges } = await DB.prepare(
+        `SELECT id FROM expenses WHERE category='bank' AND amount=? AND date BETWEEN ? AND ? ORDER BY date, id`
+      ).bind(amount, addDaysYmd(date, -1), addDaysYmd(date, 1)).all();
+      let expenseId = (existingCharges || []).map(r => r.id)
+        .find(eid => !usedRefs.has(bankReconRefKey({ sourceTable: 'expenses', sourceId: eid })));
       if (!expenseId) {
         expenseId = newId('EXP-');
         await createExpense(DB, {
@@ -8758,6 +8896,7 @@ async function handleBankReconStatement(DB, env, authz, body) {
         });
       }
       chargeCount++; autoCount++;
+      usedRefs.set(bankReconRefKey({ sourceTable: 'expenses', sourceId: expenseId }), 'this upload');
       await insertBankReconEntry(DB, {
         balanceHistoryId: `stmt:${newId()}`, date, amount, direction, status: 'auto',
         matchedRefs: [{ sourceTable: 'expenses', sourceId: expenseId }], candidates: [], narration,
@@ -8765,9 +8904,11 @@ async function handleBankReconStatement(DB, env, authz, body) {
       continue; // charges never go through the subset-sum matcher
     }
 
-    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays);
+    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays)
+      .filter(c => !usedRefs.has(bankReconRefKey(c)));
     const result = matchBalanceMovement({ amount, direction, date }, candidates);
     const matchedRefs = result.status === 'auto' ? result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId })) : [];
+    for (const r of matchedRefs) usedRefs.set(bankReconRefKey(r), 'this upload');
     const candidatesOut = result.status === 'needs_attention'
       ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
       : [];
@@ -8780,11 +8921,11 @@ async function handleBankReconStatement(DB, env, authz, body) {
     else unrecordedCount++;
   }
 
-  return ok({ itemCount: parsed.items.length, autoCount, chargeCount, needsAttentionCount, unrecordedCount });
+  return ok({ itemCount: parsed.items.length, autoCount, chargeCount, needsAttentionCount, unrecordedCount, duplicateCount });
 }
 
-// GET /api/bank-recon/entries (it_admin or accountant) and POST .../entries/:id/resolve +
-// POST /api/bank-recon/statement (it_admin only) — same gating pattern as handleAutomations.
+// GET /api/bank-recon/entries (it_admin or accountant) and POST .../entries/:id/{resolve,ignore,unmatch}
+// + POST /api/bank-recon/statement (it_admin only) — same gating pattern as handleAutomations.
 async function handleBankRecon(DB, env, authz, method, parts, body) {
   if (!authz?.finance) return err('Bank reconciliation is only available to signed-in Finance users.', 403);
   const role = authz.finance.role;
@@ -8799,6 +8940,14 @@ async function handleBankRecon(DB, env, authz, method, parts, body) {
     if (method === 'POST' && id && action === 'resolve') {
       if (role !== 'it_admin') return err('Only the IT administrator can resolve bank reconciliation entries.', 403);
       return await resolveBankReconEntry(DB, authz, id, body);
+    }
+    if (method === 'POST' && id && action === 'ignore') {
+      if (role !== 'it_admin') return err('Only the IT administrator can ignore bank reconciliation entries.', 403);
+      return await ignoreBankReconEntry(DB, authz, id);
+    }
+    if (method === 'POST' && id && action === 'unmatch') {
+      if (role !== 'it_admin') return err('Only the IT administrator can unmatch bank reconciliation entries.', 403);
+      return await unmatchBankReconEntry(DB, id);
     }
   }
   if (section === 'statement' && method === 'POST') {
@@ -8856,6 +9005,7 @@ async function runBankReconciliationSweep(DB, env, request) {
 
   const windowDays = await bankReconMatchWindowDays(env);
   const pool = await fetchReconciliationCandidatePool(DB);
+  const usedRefs = await bankReconUsedRefKeys(DB); // see handleBankReconStatement
 
   let previousBalance = cursor.lastBalance;
   let startIndex = 0;
@@ -8885,9 +9035,11 @@ async function runBankReconciliationSweep(DB, env, request) {
     const date = String(entry.checked_at || '').slice(0, 10);
     const direction = delta > 0 ? 'in' : 'out';
     const amount = Math.abs(delta);
-    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays);
+    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays)
+      .filter(c => !usedRefs.has(bankReconRefKey(c)));
     const result = matchBalanceMovement({ amount, direction, date }, candidates);
     const matchedRefs = result.status === 'auto' ? result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId })) : [];
+    for (const r of matchedRefs) usedRefs.set(bankReconRefKey(r), 'this sweep');
     const candidatesOut = result.status === 'needs_attention'
       ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
       : [];
