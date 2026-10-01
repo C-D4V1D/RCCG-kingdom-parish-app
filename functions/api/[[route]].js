@@ -8641,7 +8641,7 @@ async function ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
     body: JSON.stringify({
-      model: 'gpt-4o',
+      model: 'gpt-6.1-sol',
       messages: [{
         role: 'user',
         content: [
@@ -8694,18 +8694,27 @@ async function handleBankReconStatement(DB, env, authz, body) {
     : [];
   if (!images.length) return err('images is required (at least one photo)', 400);
 
-  const pageTexts = [];
+  // Validate every photo has data before firing any requests — fail fast rather than
+  // burn AI calls on the valid ones only to reject on a later, empty one.
   for (let i = 0; i < images.length; i++) {
-    const imageBase64 = String(images[i]?.imageBase64 || '').trim();
-    const mimeType = String(images[i]?.mimeType || 'image/jpeg').trim();
-    if (!imageBase64) return err(`Photo ${i + 1} of ${images.length} is missing image data`, 400);
-    try {
-      pageTexts.push(await ocrStatementPhoto(env, DB, imageBase64, mimeType));
-    } catch (e) {
-      // Fail the whole upload rather than silently filing a partial statement — an
-      // incomplete read must never look the same as a complete, successfully-matched one.
-      return err(`Could not read photo ${i + 1} of ${images.length}: ${e.message}`, 502);
-    }
+    if (!String(images[i]?.imageBase64 || '').trim()) return err(`Photo ${i + 1} of ${images.length} is missing image data`, 400);
+  }
+  // Each photo's OCR is independent, so they run in parallel rather than one-by-one —
+  // a pure speed win (the slowest single photo, not the sum of all of them) with no
+  // accuracy tradeoff, since it's the exact same per-photo call either way. Promise.all
+  // preserves array order regardless of which photo's call actually finishes first, so
+  // the joined text still reads page 1, then page 2, etc.
+  let pageTexts;
+  try {
+    pageTexts = await Promise.all(images.map((img) =>
+      ocrStatementPhoto(env, DB, String(img.imageBase64).trim(), String(img.mimeType || 'image/jpeg').trim())
+    ));
+  } catch (e) {
+    // Fail the whole upload rather than silently filing a partial statement — an
+    // incomplete read must never look the same as a complete, successfully-matched one.
+    // (Promise.all rejects with the first failure; which photo it was is secondary to
+    // just surfacing the real reason when several ran concurrently.)
+    return err(`Could not read the statement: ${e.message}`, 502);
   }
   const statementText = pageTexts.join('\n');
 
