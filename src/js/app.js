@@ -20140,6 +20140,17 @@ async function syncSatParishesSetting(config){
 }
 
 async function sendTestAlert(btn){
+  // The Worker tests against the already-SAVED config in KV, not whatever is sitting in this
+  // form — sending while there are unsaved edits (e.g. a just-ticked recipient) would silently
+  // test the old settings and could report success for a change that was never actually saved.
+  if(state.automations?.config){
+    const pending = JSON.stringify(collectAutomationsConfig());
+    const saved = JSON.stringify(state.automations.config);
+    if(pending !== saved){
+      showAlert('You have unsaved changes. Press "Save changes" first, then send the test alert — otherwise it tests the old settings.', 'danger');
+      return;
+    }
+  }
   const restore = btn ? setBtnLoading(btn, 'Sending…') : null;
   try{
     const res = await authFetch('/api/automations/test-alert', { method:'POST' });
