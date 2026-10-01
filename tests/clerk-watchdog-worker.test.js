@@ -356,3 +356,49 @@ test('POST /test-alert sends one test message (and needs the token)', async () =
     assert.match(nokey.error, /no bot key/);
   } finally { s.restore(); }
 });
+
+test('GET /bank-balance is null before the box ever reports one', async () => {
+  const env = createEnv();
+  const r = await readJson(await worker.fetch(req('/bank-balance'), env));
+  assert.deepEqual(r, { balance: null, checked_at: null });
+});
+
+test('POST /bank-balance stores the figure with a server-stamped time; GET returns it', async () => {
+  const env = createEnv();
+  const post = await readJson(await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 123957.0 } }), env));
+  assert.deepEqual(post, { ok: true });
+  const get = await readJson(await worker.fetch(req('/bank-balance'), env));
+  assert.equal(get.balance, 123957.0);
+  assert.ok(get.checked_at && !Number.isNaN(Date.parse(get.checked_at)));
+});
+
+test('POST /bank-balance rejects a non-numeric balance and needs the token', async () => {
+  const env = createEnv();
+  const bad = await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 'not-a-number' } }), env);
+  assert.equal(bad.status, 400);
+  const unauth = await worker.fetch(req('/bank-balance', { method: 'POST', token: null, body: { balance: 1 } }), env);
+  assert.equal(unauth.status, 401);
+});
+
+test('POST /bank-balance rejects a missing/null/blank balance rather than silently storing ₦0', async () => {
+  const env = createEnv();
+  // Seed a real, valid balance first...
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 123957.0 } }), env);
+  // ...then confirm a failed portal check (no figure, or an empty/null one) can never overwrite it.
+  for (const bad of [{}, { balance: null }, { balance: '' }]) {
+    const res = await worker.fetch(req('/bank-balance', { method: 'POST', body: bad }), env);
+    assert.equal(res.status, 400, `body ${JSON.stringify(bad)} must be rejected`);
+  }
+  const get = await readJson(await worker.fetch(req('/bank-balance'), env));
+  assert.equal(get.balance, 123957.0, 'the last valid balance must still be the one stored');
+});
+
+test('bank_balance_refresh_requested travels through the generic /events mailbox', async () => {
+  const env = createEnv();
+  const post = await readJson(await worker.fetch(req('/events', { method: 'POST', body: { event: 'bank_balance_refresh_requested', requested_by: 'David' } }), env));
+  assert.ok(post.ok && post.id);
+  const get = await readJson(await worker.fetch(req('/events'), env));
+  assert.equal(get.events.length, 1);
+  assert.equal(get.events[0].event, 'bank_balance_refresh_requested');
+  assert.equal(get.events[0].requested_by, 'David');
+});
