@@ -402,3 +402,85 @@ test('bank_balance_refresh_requested travels through the generic /events mailbox
   assert.equal(get.events[0].event, 'bank_balance_refresh_requested');
   assert.equal(get.events[0].requested_by, 'David');
 });
+
+// ── balance history ───────────────────────────────────────────────
+test('POST /bank-balance also writes a history entry and updates balance_last, alongside the single bank_balance key', async () => {
+  const env = createEnv();
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 100 } }), env);
+  const single = JSON.parse(await env.KV.get('bank_balance'));
+  assert.equal(single.balance, 100);
+
+  const last = await env.KV.get('balance_last');
+  assert.ok(last);
+  const entry = JSON.parse(await env.KV.get(`bal:${last}`));
+  assert.equal(entry.balance, 100);
+  assert.equal(entry.id, last);
+  assert.ok(entry.checked_at && !Number.isNaN(Date.parse(entry.checked_at)));
+  assert.equal(entry.checked_at, single.checked_at);
+});
+
+test('GET /balance-history with no after returns entries in ascending id order, capped at 50', async () => {
+  const env = createEnv();
+  const first = await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 1 } }), env);
+  assert.equal(first.status, 200);
+  await new Promise(r => setTimeout(r, 2));
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 2 } }), env);
+  await new Promise(r => setTimeout(r, 2));
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 3 } }), env);
+
+  const all = await readJson(await worker.fetch(req('/balance-history'), env));
+  assert.equal(all.history.length, 3);
+  assert.deepEqual(all.history.map(h => h.balance), [1, 2, 3]);
+  assert.equal(all.last, await env.KV.get('balance_last'));
+});
+
+test('GET /balance-history?after=<id> returns only entries after that id', async () => {
+  const env = createEnv();
+  const post1 = await readJson(await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 10 } }), env));
+  const last1 = await env.KV.get('balance_last');
+  await new Promise(r => setTimeout(r, 2));
+  await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 20 } }), env);
+  const last2 = await env.KV.get('balance_last');
+
+  const after = await readJson(await worker.fetch(req(`/balance-history?after=${last1}`), env));
+  assert.deepEqual(after.history.map(h => h.id), [last2]);
+  assert.equal(after.history[0].balance, 20);
+  assert.equal(after.last, last2);
+
+  const none = await readJson(await worker.fetch(req(`/balance-history?after=${last2}`), env));
+  assert.deepEqual(none, { history: [], last: last2 });
+  assert.ok(post1.ok);
+});
+
+test('validateConfig checks the new balance-check supervisor fields', () => {
+  const base = structuredClone(DEFAULT_CONFIG);
+  assert.deepEqual(validateConfig(base), []);
+
+  const badInterval = structuredClone(DEFAULT_CONFIG);
+  badInterval.automations.supervisor.balance_check_interval_minutes = 0;
+  assert.ok(validateConfig(badInterval).some(e => e.includes('balance_check_interval_minutes')));
+  badInterval.automations.supervisor.balance_check_interval_minutes = -5;
+  assert.ok(validateConfig(badInterval).some(e => e.includes('balance_check_interval_minutes')));
+
+  for (const field of ['balance_check_active_from', 'balance_check_active_until']) {
+    const bad = structuredClone(DEFAULT_CONFIG);
+    bad.automations.supervisor[field] = '25:00';
+    assert.ok(validateConfig(bad).some(e => e.includes(field)), `${field} must reject an invalid time`);
+    const bad2 = structuredClone(DEFAULT_CONFIG);
+    bad2.automations.supervisor[field] = 'not-a-time';
+    assert.ok(validateConfig(bad2).some(e => e.includes(field)), `${field} must reject a non-time string`);
+  }
+
+  const badWindow = structuredClone(DEFAULT_CONFIG);
+  badWindow.automations.supervisor.balance_match_window_days = 0;
+  assert.ok(validateConfig(badWindow).some(e => e.includes('balance_match_window_days')));
+  badWindow.automations.supervisor.balance_match_window_days = -1;
+  assert.ok(validateConfig(badWindow).some(e => e.includes('balance_match_window_days')));
+
+  const good = structuredClone(DEFAULT_CONFIG);
+  good.automations.supervisor.balance_check_interval_minutes = 30;
+  good.automations.supervisor.balance_check_active_from = '07:00';
+  good.automations.supervisor.balance_check_active_until = '21:00';
+  good.automations.supervisor.balance_match_window_days = 14;
+  assert.deepEqual(validateConfig(good), []);
+});

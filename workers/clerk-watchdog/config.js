@@ -108,7 +108,9 @@ export const DEFAULT_CONFIG = {
     health_note: { enabled: true, day: "sat", after_time: "18:00", log_trim_mb: 1, log_trim_lines: 2000 },
     upload_bot: { admin_max_kb: 500, finance_max_kb: 1000, jpeg_quality: 85, max_width_px: 1800 },
     drive_sync: { interval_minutes: 10 },
-    supervisor: { interval_seconds: 300, ping_every_cycles: 2 }, // ping every 10 min so the dashboard stays green
+    supervisor: { interval_seconds: 300, ping_every_cycles: 2, // ping every 10 min so the dashboard stays green
+      balance_check_interval_minutes: 15, balance_check_active_from: "06:00", balance_check_active_until: "22:00",
+      balance_match_window_days: 7 },
   },
   // Month-end filing (remittance + attendance on the RCCG portal, check email, Generate RRR).
   // handler: who runs it — "clerk_ai" (the Clerk AI routine, as before) or "box" (the Clerk box scripts).
@@ -324,6 +326,14 @@ export function validateConfig(cfg) {
     else {
       if (!isNonNegFinite(sup.interval_seconds)) errors.push("automations.supervisor.interval_seconds must be a number >= 0");
       if (!isNonNegFinite(sup.ping_every_cycles)) errors.push("automations.supervisor.ping_every_cycles must be a number >= 0");
+      if (!(isNonNegFinite(sup.balance_check_interval_minutes) && sup.balance_check_interval_minutes >= 1)) {
+        errors.push("automations.supervisor.balance_check_interval_minutes must be a number >= 1");
+      }
+      if (!isTime(sup.balance_check_active_from)) errors.push("automations.supervisor.balance_check_active_from must be HH:MM 24h");
+      if (!isTime(sup.balance_check_active_until)) errors.push("automations.supervisor.balance_check_active_until must be HH:MM 24h");
+      if (!(isNonNegFinite(sup.balance_match_window_days) && sup.balance_match_window_days >= 1)) {
+        errors.push("automations.supervisor.balance_match_window_days must be a number >= 1");
+      }
     }
   }
 
