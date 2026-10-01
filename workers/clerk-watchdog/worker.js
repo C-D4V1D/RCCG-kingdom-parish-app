@@ -201,6 +201,17 @@ export default {
       return json({ config_version: +(v || 0), events_last: e || null });
     }
 
+    // Generic notify endpoint: the app can trigger a Telegram send for any routed message type
+    // without a bespoke endpoint per type (unlike /test-alert, which is hardcoded to watchdog_down).
+    if (req.method === "POST" && url.pathname === "/notify") {
+      let body;
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const type = String(body?.type || "").trim();
+      const text = String(body?.text || "").trim();
+      if (!type || !text) return json({ error: "type and text are required" }, 400);
+      return json(await telegram(env, type, text));
+    }
+
     if (req.method === "GET" && url.pathname === "/status") {
       const [p, w, c, r] = await Promise.all(["last_ping", "last_wake", "wake_config", "last_result"].map(k => env.KV.get(k)));
       const cfg = c ? JSON.parse(c) : null;

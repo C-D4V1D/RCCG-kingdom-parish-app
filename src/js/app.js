@@ -18777,6 +18777,7 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'sunday_note',               label:'Sunday memo-check note' },
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
+  { key:'bank_transaction_needs_review', label:'Bank transaction needs review' },
 ];
 // Who gets a message type the saved settings don't have yet (added after they were saved). Without this its
 // boxes would show unticked and the next Save would switch that message off for everyone.
@@ -18786,6 +18787,7 @@ const AUTOMATION_ROUTING_DEFAULTS = {
     david: { telegram: true, email: true }, divine: { telegram: true, email: true },
     fabian: { telegram: true, email: true }, pastor: { telegram: true, email: true },
   },
+  bank_transaction_needs_review: { david: { telegram: true, email: false } },
 };
 // What each message is, when the box sends it and roughly what it looks like on Telegram (Automations → Message
 // guide). Examples only: the real message fills in the live figures and names, so the wording can differ a little.
@@ -18884,6 +18886,11 @@ const AUTOMATION_MESSAGE_GUIDE = {
     what: 'The box needed the Church Clerk AI (a new memo, a due statement or a scheduler problem) but couldn\'t wake it, so it tells you directly.',
     when: 'Straight away, when a wake-up fails.',
     sample: '⚠️ <b>Monthly statement due, not sent yet</b>\n28 Sep – 25 Oct 2026\n\nCut-off: 25 Oct 2026\nProblem: couldn\'t wake Church Clerk (webhook failed)\n\n<b>Next step:</b> ask Church Clerk in chat to send it.',
+  },
+  bank_transaction_needs_review: {
+    what: 'A real bank balance change the box found that could match more than one combination of your own recorded entries — you pick which one is right from the Bank page.',
+    when: 'Whenever the periodic balance check or an uploaded statement finds an ambiguous match.',
+    sample: '⚠️ A ₦52,000 drop on 9 Oct could match 2 different combinations of your expense records.\nOpen Bank → Reconciliation in the app to pick the right one.',
   },
 };
 function automationsMessageGuideHtml(keys){

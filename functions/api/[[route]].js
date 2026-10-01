@@ -3218,6 +3218,9 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     // ── /api/automations/{health,config} ─────────────────────────
     if (route === 'automations') return await handleAutomations(env, authz, method, param, body);
 
+    // ── /api/bank-recon/{entries,statement} ───────────────────────
+    if (route === 'bank-recon') return await handleBankRecon(DB, env, authz, method, parts, body);
+
     return err(`Route not found: ${method} /api/${path}`, 404);
 
   } catch (e) {
@@ -3893,6 +3896,26 @@ async function handleInit(DB) {
       narration   TEXT DEFAULT '',
       message_id  TEXT DEFAULT '',
       created_at  TEXT DEFAULT (datetime('now'))
+    )`,
+    // Bank reconciliation (Finance portal, PR 3 of 4): one row per real bank balance
+    // movement (from the periodic sweep) or statement line (from an uploaded photo),
+    // classified against the church's own records by matchBalanceMovement. Dedupe is by
+    // balance_history_id in application code (see runBankReconciliationSweep) rather than
+    // a unique index, since a statement-derived row uses a synthetic 'stmt:<uuid>' id that
+    // never collides anyway.
+    `CREATE TABLE IF NOT EXISTS bank_recon_entries (
+      id                  TEXT PRIMARY KEY,
+      balance_history_id  TEXT NOT NULL,
+      date                TEXT NOT NULL,
+      amount              REAL NOT NULL,
+      direction           TEXT NOT NULL,
+      status              TEXT NOT NULL DEFAULT 'auto',
+      matched_refs_json   TEXT DEFAULT '[]',
+      candidates_json      TEXT DEFAULT '[]',
+      narration           TEXT DEFAULT '',
+      resolved_by         TEXT DEFAULT '',
+      resolved_at         TEXT DEFAULT '',
+      created_at          TEXT DEFAULT (datetime('now'))
     )`,
   ];
 
@@ -8325,6 +8348,492 @@ function dateDistanceInDays(dateA, dateB) {
   return Math.abs(a - b) / (24 * 60 * 60 * 1000);
 }
 
+// Ported from src/js/app.js (client-only there; the reconciliation candidate pool below needs
+// them server-side too) — keep these three in sync with their client originals if either changes.
+function isDepositEffective(t) {
+  const vs = t.verificationStatus || '';
+  return vs !== 'pending' && vs !== 'flagged' && vs !== 'deleted';
+}
+function isLoggedExpense(e) {
+  if (!e) return false;
+  return e.status === 'approved' || e.status === 'pending' || e.status === 'pending_approval';
+}
+function splitRemittancePaid(r) {
+  const amount = r.amount || 0;
+  if (r.bankAmount != null || r.cashAmount != null) return { bank: r.bankAmount || 0, cash: r.cashAmount || 0 };
+  return r.paymentMethod === 'cash' ? { bank: 0, cash: amount } : { bank: amount, cash: 0 };
+}
+
+// ── BANK RECONCILIATION (Finance portal — the main church account; separate from the KPSC
+// welfare-fund reconciliation above, which has its own table and its own simple 1:1 matcher).
+// Matches one real bank balance movement (amount, direction, date) against combinations of the
+// church's own unreconciled records within a date window — "one withdrawal = three expense
+// entries added together" and its mirror image. Deterministic subset-sum, not AI: exact
+// arithmetic over a bounded set of candidates is something plain code gets right every time,
+// which an LLM asked to add up a list of numbers occasionally does not.
+const RECON_MAX_CANDIDATES = 20;    // closest-dated candidates considered, to bound the search
+const RECON_MAX_COMBO_SIZE = 4;     // "one bank movement = up to N app entries added together"
+const RECON_AMOUNT_EPSILON = 0.5;   // naira; absorbs float rounding, not a real discrepancy
+
+/**
+ * Every combination of `candidates` (already filtered by the caller to the right direction and
+ * date window) whose amounts sum to `targetAmount` within RECON_AMOUNT_EPSILON. Returns combos
+ * sorted best-first (closest total date distance, then fewest items). Candidate count is capped
+ * at RECON_MAX_CANDIDATES (closest-dated to `anchorDate` first) and combo size at
+ * RECON_MAX_COMBO_SIZE, so the search is always bounded (worst case C(20,4) = 4845 sums).
+ */
+function findMatchingCombinations(targetAmount, candidates, anchorDate) {
+  const pool = [...candidates]
+    .sort((a, b) => dateDistanceInDays(a.date, anchorDate) - dateDistanceInDays(b.date, anchorDate))
+    .slice(0, RECON_MAX_CANDIDATES);
+  const results = [];
+  const picked = [];
+  (function combo(start, sum) {
+    if (picked.length > 0 && Math.abs(sum - targetAmount) <= RECON_AMOUNT_EPSILON) {
+      const totalDateDistance = picked.reduce((s, c) => s + dateDistanceInDays(c.date, anchorDate), 0);
+      results.push({ items: [...picked], totalDateDistance });
+    }
+    if (picked.length >= RECON_MAX_COMBO_SIZE || sum > targetAmount + RECON_AMOUNT_EPSILON) return;
+    for (let i = start; i < pool.length; i++) {
+      picked.push(pool[i]);
+      combo(i + 1, sum + pool[i].amount);
+      picked.pop();
+    }
+  })(0, 0);
+  results.sort((a, b) => a.totalDateDistance - b.totalDateDistance || a.items.length - b.items.length);
+  return results;
+}
+
+/**
+ * Classifies one bank movement against its candidate pool (already filtered by the caller to the
+ * right direction and ±match-window days). Returns:
+ *   { status: 'unrecorded', matches: [] }                       — nothing adds up; ask David to add it
+ *   { status: 'auto', matches: [candidate,...] }                 — one clear combination, tick it off
+ *   { status: 'needs_attention', matches: [[candidate,...],...] } — several equally-plausible combinations
+ * "Confident" means either there's only one valid combination at all, or the best one is clearly
+ * better-fitting (date-wise) than the next-best and not just a reshuffle of the same count of
+ * items — anything closer than that is treated as genuinely ambiguous rather than guessed at.
+ */
+function matchBalanceMovement(movement, candidates) {
+  const combos = findMatchingCombinations(movement.amount, candidates, movement.date);
+  if (combos.length === 0) return { status: 'unrecorded', matches: [] };
+  const [best, runnerUp] = combos;
+  const confident = !runnerUp
+    || (runnerUp.totalDateDistance - best.totalDateDistance > 2 && runnerUp.items.length !== best.items.length);
+  if (combos.length === 1 || confident) return { status: 'auto', matches: best.items };
+  return { status: 'needs_attention', matches: combos.slice(0, 5).map(c => c.items) };
+}
+
+/**
+ * The candidate pool of "things that touch the real bank account" — the exact same line items
+ * calcChurchBalance (src/js/app.js) sums into bankBalance, just listed individually instead of
+ * netted into one number, so the matcher can never disagree with the balance figure the app
+ * already shows. `direction` is 'in' for money arriving, 'out' for money leaving.
+ */
+function buildReconciliationCandidatePool({ income, expenses, remittances, cashTransactions, pettyHistory }) {
+  const pool = [];
+  for (const r of income || []) {
+    const amt = Number(r.bankTransferAmount || 0);
+    if (amt > 0) pool.push({ sourceTable: 'income', sourceId: r.id, date: (r.date || '').slice(0, 10), amount: amt, direction: 'in' });
+  }
+  for (const t of cashTransactions || []) {
+    if (t.type === 'cash_deposit' && isDepositEffective(t)) {
+      pool.push({ sourceTable: 'cash_transactions', sourceId: t.id, date: (t.date || '').slice(0, 10), amount: Number(t.amount || 0), direction: 'in' });
+    } else if (t.type === 'withdrawal') {
+      pool.push({ sourceTable: 'cash_transactions', sourceId: t.id, date: (t.date || '').slice(0, 10), amount: Number(t.amount || 0), direction: 'out' });
+    }
+  }
+  for (const e of (expenses || []).filter(isLoggedExpense)) {
+    let amt = 0;
+    if (e.paymentMethod === 'bank_transfer') amt = Number(e.amount || 0);
+    else if (e.paymentMethod === 'split') amt = Number(e.bankAmount || 0);
+    if (amt > 0) pool.push({ sourceTable: 'expenses', sourceId: e.id, date: (e.date || '').slice(0, 10), amount: amt, direction: 'out' });
+  }
+  for (const r of (remittances || []).filter(rr => rr.status === 'paid')) {
+    const amt = splitRemittancePaid(r).bank;
+    if (amt > 0) pool.push({ sourceTable: 'remittances', sourceId: r.id, date: (r.paidDate || r.createdAt || '').slice(0, 10), amount: amt, direction: 'out' });
+  }
+  for (const h of pettyHistory || []) {
+    if (h.type === 'refill' && (h.status === 'approved' || h.status === 'settled')) {
+      const amt = h.paymentMethod === 'split' ? Number(h.bankAmount || 0) : (h.paymentMethod === 'bank_transfer' ? Number(h.amount || 0) : 0);
+      if (amt > 0) pool.push({ sourceTable: 'petty_cash', sourceId: h.id, date: (h.createdAt || '').slice(0, 10), amount: amt, direction: 'out' });
+    } else if (h.type === 'petty_to_bank' && (h.status === 'approved' || h.status === 'settled')) {
+      pool.push({ sourceTable: 'petty_cash', sourceId: h.id, date: (h.createdAt || '').slice(0, 10), amount: Number(h.amount || 0), direction: 'in' });
+    }
+  }
+  return pool;
+}
+
+// ── BANK RECONCILIATION — app routes, the sweep job and the statement upload ─────────────
+// Everything above this point (the matching engine) is shared, fully-tested logic that this
+// PR must not change. Everything below turns it into real D1 rows, Worker calls and HTTP
+// routes for the Finance portal's Bank → Reconciliation page. KPSC's own reconciliation
+// table/matcher (below) is untouched and entirely separate.
+
+const BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS = 7;
+
+/** automations.supervisor.balance_match_window_days from the Worker's config, default 7. */
+async function bankReconMatchWindowDays(env) {
+  try {
+    const r = await callClerkWatchdog(env, '/config');
+    const w = r?.data?.config?.automations?.supervisor?.balance_match_window_days;
+    if (Number.isFinite(w) && w >= 1) return w;
+  } catch { /* unreachable Worker: fall back to the default window */ }
+  return BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS;
+}
+
+/**
+ * The same five-table candidate pool buildReconciliationCandidatePool expects, read
+ * straight from D1 and mapped from each table's snake_case columns to its camelCase
+ * fields (see each table's CREATE TABLE in handleInit). Shared by the balance sweep and
+ * the statement-upload path so there is exactly one place that does this mapping.
+ */
+async function fetchReconciliationCandidatePool(DB) {
+  const [incomeRows, expenseRows, remittanceRows, cashRows, pettyRows] = await Promise.all([
+    DB.prepare(`SELECT id, date, bank_transfer_amount FROM income`).all(),
+    DB.prepare(`SELECT id, date, amount, payment_method, status, bank_amount FROM expenses`).all(),
+    DB.prepare(`SELECT id, paid_date, created_at, amount, status, payment_method, bank_amount, cash_amount FROM remittances`).all(),
+    DB.prepare(`SELECT id, date, type, amount, verification_status FROM cash_transactions`).all(),
+    DB.prepare(`SELECT id, type, payment_method, amount, bank_amount, status, created_at FROM petty_cash`).all(),
+  ]);
+  return buildReconciliationCandidatePool({
+    income: (incomeRows.results || []).map(r => ({
+      id: r.id, date: r.date, bankTransferAmount: r.bank_transfer_amount,
+    })),
+    expenses: (expenseRows.results || []).map(r => ({
+      id: r.id, date: r.date, amount: r.amount, paymentMethod: r.payment_method, status: r.status, bankAmount: r.bank_amount,
+    })),
+    remittances: (remittanceRows.results || []).map(r => ({
+      id: r.id, paidDate: r.paid_date, createdAt: r.created_at, amount: r.amount, status: r.status,
+      paymentMethod: r.payment_method, bankAmount: r.bank_amount, cashAmount: r.cash_amount,
+    })),
+    cashTransactions: (cashRows.results || []).map(r => ({
+      id: r.id, date: r.date, type: r.type, amount: r.amount, verificationStatus: r.verification_status,
+    })),
+    pettyHistory: (pettyRows.results || []).map(r => ({
+      id: r.id, type: r.type, paymentMethod: r.payment_method, amount: r.amount, bankAmount: r.bank_amount,
+      status: r.status, createdAt: r.created_at,
+    })),
+  });
+}
+
+/** Candidates of the movement's own direction, within ±windowDays of its date — the
+ * caller-side filtering matchBalanceMovement itself deliberately does not do. */
+function bankReconFilterCandidates(pool, direction, date, windowDays) {
+  return pool.filter(c => c.direction === direction && dateDistanceInDays(c.date, date) <= windowDays);
+}
+
+async function insertBankReconEntry(DB, { balanceHistoryId, date, amount, direction, status, matchedRefs, candidates, narration }) {
+  const id = newId('brc');
+  await DB.prepare(
+    `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json,narration) VALUES (?,?,?,?,?,?,?,?,?)`
+  ).bind(id, balanceHistoryId, date, amount, direction, status, JSON.stringify(matchedRefs || []), JSON.stringify(candidates || []), narration || '').run();
+  return id;
+}
+
+function bankReconEntryFromRow(row) {
+  return {
+    id: row.id,
+    balanceHistoryId: row.balance_history_id,
+    date: row.date,
+    amount: row.amount,
+    direction: row.direction,
+    status: row.status,
+    matchedRefs: safeJsonParse(row.matched_refs_json, []),
+    candidates: safeJsonParse(row.candidates_json, []),
+    narration: row.narration || '',
+    resolvedBy: row.resolved_by || '',
+    resolvedAt: row.resolved_at || '',
+    createdAt: row.created_at,
+  };
+}
+
+async function getBankReconEntries(DB) {
+  const { results } = await DB.prepare(`SELECT * FROM bank_recon_entries ORDER BY date DESC, created_at DESC`).all();
+  return ok((results || []).map(bankReconEntryFromRow));
+}
+
+async function resolveBankReconEntry(DB, authz, id, body) {
+  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('Bank reconciliation entry not found', 404);
+  const addNew = !!body?.addNew;
+  const chosenRefs = Array.isArray(body?.chosenRefs)
+    ? body.chosenRefs.filter(r => r && r.sourceTable && r.sourceId).map(r => ({ sourceTable: String(r.sourceTable), sourceId: String(r.sourceId) }))
+    : [];
+  if (!addNew && chosenRefs.length === 0) return err('chosenRefs is required (or set addNew:true)', 400);
+  const now = new Date().toISOString();
+  await DB.prepare(`UPDATE bank_recon_entries SET status='resolved', matched_refs_json=?, resolved_by=?, resolved_at=? WHERE id=?`)
+    .bind(JSON.stringify(addNew ? [] : chosenRefs), authz?.finance?.name || authz?.finance?.id || '', now, id).run();
+  const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  return ok(bankReconEntryFromRow(updated));
+}
+
+// Deterministic keyword match — not another AI call: cheap, and the statement text already
+// came from one AI step (OCR) and parsing step, so a third AI call per line item would be
+// both slow and another place to hallucinate. See CHURCH_BANK_CHARGE_SUBCATS for the enum.
+function classifyBankChargeNarration(narration, amount) {
+  const n = String(narration || '').toLowerCase();
+  if (!n) return null;
+  if (n.includes('sms') && n.includes('alert')) return 'SMS alert fees from the bank';
+  if (n.includes('maintenance')) return 'Monthly account maintenance fees';
+  if (n.includes('pos')) return 'POS terminal charges';
+  if (n.includes('cheque') || n.includes('check book')) return 'Cheque book issuance charges';
+  // "fee-sized small amount": a plain transfer/commission narration under ₦2,000 reads as a
+  // transfer charge, not the transfer itself (which would be the full amount moved).
+  if ((n.includes('commission') || n.includes('transfer')) && amount > 0 && amount <= 2000) return 'Money transfer charges';
+  if (n.includes('charge') || n.includes('fee') || n.includes('vat') || n.includes('stamp duty')) return 'Other bank charges';
+  return null;
+}
+
+// Modelled directly on ocrReceipt (same image_url content-block shape), but DeepSeek vision
+// instead of OpenAI, since this must use DeepSeek per the reconciliation plan. Returns the
+// transcribed text, or throws — the caller turns that into a user-facing error.
+async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
+  if (!imageBase64) throw new Error('imageBase64 is required');
+  let deepseekKey = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    deepseekKey = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+  if (!deepseekKey) throw new Error('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.');
+
+  const prompt = 'You are transcribing a bank statement photo. Transcribe the statement table\'s rows as plain text '
+    + '— date, narration, debit/credit amount and running balance for each row, one row per line. '
+    + 'Return only the transcribed text, no commentary, no markdown.';
+  const resp = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
+    body: JSON.stringify({
+      model: 'deepseek-flash',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+        ],
+      }],
+      max_tokens: 2000,
+    }),
+  });
+  if (!resp.ok) throw new Error(`DeepSeek vision API error ${resp.status}`);
+  const data = await resp.json();
+  const text = (data.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('DeepSeek returned no transcription text');
+  return text;
+}
+
+/**
+ * A photographed statement: OCR it, parse it with the existing AI parser, then for each
+ * line item either file it straight into expenses (a recognised bank charge — real
+ * narration text makes this possible, unlike the balance-only sweep) or run it through the
+ * subset-sum matcher like any other movement. Every item becomes exactly one
+ * bank_recon_entries row (synthetic balance_history_id 'stmt:<uuid>', since there is no
+ * real Worker history id for a statement-derived line).
+ */
+async function handleBankReconStatement(DB, env, authz, body) {
+  const imageBase64 = String(body?.imageBase64 || '').trim();
+  const mimeType = String(body?.mimeType || 'image/jpeg').trim();
+  if (!imageBase64) return err('imageBase64 is required', 400);
+
+  let statementText;
+  try {
+    statementText = await ocrStatementPhoto(env, DB, imageBase64, mimeType);
+  } catch (e) {
+    return err(`Could not read the statement photo: ${e.message}`, 502);
+  }
+
+  const parseRes = await parseStatementWithAI(env, DB, { statementText });
+  let parsed = null;
+  try { parsed = await parseRes.json(); } catch { parsed = null; }
+  if (parseRes.status !== 200 || !parsed || !Array.isArray(parsed.items)) {
+    return err(parsed?.error || 'Could not parse the statement text', parseRes.status >= 400 ? parseRes.status : 502);
+  }
+
+  // Unlike the sweep, this path never depends on the Worker being reachable (the box being
+  // down must never block an in-person statement upload) — use the default window directly.
+  const windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS;
+  const pool = await fetchReconciliationCandidatePool(DB);
+
+  let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0;
+  for (const item of parsed.items) {
+    const date = String(item.date || '').slice(0, 10);
+    const amount = Math.abs(Number(item.amount || 0));
+    if (!date || !amount) continue; // AI gave us nothing usable for this line
+    const narration = String(item.narration || '').trim();
+    const direction = item.type === 'expense' ? 'out' : 'in';
+
+    // Bank-charge auto-filing: real narration text is only ever available here (the balance
+    // sweep has none), and a charge is always money leaving the account.
+    const chargeSubCategory = direction === 'out' ? classifyBankChargeNarration(narration, amount) : null;
+    if (chargeSubCategory) {
+      // Dedupe within ±1 day so re-uploading an overlapping statement period never
+      // double-files the same charge.
+      const existing = await DB.prepare(
+        `SELECT id FROM expenses WHERE category='bank' AND amount=? AND date BETWEEN ? AND ?`
+      ).bind(amount, addDaysYmd(date, -1), addDaysYmd(date, 1)).first();
+      let expenseId = existing?.id;
+      if (!expenseId) {
+        expenseId = newId('EXP-');
+        await createExpense(DB, {
+          id: expenseId, date, category: 'bank', subCategory: chargeSubCategory,
+          description: narration || chargeSubCategory, amount, paymentMethod: 'bank_transfer',
+          status: 'approved', bankAmount: amount, cashAmount: 0, pettyAmount: 0,
+          recordedBy: 'AI Statement Upload', receiptNo: String(item.reference || ''),
+        });
+      }
+      chargeCount++; autoCount++;
+      await insertBankReconEntry(DB, {
+        balanceHistoryId: `stmt:${newId()}`, date, amount, direction, status: 'auto',
+        matchedRefs: [{ sourceTable: 'expenses', sourceId: expenseId }], candidates: [], narration,
+      });
+      continue; // charges never go through the subset-sum matcher
+    }
+
+    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays);
+    const result = matchBalanceMovement({ amount, direction, date }, candidates);
+    const matchedRefs = result.status === 'auto' ? result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId })) : [];
+    const candidatesOut = result.status === 'needs_attention'
+      ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
+      : [];
+    await insertBankReconEntry(DB, {
+      balanceHistoryId: `stmt:${newId()}`, date, amount, direction, status: result.status,
+      matchedRefs, candidates: candidatesOut, narration,
+    });
+    if (result.status === 'auto') autoCount++;
+    else if (result.status === 'needs_attention') needsAttentionCount++;
+    else unrecordedCount++;
+  }
+
+  return ok({ itemCount: parsed.items.length, autoCount, chargeCount, needsAttentionCount, unrecordedCount });
+}
+
+// GET /api/bank-recon/entries (it_admin or accountant) and POST .../entries/:id/resolve +
+// POST /api/bank-recon/statement (it_admin only) — same gating pattern as handleAutomations.
+async function handleBankRecon(DB, env, authz, method, parts, body) {
+  if (!authz?.finance) return err('Bank reconciliation is only available to signed-in Finance users.', 403);
+  const role = authz.finance.role;
+  if (role !== 'it_admin' && role !== 'accountant') {
+    return err('Your role is not permitted to view bank reconciliation.', 403);
+  }
+  const section = parts[1] || null;
+  if (section === 'entries') {
+    const id = parts[2] || null;
+    const action = parts[3] || null;
+    if (method === 'GET' && !id) return await getBankReconEntries(DB);
+    if (method === 'POST' && id && action === 'resolve') {
+      if (role !== 'it_admin') return err('Only the IT administrator can resolve bank reconciliation entries.', 403);
+      return await resolveBankReconEntry(DB, authz, id, body);
+    }
+  }
+  if (section === 'statement' && method === 'POST') {
+    if (role !== 'it_admin') return err('Only the IT administrator can upload a bank statement.', 403);
+    return await handleBankReconStatement(DB, env, authz, body);
+  }
+  return err(`Route not found: ${method} /api/bank-recon/${parts.slice(1).join('/')}`, 404);
+}
+
+// ── Scheduled sweep: diff the Clerk box's /balance-history pings into recon entries ──────
+const BANK_RECON_CURSOR_SETTING_KEY = 'bank_recon_balance_cursor';
+
+// Design decision: rather than a plain id string, this setting stores {afterId, lastBalance}
+// as JSON — the sweep needs "the balance just before the first new entry" to compute its
+// delta, and storing it alongside the cursor avoids an extra Worker round trip every run to
+// fetch one entry before the cursor.
+async function getBankReconCursor(DB) {
+  const raw = await getSettingValue(DB, BANK_RECON_CURSOR_SETTING_KEY);
+  const parsed = safeJsonParse(raw, null);
+  if (parsed && typeof parsed === 'object') {
+    return {
+      afterId: String(parsed.afterId || ''),
+      lastBalance: Number.isFinite(parsed.lastBalance) ? Number(parsed.lastBalance) : null,
+    };
+  }
+  return { afterId: '', lastBalance: null };
+}
+async function putBankReconCursor(DB, afterId, lastBalance) {
+  await putSettingValue(DB, BANK_RECON_CURSOR_SETTING_KEY, JSON.stringify({ afterId, lastBalance }));
+}
+
+/**
+ * Diffs new /balance-history entries from the Worker into bank_recon_entries. No narration
+ * is ever available here (just a balance figure) — an 'unrecorded' result simply stays
+ * unrecorded; bank-charge auto-filing only happens on the statement-upload path, which has
+ * real narration text to classify (see handleBankReconStatement).
+ *
+ * On a brand-new cursor (lastBalance === null, i.e. this sweep has never run) there is
+ * nothing to diff the very first entry against, so it only seeds the baseline balance and
+ * is not itself turned into a recon entry — the first real movement recorded is the second
+ * history entry onward. Re-running safely: each entry is looked up by its own
+ * balance_history_id before insert, so an interrupted run that already inserted some rows
+ * (and therefore hasn't advanced the cursor yet) never double-inserts or double-notifies
+ * when it is retried — it just skips what it already did and carries on from there.
+ */
+async function runBankReconciliationSweep(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+
+  const cursor = await getBankReconCursor(DB);
+  const histRes = await callClerkWatchdog(env, '/balance-history?after=' + encodeURIComponent(cursor.afterId));
+  if (histRes.errorResponse) return histRes.errorResponse;
+  const history = Array.isArray(histRes.data?.history) ? histRes.data.history : [];
+  if (!history.length) return ok({ ok: true, processed: 0, autoCount: 0, needsAttentionCount: 0, unrecordedCount: 0 });
+
+  const windowDays = await bankReconMatchWindowDays(env);
+  const pool = await fetchReconciliationCandidatePool(DB);
+
+  let previousBalance = cursor.lastBalance;
+  let startIndex = 0;
+  if (previousBalance === null) {
+    previousBalance = Number(history[0].balance);
+    startIndex = 1;
+  }
+
+  let lastId = cursor.afterId;
+  let lastBalance = previousBalance;
+  let processed = 0, autoCount = 0, needsAttentionCount = 0, unrecordedCount = 0;
+
+  for (let i = startIndex; i < history.length; i++) {
+    const entry = history[i];
+    lastId = entry.id || lastId;
+    const balance = Number(entry.balance);
+    if (!Number.isFinite(balance)) continue; // can't diff against an unreadable figure — leave the baseline as-is
+
+    const delta = balance - previousBalance;
+    previousBalance = balance;
+    lastBalance = balance;
+    if (Math.abs(delta) < RECON_AMOUNT_EPSILON) continue; // nothing happened
+
+    const existing = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE balance_history_id=?`).bind(entry.id).first();
+    if (existing) continue; // already processed in an earlier, interrupted run
+
+    const date = String(entry.checked_at || '').slice(0, 10);
+    const direction = delta > 0 ? 'in' : 'out';
+    const amount = Math.abs(delta);
+    const candidates = bankReconFilterCandidates(pool, direction, date, windowDays);
+    const result = matchBalanceMovement({ amount, direction, date }, candidates);
+    const matchedRefs = result.status === 'auto' ? result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId })) : [];
+    const candidatesOut = result.status === 'needs_attention'
+      ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
+      : [];
+    await insertBankReconEntry(DB, {
+      balanceHistoryId: entry.id, date, amount, direction, status: result.status,
+      matchedRefs, candidates: candidatesOut, narration: '',
+    });
+    processed++;
+
+    if (result.status === 'auto') autoCount++;
+    else if (result.status === 'needs_attention') {
+      needsAttentionCount++;
+      const text = `⚠️ A ₦${amount.toLocaleString('en-NG')} ${direction === 'out' ? 'drop' : 'rise'} on ${date} could match `
+        + `${result.matches.length} different combinations of your own recorded entries.\nOpen Bank → Reconciliation in the app to pick the right one.`;
+      await callClerkWatchdog(env, '/notify', { method: 'POST', body: { type: 'bank_transaction_needs_review', text } });
+    } else unrecordedCount++;
+  }
+
+  await putBankReconCursor(DB, lastId, lastBalance);
+  return ok({ ok: true, processed, autoCount, needsAttentionCount, unrecordedCount });
+}
+
 async function runKpscReconciliation(DB, data) {
   const statementYear = normalizeYear(data?.statementYear);
   const statementMonth = normalizeMonth(data?.statementMonth) || (new Date().getUTCMonth() + 1);
@@ -11738,6 +12247,10 @@ function cronJobRunners() {
     ['newmonth-draft',  'run-newmonth-draft-fallback',  runNewMonthDraftFallback],
     ['followups',       'run-followups',                runFollowups],
     ['prebriefs',       'run-prebriefs',                runPrebriefs],
+    // Never moves money by itself (only classifies a balance movement and records the
+    // result; charge auto-filing only happens on the statement-upload route, not here) —
+    // safe to run last.
+    ['bank-recon',      'run-bank-recon',                runBankReconciliationSweep],
   ];
 }
 
@@ -14714,4 +15227,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes };
+export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool };
