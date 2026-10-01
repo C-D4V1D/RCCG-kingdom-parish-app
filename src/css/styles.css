@@ -308,6 +308,7 @@ tr:hover td{background:var(--surface)}
 .budget-tabs{display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center}
 .budget-tabs .tab{border:1px solid var(--border2);border-radius:999px;padding:10px 16px;background:var(--card);min-height:44px}
 .budget-tabs .tab.active{background:var(--primary-light);border-color:var(--primary);border-bottom-color:var(--primary)}
+.bank-tabs .tab{padding:7px 12px;min-height:38px;font-size:13px}
 .budget-card{padding:1rem 1.1rem}
 .budget-month-picker{width:auto;min-width:160px;min-height:44px;margin-left:auto}
 .budget-hero{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start;margin-bottom:12px}

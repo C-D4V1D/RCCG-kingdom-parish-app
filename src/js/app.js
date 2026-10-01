@@ -12696,7 +12696,6 @@ async function renderBank(){
     <div class="page-header">
       <div><div class="page-title">Bank Account</div><div class="page-sub">Balance: ${fmt(bankBalance)} · ${monthLabel()}${state.periodMode === 'remittance' ? ` Remittance Period (${fmtDateShort(bankPeriodFrom)} – ${fmtDateShort(bankPeriodTo)})` : ''}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${canAction('income_deposit')&&cashWithAccountant>0&&!_bankHasPending?`<button class="btn btn-amber" onclick="App.confirmBulkDeposit()">💰 Deposit Cash (${fmt(cashWithAccountant)})</button>`:''}
         ${canAction('income_deposit')&&_bankHasPending?`<button class="btn" style="border:1.5px solid var(--amber);color:var(--amber);background:rgba(184,134,11,0.08)" onclick="App.navigate('bank')">⏳ Deposit Pending (${fmt(_bankPendingTotal)})</button>`:''}
         ${canAction('bank_withdrawal')?`<button class="btn btn-primary" onclick="App.showBankWithdrawal()">🏦 Record Withdrawal</button>`:''}
         ${canAction('bank_charge')?`<button class="btn" onclick="App.showBankChargeForm()">💳 Bank Charge</button>`:''}
@@ -12704,10 +12703,10 @@ async function renderBank(){
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
     ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
-    ${Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Record Income.</span></div>`:''}
+    ${tab!=='reconciliation'&&Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Record Income.</span></div>`:''}
 
-    <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
-      <div class="kpi">
+    ${tab==='reconciliation'?'':`<div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+      <div class="kpi" style="grid-column:1/-1;min-width:0">
         <div class="kpi-icon" style="background:#E6F1FB">🏦</div>
         <div class="kpi-label">Bank Balance</div>
         <div class="kpi-val" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(bankBalance)}</div>
@@ -12750,9 +12749,9 @@ async function renderBank(){
           <div style="font-size:14px;font-weight:700;color:${closingBankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(closingBankBalance)}</div>
         </div>
       </div>
-    </div>
+    </div>`}
 
-    <div class="tabs">
+    <div class="budget-tabs bank-tabs" role="tablist" style="margin-bottom:1rem;flex-direction:row;align-items:center;gap:6px">
       <button class="tab ${tab==='overview'?'active':''}" onclick="App.setBankTab('overview')">Overview</button>
       <button class="tab ${tab==='withdrawals'?'active':''}" onclick="App.setBankTab('withdrawals')">Withdrawals (${monthlyWithdrawals.length})</button>
       <button class="tab ${tab==='deposits'?'active':''}" onclick="App.setBankTab('deposits')">Deposits (${monthlyDeposits.length})</button>
@@ -12764,7 +12763,7 @@ async function renderBank(){
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
-      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries,bankPortalBalance)}`;
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries,bankPortalBalance,monthBankTx)}`;
 
   // Populates its own DOM region asynchronously after the page above is already
   // showing, so a slow/failed fetch never blocks the Bank page itself.
@@ -13149,7 +13148,7 @@ function renderPortalBalanceBlock(portal, appBalance){
     <div style="margin-top:2px;color:${aligned?'var(--success)':(behind?'var(--danger)':'var(--amber)')}">
       ${aligned ? '✓ Matches the app' : `⚠ App is ${fmt(Math.abs(diff))} ${behind?'behind':'ahead of'} the real balance`}
     </div>
-    ${!aligned && canReconcile ? `<button onclick="App.goToBankReconciliation()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px;font-size:12px;padding:7px">🔍 Reconcile This Difference</button>` : ''}
+    ${!aligned && canReconcile ? `<button onclick="App.goToBankReconciliation()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px;font-size:12px;padding:7px 10px;white-space:normal;height:auto;line-height:1.3;box-sizing:border-box">🔍 Reconcile This Difference</button>` : ''}
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);margin-top:4px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
       <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
@@ -13255,13 +13254,14 @@ function renderReconciliationHeadline(portal, appBalance, entries=[]){
   </div>`;
 }
 
-function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[],bankPortalBalance=null){
+function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[],bankPortalBalance=null,monthBankTx=null){
+  state._bankLedgerData = { all: bankTxAll, month: monthBankTx || bankTxAll };
   return `
     ${renderReconciliationHeadline(bankPortalBalance, bankBalance, bankReconEntries)}
 
-    <div class="card">
-      <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
-      <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This reconciliation view shows how the computed bank balance is derived from all income, deposits, expenses, remittances, and withdrawals. Compare this with your actual bank statement.</span></div>
+    <details class="card">
+      <summary class="card-header" style="cursor:pointer;margin-bottom:0"><span class="card-title">How the app balance is worked out</span></summary>
+      <div class="alert alert-info" style="margin-top:12px"><span class="alert-icon">ℹ</span><span>This shows how the app works out its bank balance from your records. The Reconciliation Status above compares it with the real balance for you.</span></div>
 
       <div style="margin-top:12px">
         <div class="status-row"><div><div class="status-row-label" style="color:var(--success)">+ Income received via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-green">${fmt(bankTransferIncome)}</div></div></div>
@@ -13275,26 +13275,61 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
           <div class="status-row-right"><div class="status-row-amt" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'};font-size:18px;font-weight:700">${fmt(bankBalance)}</div></div>
         </div>
       </div>
-    </div>
+    </details>
 
     ${renderBankReconCard(bankReconEntries, state.user?.role)}
 
-    <div class="card">
-      <div class="card-header"><span class="card-title">All Bank Transactions (Ledger)</span></div>
-      ${bankTxAll.length?`<div class="table-wrap"><table>
-        <tr><th>Date</th><th>Type</th><th>Description</th><th class="td-right">Debit</th><th class="td-right">Credit</th><th>Reference</th></tr>
-        ${bankTxAll.map(t=>{
-          const isCredit = t.txAmt > 0;
-          return `<tr>
-            <td style="white-space:nowrap">${fmtDate(t.date||t.createdAt)}<div class="td-muted" style="font-size:11px">${fmtTime(t.createdAt||t.date)}</div></td>
-            <td><span class="badge ${isCredit?'badge-success':'badge-danger'}">${t.txType}</span></td>
-            <td>${t.txLabel}</td>
-            <td class="td-right ${!isCredit?'td-red':''}">${!isCredit?fmt(Math.abs(t.txAmt)):'—'}</td>
-            <td class="td-right ${isCredit?'td-green':''}">${isCredit?fmt(t.txAmt):'—'}</td>
-            <td class="td-muted">${t.reference||'—'}</td>
-          </tr>`}).join('')}
-      </table></div>`:'<div class="empty-table">No bank transactions found.</div>'}
+    ${renderBankLedgerCard()}`;
+}
+
+// Ledger card for the Reconciliation tab: stacked rows (same look as the Overview list, no
+// wide table so nothing scrolls sideways on a phone). Defaults to the selected period's
+// transactions; "Show all months" widens it. Paged 20 at a time.
+function renderBankLedgerCard(){
+  const d = state._bankLedgerData || { all: [], month: [] };
+  const showAll = !!state.bankLedgerAll;
+  const list = showAll ? d.all : d.month;
+  const limit = state.bankLedgerShown || 20;
+  const shown = list.slice(0, limit);
+  const left = list.length - shown.length;
+  const title = showAll ? 'All Bank Transactions' : `Bank Transactions — ${monthLabel()}`;
+  const rows = shown.map(t=>{
+    const isCredit = t.txAmt > 0;
+    const color = isCredit ? 'var(--success,#2e7d32)' : 'var(--danger)';
+    return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; ${esc(t.txLabel)}</div>
+        <div style="flex-shrink:0;white-space:nowrap;font-size:14px;font-weight:700;color:${color}">${isCredit?'+':'−'}${fmt(Math.abs(t.txAmt))}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:11px;color:var(--text3)">
+        <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${esc(t.txType)}</span>
+        ${t.reference?`<span style="min-width:0;word-break:break-word">${esc(t.reference)}</span>`:''}
+      </div>
     </div>`;
+  }).join('');
+  return `<div class="card" id="bankLedgerCard">
+    <div class="card-header" style="flex-wrap:wrap;gap:8px">
+      <span class="card-title">${title}</span>
+      <button onclick="App.toggleBankLedgerAll()" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:12px;padding:0">${showAll?'Show this month only':'Show all months'}</button>
+    </div>
+    <div style="padding:0 4px">${rows || `<div class="empty-table">${showAll?'No bank transactions found.':'No bank transactions this month.'}</div>`}</div>
+    ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankLedger()">Show more (${left} left)</button>`:''}
+  </div>`;
+}
+
+function rerenderBankLedger(){
+  const el = document.getElementById('bankLedgerCard');
+  if(el) el.outerHTML = renderBankLedgerCard();
+  else renderBank();
+}
+function toggleBankLedgerAll(){
+  state.bankLedgerAll = !state.bankLedgerAll;
+  state.bankLedgerShown = 20;
+  rerenderBankLedger();
+}
+function showMoreBankLedger(){
+  state.bankLedgerShown = (state.bankLedgerShown || 20) + 20;
+  rerenderBankLedger();
 }
 
 // ── Automatic Bank Reconciliation (box balance checks + statement OCR) ──────
@@ -13374,12 +13409,19 @@ function renderBankReconCard(entries, role){
     ? `<button class="btn btn-sm btn-primary" onclick="App.showBankStatementUploadForm()">📄 Upload a statement</button>`
     : `<button class="btn btn-sm" disabled title="Only the IT administrator can upload a statement">📄 Upload a statement</button>`;
   const rowsHtml = [...action, ...shownFinished].map(e=>renderBankReconRow(e, isAdmin)).join('');
+  // Date span of the uploaded statements (entries tagged balanceHistoryId 'stmt:…'). ISO date
+  // strings sort lexicographically, and passing them straight to fmtDate avoids timezone drift.
+  const stmtDates = all.filter(e=>typeof e.balanceHistoryId==='string' && e.balanceHistoryId.startsWith('stmt:') && e.date)
+    .map(e=>e.date).sort();
+  const stmtLine = stmtDates.length
+    ? `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Statements on file cover ${fmtDate(stmtDates[0])} – ${fmtDate(stmtDates[stmtDates.length-1])}.</div>` : '';
   return `<div class="card" id="bankReconCard">
     <div class="card-header" style="flex-wrap:wrap;gap:8px">
       <span class="card-title">Bank Reconciliation</span>${uploadBtn}
     </div>
     ${renderLastStatementUpload()}
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
+    ${stmtLine}
     ${counts?`<div style="font-size:12px;color:var(--text3);margin-bottom:8px">${counts}</div>`:''}
     ${rowsHtml || `<div class="empty-table">No bank movements reported yet.</div>`}
     ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}
@@ -20623,7 +20665,7 @@ return {
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
-  setBankTab, showBankChargeForm, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
+  setBankTab, showBankChargeForm, toggleBankLedgerAll, showMoreBankLedger, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
