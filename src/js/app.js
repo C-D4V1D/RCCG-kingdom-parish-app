@@ -938,6 +938,8 @@ const DB = {
 
   getBankReconEntries()        { return apiFetch('bank-recon/entries'); },
   resolveBankReconEntry(id,d)  { return apiFetch(`bank-recon/entries/${id}/resolve`,'POST',d); },
+  ignoreBankReconEntry(id)     { return apiFetch(`bank-recon/entries/${id}/ignore`,'POST',{}); },
+  unmatchBankReconEntry(id)    { return apiFetch(`bank-recon/entries/${id}/unmatch`,'POST',{}); },
   uploadBankStatement(d,timeoutMs) { return apiFetch('bank-recon/statement','POST',d,timeoutMs); },
 
   getNotifications()           { return apiFetch('notifications'); },
@@ -2472,7 +2474,7 @@ async function calcRemittances(income, preRates){
 }
 
 function showModal(html){ const o=document.createElement('div'); o.className='modal-overlay'; o.id='modalOverlay'; o.innerHTML=`<div class="modal">${html}</div>`; document.body.appendChild(o) }
-function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+function closeModal(){ state._pendingReconLink=null; const o=document.getElementById('modalOverlay'); if(o) o.remove() }
 function showAlert(msg,type='success'){
   const a=document.createElement('div'); a.className=`alert alert-${type}`;
   const icon=document.createElement('span'); icon.className='alert-icon'; icon.textContent=type==='success'?'✓':type==='danger'?'✕':'⚠';
@@ -8505,7 +8507,8 @@ async function submitOtherIncome(btn=null){
 
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    await DB.addIncome(rec);
+    const savedOther = await DB.addIncome(rec);
+    await linkPendingReconEntry('income', savedOther?.id);
     const sourceLabel = OTHER_INCOME_SOURCES.find(s=>s.key===source)?.label || source;
     DB.addAudit('income_recorded',`Other income ${fmt(amount)} (${sourceLabel}) via ${method.replace(/_/g,' ')} from ${donorName||'unnamed donor'} on ${fmtDate(date)}`,state.user?.name);
     DB.addNotification('Other Income Recorded',`${fmt(amount)} recorded (${sourceLabel}) from ${donorName||'unnamed'}`,'success');
@@ -11944,6 +11947,7 @@ async function submitExpense(btn=null){
         pettyAmount: pettyAmount,
         incomeRef: expenseIncomeRef,
         notes: document.getElementById('exp_notes')?.value, recordedBy:state.user?.name, status:expenseStatus });
+      await linkPendingReconEntry('expenses', expenseId);
 
       closeModal();
       const splitLabel = isSplit
@@ -12711,12 +12715,12 @@ async function renderBank(){
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#E1F5EE">📥</div>
-        <div class="kpi-label">Total Inflows</div>
+        <div class="kpi-label">Total Inflows (all-time)</div>
         <div class="kpi-val">${fmt(bankTransferIncome + cashDepositedToBank)}</div>
       </div>
       <div class="kpi">
         <div class="kpi-icon" style="background:#FCEBEB">📤</div>
-        <div class="kpi-label">Total Outflows</div>
+        <div class="kpi-label">Total Outflows (all-time)</div>
         <div class="kpi-val">${fmt(bankExpenses + paidRemsBank + bankWithdrawals + pettyBankTopups)}</div>
       </div>
       <div class="kpi">
@@ -13202,7 +13206,7 @@ async function fetchPortalBankBalanceQuiet(){
 // the "Reconcile This Difference" button lands you here. Same figures, same thresholds
 // as renderPortalBalanceBlock, just laid out as its own prominent card instead of a
 // small KPI-tile addendum.
-function renderReconciliationHeadline(portal, appBalance){
+function renderReconciliationHeadline(portal, appBalance, entries=[]){
   const notChecked = !portal || portal.balance === null || portal.balance === undefined;
   if(notChecked){
     return `<div class="card">
@@ -13215,6 +13219,24 @@ function renderReconciliationHeadline(portal, appBalance){
   const behind = diff < 0;
   const aligned = Math.abs(diff) < 1;
   const checkedAt = portal.checked_at ? `${fmtDate(portal.checked_at)} ${fmtTime(portal.checked_at)}` : '';
+  // Each open item explains part of the gap: money that left the bank but isn't in the
+  // app ('out') makes the app look richer (+amount); money that came in ('in') the reverse.
+  const explained = (entries||[]).reduce((s,e)=>{
+    if(e.status !== 'unrecorded' && e.status !== 'needs_attention') return s;
+    const a = Number(e.amount)||0;
+    return s + (e.direction === 'out' ? a : -a);
+  }, 0);
+  const unexplained = diff - explained;
+  const signed = n => `${n<0?'−':''}${fmt(Math.abs(n))}`;
+  const breakdown = aligned ? '' : `
+    <div style="font-size:12.5px;color:var(--text2);margin:8px 0;line-height:1.6">
+      <div>Explained by items below: <strong>${signed(explained)}</strong></div>
+      <div>Still unexplained: <strong style="color:${Math.abs(unexplained)>=1?'var(--danger)':'var(--success)'}">${signed(unexplained)}</strong></div>
+      ${Math.abs(unexplained)>=1 ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Upload a statement covering the missing dates to find it.</div>` : ''}
+    </div>`;
+  const diffText = behind
+    ? `The bank has ${fmt(Math.abs(diff))} more than your records — usually money came in that hasn't been recorded yet.`
+    : `Your records show ${fmt(Math.abs(diff))} more than is actually in the bank — usually something was spent or charged by the bank but not recorded yet.`;
   return `<div class="card">
     <div class="card-header"><span class="card-title">Reconciliation Status</span></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
@@ -13223,8 +13245,9 @@ function renderReconciliationHeadline(portal, appBalance){
     </div>
     <div class="alert ${aligned?'alert-success':(behind?'alert-danger':'alert-warn')}" style="margin-bottom:0">
       <span class="alert-icon">${aligned?'✓':'⚠'}</span>
-      <span>${aligned ? 'Reconciled — the app matches the real balance.' : `<strong>Difference: ${fmt(Math.abs(diff))}</strong> — the app is ${behind?'behind':'ahead of'} the real balance. See the movements below for what explains it.`}</span>
+      <span>${aligned ? 'Reconciled — the app matches the real balance.' : `<strong>Difference: ${fmt(Math.abs(diff))}</strong><br>${diffText}`}</span>
     </div>
+    ${breakdown}
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);font-size:11.5px;margin-top:8px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
       <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${portal.checked_at||''}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
@@ -13234,7 +13257,7 @@ function renderReconciliationHeadline(portal, appBalance){
 
 function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[],bankPortalBalance=null){
   return `
-    ${renderReconciliationHeadline(bankPortalBalance, bankBalance)}
+    ${renderReconciliationHeadline(bankPortalBalance, bankBalance, bankReconEntries)}
 
     <div class="card">
       <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
@@ -13290,53 +13313,174 @@ function bankReconStatusBadge(status){
     case 'resolved':         return `<span class="badge badge-success">✅ Resolved</span>`;
     case 'needs_attention':  return `<span class="badge badge-warn">⚠️ Needs review</span>`;
     case 'unrecorded':       return `<span class="badge badge-danger">❓ Unrecorded</span>`;
+    case 'ignored':          return `<span class="badge" style="background:var(--surface,#eee);color:var(--text3)">🚫 Ignored</span>`;
     default:                 return `<span class="badge badge-info">${esc(status||'—')}</span>`;
   }
+}
+
+function renderBankReconRow(e, isAdmin){
+  const isIn = e.direction === 'in';
+  const color = isIn ? 'var(--success,#2e7d32)' : 'var(--danger)';
+  const eid = esc(e.id);
+  const tappable = e.status === 'auto' || e.status === 'resolved';
+  let actions = '';
+  if(e.status === 'needs_attention'){
+    actions = isAdmin
+      ? `<button class="btn btn-sm btn-primary" onclick="App.reviewBankReconEntry('${eid}')">Review →</button>`
+      : `<button class="btn btn-sm" disabled title="Only the IT administrator can resolve this">Review →</button>`;
+  } else if(e.status === 'unrecorded' && isAdmin){
+    actions = `<button class="btn btn-sm btn-primary" onclick="App.recordBankReconEntry('${eid}')">Record this</button>
+      <button class="btn btn-sm" onclick="App.ignoreBankReconEntry('${eid}')">Ignore</button>`;
+  } else if(tappable){
+    actions = `<span style="font-size:11px;color:var(--text3)">Tap to see match</span>`;
+  }
+  // Two lines, not one packed row: line 1 is just date/narration (flexible) + amount
+  // (fixed), which always fits; line 2 (badge + any buttons) wraps freely on its own,
+  // so a badge plus buttons never gets squeezed off a narrow phone screen.
+  return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0;${tappable?'cursor:pointer':''}" ${tappable?`onclick="App.showBankReconMatch('${eid}')"`:''}>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
+          ${e.narration?`<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.narration)}</div>`:''}
+        </div>
+        <div style="text-align:right;flex-shrink:0;white-space:nowrap">
+          <span style="font-size:14px;font-weight:700;color:${color}">${isIn?'↑':'↓'} ${fmt(e.amount)}</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px">
+        ${bankReconStatusBadge(e.status)}
+        ${actions}
+      </div>
+    </div>`;
 }
 
 function renderBankReconCard(entries, role){
   if(role !== 'it_admin' && role !== 'accountant') return '';
   const isAdmin = role === 'it_admin';
-  const sorted = [...(entries||[])].sort((a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0));
-  const shown = sorted.slice(0, 20);
+  const all = entries || [];
+  const byNewest = (a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0);
+  // Action items always come first and are never paged away; finished items follow, newest first.
+  const action = all.filter(e=>e.status==='needs_attention'||e.status==='unrecorded').sort(byNewest);
+  const finished = all.filter(e=>!(e.status==='needs_attention'||e.status==='unrecorded')).sort(byNewest);
+  const limit = state.bankReconShown || 20;
+  const shownFinished = finished.slice(0, limit);
+  const left = finished.length - shownFinished.length;
+  const count = st => all.filter(e=>e.status===st).length;
+  const counts = [
+    [count('auto')+count('resolved'), 'auto-matched'], [count('needs_attention'), 'need review'],
+    [count('unrecorded'), 'unrecorded'], [count('ignored'), 'ignored']
+  ].filter(c=>c[0]>0).map(c=>`${c[0]} ${c[1]}`).join(' · ');
   const uploadBtn = isAdmin
     ? `<button class="btn btn-sm btn-primary" onclick="App.showBankStatementUploadForm()">📄 Upload a statement</button>`
     : `<button class="btn btn-sm" disabled title="Only the IT administrator can upload a statement">📄 Upload a statement</button>`;
-  const rowsHtml = shown.map(e=>{
-    const isIn = e.direction === 'in';
-    const color = isIn ? 'var(--success,#2e7d32)' : 'var(--danger)';
-    const reviewBtn = e.status === 'needs_attention'
-      ? (isAdmin
-          ? `<button class="btn btn-sm btn-primary" onclick="App.reviewBankReconEntry('${esc(e.id)}')">Review →</button>`
-          : `<button class="btn btn-sm" disabled title="Only the IT administrator can resolve this">Review →</button>`)
-      : '';
-    // Two lines, not one packed row: line 1 is just date/narration (flexible) + amount
-    // (fixed), which always fits; line 2 (badge + any button) wraps freely on its own,
-    // so a "Needs review" badge plus button never gets squeezed off a narrow phone screen.
-    return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
-        <div style="display:flex;align-items:center;gap:10px">
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
-            ${e.narration?`<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.narration)}</div>`:''}
-          </div>
-          <div style="text-align:right;flex-shrink:0;white-space:nowrap">
-            <span style="font-size:14px;font-weight:700;color:${color}">${isIn?'↑':'↓'} ${fmt(e.amount)}</span>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px">
-          ${bankReconStatusBadge(e.status)}
-          ${reviewBtn}
-        </div>
-      </div>`;
-  }).join('');
-  return `<div class="card">
+  const rowsHtml = [...action, ...shownFinished].map(e=>renderBankReconRow(e, isAdmin)).join('');
+  return `<div class="card" id="bankReconCard">
     <div class="card-header" style="flex-wrap:wrap;gap:8px">
       <span class="card-title">Bank Reconciliation</span>${uploadBtn}
     </div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
-    ${shown.length ? rowsHtml : `<div class="empty-table">No bank movements reported yet.</div>`}
-    ${sorted.length>20?`<div style="font-size:11px;color:var(--text3);margin-top:8px">Showing the most recent 20 of ${sorted.length} movements.</div>`:''}
+    ${counts?`<div style="font-size:12px;color:var(--text3);margin-bottom:8px">${counts}</div>`:''}
+    ${rowsHtml || `<div class="empty-table">No bank movements reported yet.</div>`}
+    ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}
   </div>`;
+}
+
+function showMoreBankRecon(){
+  state.bankReconShown = (state.bankReconShown || 20) + 20;
+  const el = document.getElementById('bankReconCard');
+  if(el) el.outerHTML = renderBankReconCard(state._bankReconEntries||[], state.user?.role);
+  else renderBank();
+}
+
+// Matched / resolved rows: show which of the parish's own records the bank line is tied to.
+function showBankReconMatch(id){
+  const entry = (state._bankReconEntries||[]).find(e=>e.id===id);
+  if(!entry) return;
+  const details = entry.matchedDetails || [];
+  const items = details.length ? details.map(d=> d.missing
+    ? `<div style="font-size:12px;color:var(--text3);padding:6px 0">${esc(bankReconSourceLabel(d.sourceTable))} — record no longer exists</div>`
+    : `<div style="padding:6px 0;border-bottom:1px solid var(--border-light,#f0f0f0)">
+        <div style="font-size:13px;font-weight:600">${esc(bankReconSourceLabel(d.sourceTable))} — ${fmt(d.amount)}</div>
+        <div style="font-size:11.5px;color:var(--text3);word-break:break-word">${fmtDate(d.date)}${d.description?` · ${esc(d.description)}`:''}</div>
+      </div>`).join('') : `<p style="font-size:13px;color:var(--text3)">No match details are available for this movement.</p>`;
+  const undo = state.user?.role === 'it_admin'
+    ? `<button class="btn btn-danger" onclick="App.unmatchBankReconEntry('${esc(entry.id)}',this)">Undo match</button>` : '';
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Matched to:</div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Bank ${entry.direction==='in'?'credit':'debit'} of <strong>${fmt(entry.amount)}</strong> on ${fmtDate(entry.date)}</div>
+    <div style="margin:8px 0">${items}</div>
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px"><button class="btn" onclick="closeModal()">Close</button>${undo}</div>`);
+}
+
+async function unmatchBankReconEntry(id, btn){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can undo a match.','danger'); return; }
+  if(!confirm('Undo this match? The bank movement will go back to "Unrecorded".')) return;
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.unmatchBankReconEntry(id);
+    closeModal();
+    state._pendingAlert = { msg: 'Match undone — the movement is unrecorded again.', type: 'success' };
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to undo the match: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function ignoreBankReconEntry(id){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can ignore a movement.','danger'); return; }
+  if(!confirm('Ignore this bank movement? It will stop counting as something you still need to record.')) return;
+  try {
+    await DB.ignoreBankReconEntry(id);
+    state._pendingAlert = { msg: 'Bank movement ignored.', type: 'success' };
+    navigate('bank');
+  } catch(err) {
+    showAlert(`Failed to ignore this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+// "Record this": open the matching Record Income / Record Expense form pre-filled from the
+// bank line; once the user saves it, the save path calls linkPendingReconEntry to tie the
+// new record back to this entry. closeModal() clears the pending link, so Cancel drops it.
+function recordBankReconEntry(id){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can do this.','danger'); return; }
+  const entry = (state._bankReconEntries||[]).find(e=>e.id===id);
+  if(!entry){ showAlert('This entry could not be found — please refresh the Bank page and try again.','danger'); return; }
+  closeModal();
+  const isIn = entry.direction === 'in';
+  const date = String(entry.date||'').slice(0,10);
+  const set = (elId, v)=>{ const el=document.getElementById(elId); if(el) el.value = v; };
+  if(isIn){
+    showOtherIncomeForm();
+    if(!document.getElementById('oi_date')) return; // form refused (permission)
+    set('oi_date', date); set('oi_amount', entry.amount); set('oi_method','bank_transfer'); set('oi_notes', entry.narration||'');
+    state._pendingReconLink = { entryId: entry.id, sourceTable: 'income' };
+  } else {
+    showExpenseForm();
+    if(!document.getElementById('exp_date')) return;
+    set('exp_date', date); set('exp_amt', entry.amount); set('exp_desc', entry.narration||'');
+    const radio = document.querySelector('input[name="exp_method"][value="bank_transfer"]');
+    if(radio){ radio.checked = true; onExpMethodChange(); }
+    onExpAmountChange();
+    state._pendingReconLink = { entryId: entry.id, sourceTable: 'expenses' };
+  }
+}
+
+// Called from the income/expense save success paths (before closeModal clears the link).
+// Never throws: the record is already saved, so a failed link only warns.
+function clearPendingReconLink(){ state._pendingReconLink=null; }
+async function linkPendingReconEntry(sourceTable, newId){
+  const p = state._pendingReconLink;
+  state._pendingReconLink = null;
+  if(!p || p.sourceTable !== sourceTable) return;
+  try {
+    await DB.resolveBankReconEntry(p.entryId, newId
+      ? { chosenRefs: [{ sourceTable, sourceId: newId }] }
+      : { addNew: true });
+  } catch(err) {
+    showAlert(`Saved, but could not link it to the bank movement: ${err.message||'Unknown error'}. Open it on the Reconciliation tab to link it.`,'warn');
+  }
 }
 
 function reviewBankReconEntry(id){
@@ -13383,17 +13527,8 @@ async function chooseBankReconMatch(entryId, comboIndex, btn){
   }
 }
 
-async function resolveBankReconAddNew(entryId, btn){
-  const restore = setBtnLoading(btn, 'Saving…');
-  try {
-    await DB.resolveBankReconEntry(entryId, { addNew: true });
-    closeModal();
-    showAlert('Marked resolved. Remember to record the entry yourself through Income/Expenses.','info');
-    navigate('bank');
-  } catch(err) {
-    restore();
-    showAlert(`Failed to resolve this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
-  }
+function resolveBankReconAddNew(entryId){
+  recordBankReconEntry(entryId);
 }
 
 function showBankStatementUploadForm(){
@@ -13435,7 +13570,7 @@ async function submitBankStatementUpload(btn){
     closeModal();
     const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
     const pagesNote = files.length > 1 ? ` across ${files.length} pages` : '';
-    const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records.`;
+    const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records${res.duplicateCount > 0 ? `, ${res.duplicateCount} already uploaded (skipped)` : ''}.`;
     state.bankTab = 'reconciliation';
     state._pendingAlert = { msg: alertMsg, type: needsFollowUp ? 'warn' : 'success' };
     navigate('bank');
@@ -20458,7 +20593,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
@@ -20579,7 +20714,7 @@ return {
 })();
 
 // Global helpers
-function closeModal(){ const o=document.getElementById('modalOverlay'); if(o) o.remove() }
+function closeModal(){ if(window.App && App.clearPendingReconLink) App.clearPendingReconLink(); const o=document.getElementById('modalOverlay'); if(o) o.remove() }
 function toggleTopupCard(el){ const card=el.closest('.topup-card'); if(card){ card.classList.toggle('expanded'); el.setAttribute('aria-expanded', card.classList.contains('expanded')?'true':'false') } }
 
 // Ensure App is accessible from inline onclick handlers in all browsers

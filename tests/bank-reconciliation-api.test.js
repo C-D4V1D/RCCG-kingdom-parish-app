@@ -290,7 +290,7 @@ test('POST /api/bank-recon/statement: a clean single-candidate match lands as au
   } finally { restore(); }
 
   assert.equal(res.status, 200);
-  assert.deepEqual(body, { itemCount: 2, autoCount: 2, chargeCount: 1, needsAttentionCount: 0, unrecordedCount: 0 });
+  assert.deepEqual(body, { itemCount: 2, autoCount: 2, chargeCount: 1, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 0 });
 
   const expenseRows = DB.sqlite.prepare(`SELECT * FROM expenses WHERE category='bank'`).all();
   assert.equal(expenseRows.length, 1, 'the SMS-alert charge was filed once');
@@ -308,7 +308,7 @@ test('POST /api/bank-recon/statement: a clean single-candidate match lands as au
   assert.deepEqual(JSON.parse(chargeEntry.matched_refs_json), [{ sourceTable: 'expenses', sourceId: expenseRows[0].id }]);
 
   // Re-upload an overlapping statement (same charge line present again): must never
-  // double-file the same bank charge, even though a fresh bank_recon_entries row is made.
+  // double-file the same bank charge (the line is recognised as already uploaded).
   restore = stubDeepseekForStatement(items);
   try {
     const res2 = await onRequest({
@@ -419,4 +419,177 @@ test('run-bank-recon: re-running after a partial failure never double-inserts or
   } finally { restore(); }
 
   assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get().n, 1, 'the already-processed balance_history_id was skipped, not duplicated');
+});
+
+// ── Dedupe, one-record-one-line, ignore/unmatch, matchedDetails ────────────
+async function uploadStatement(DB, token, items) {
+  const restore = stubDeepseekForStatement(items);
+  try {
+    const res = await onRequest({
+      request: req('bank-recon/statement', { method: 'POST', headers: bearer(token), body: { imageBase64: 'base64data', mimeType: 'image/jpeg' } }),
+      env: baseEnv(DB),
+    });
+    return { status: res.status, body: await readJson(res) };
+  } finally { restore(); }
+}
+const reconCount = (DB) => DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get().n;
+
+test('POST /api/bank-recon/statement: re-uploading the same statement files nothing new and reports duplicateCount', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  const items = [
+    { date: '2026-10-05', amount: 50000, type: 'income', narration: 'Transfer from Member' },
+    { date: '2026-10-06', amount: 500, type: 'expense', narration: 'SMS Alert Charge' },
+    { date: '2026-10-07', amount: 7777, type: 'expense', narration: '  Unknown debit  ' },
+  ];
+  const admin = await tokenFor(DB, 'u1');
+  const first = await uploadStatement(DB, admin, items);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.duplicateCount, 0);
+  assert.equal(reconCount(DB), 3);
+
+  // Same lines again, amounts off by float noise and narration whitespace differing.
+  const again = items.map(i => ({ ...i, amount: i.amount + 0.001, narration: ` ${i.narration.trim()} ` }));
+  const second = await uploadStatement(DB, admin, again);
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.body, { itemCount: 3, autoCount: 0, chargeCount: 0, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 3 });
+  assert.equal(reconCount(DB), 3, 'no new rows on re-upload');
+  assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE category='bank'`).get().n, 1, 'charge not re-filed');
+});
+
+test('POST /api/bank-recon/statement: two identical lines with only one matching record -> only one is auto', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  const line = { date: '2026-10-05', amount: 50000, type: 'income', narration: 'Transfer from Member' };
+  const admin = await tokenFor(DB, 'u1');
+  const res = await uploadStatement(DB, admin, [line, { ...line }]);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.autoCount, 1);
+  assert.equal(res.body.unrecordedCount, 1);
+  assert.equal(res.body.duplicateCount, 0, 'identical lines within ONE statement are both filed');
+  const rows = DB.sqlite.prepare(`SELECT status, matched_refs_json FROM bank_recon_entries`).all();
+  assert.deepEqual(rows.map(r => r.status).sort(), ['auto', 'unrecorded']);
+
+  // Re-uploading the same statement now skips both.
+  const again = await uploadStatement(DB, admin, [line, { ...line }]);
+  assert.equal(again.body.duplicateCount, 2);
+  assert.equal(reconCount(DB), 2);
+});
+
+test('POST /api/bank-recon/statement: a record already used by an auto/resolved entry is never re-matched; needs_attention candidates are not reserved', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i2','2026-10-05',20000)`).run();
+  DB.sqlite.prepare(
+    `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brcA','bal:1','2026-10-05',50000,'in','resolved','[{"sourceTable":"income","sourceId":"i1"}]')`
+  ).run();
+  DB.sqlite.prepare(
+    `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,candidates_json) VALUES ('brcB','bal:2','2026-10-05',20000,'in','needs_attention','[[{"sourceTable":"income","sourceId":"i2"}]]')`
+  ).run();
+  const admin = await tokenFor(DB, 'u1');
+  const res = await uploadStatement(DB, admin, [
+    { date: '2026-10-05', amount: 50000, type: 'income', narration: 'Transfer A' },
+    { date: '2026-10-05', amount: 20000, type: 'income', narration: 'Transfer B' },
+  ]);
+  assert.equal(res.status, 200);
+  const rows = DB.sqlite.prepare(`SELECT amount, status, matched_refs_json FROM bank_recon_entries WHERE balance_history_id LIKE 'stmt:%'`).all();
+  assert.equal(rows.find(r => r.amount === 50000).status, 'unrecorded', 'i1 is already resolved elsewhere');
+  const b = rows.find(r => r.amount === 20000);
+  assert.equal(b.status, 'auto');
+  assert.deepEqual(JSON.parse(b.matched_refs_json), [{ sourceTable: 'income', sourceId: 'i2' }]);
+});
+
+test('run-bank-recon: two identical drops with one matching expense -> only one auto', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,status) VALUES ('e1','2026-10-05',30000,'bank_transfer','approved')`).run();
+  const history = [
+    { id: 'bal1', balance: 500000, checked_at: '2026-10-04T08:00:00Z' },
+    { id: 'bal2', balance: 470000, checked_at: '2026-10-05T08:00:00Z' },
+    { id: 'bal3', balance: 440000, checked_at: '2026-10-05T12:00:00Z' },
+  ];
+  const restore = stubWatchdogForSweep(history);
+  let body;
+  try {
+    const res = await onRequest({ request: req('internal/run-bank-recon', { method: 'POST', headers: bearer(CRON_SECRET) }), env: baseEnv(DB) });
+    body = await readJson(res);
+  } finally { restore(); }
+  assert.equal(body.autoCount, 1);
+  assert.equal(body.unrecordedCount, 1);
+});
+
+test('POST /api/bank-recon/entries/:id/ignore and /unmatch: it_admin only, status changes, unmatch frees the record', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json) VALUES ('brc1','bal:1','2026-10-05',5000,'out','auto','[{"sourceTable":"expenses","sourceId":"e1"}]','[[{"sourceTable":"expenses","sourceId":"e1"}]]')`).run();
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status) VALUES ('brc2','bal:2','2026-10-06',5000,'out','unrecorded')`).run();
+  const accountant = await tokenFor(DB, 'u3');
+  const admin = await namedToken(DB, 'u1');
+  const post = (path, token, body) => onRequest({ request: req(path, { method: 'POST', headers: bearer(token), body }), env: baseEnv(DB) });
+
+  assert.equal((await post('bank-recon/entries/brc2/ignore', accountant)).status, 403);
+  assert.equal((await post('bank-recon/entries/brc1/unmatch', accountant)).status, 403);
+  assert.equal((await post('bank-recon/entries/nope/ignore', admin)).status, 404);
+
+  // brc1 holds e1, so resolving brc2 to e1 conflicts.
+  const conflict = await post('bank-recon/entries/brc2/resolve', admin, { chosenRefs: [{ sourceTable: 'expenses', sourceId: 'e1' }] });
+  assert.equal(conflict.status, 409);
+  assert.match((await readJson(conflict)).error, /already matched to another bank line/);
+  // Re-resolving brc1 itself to its own ref is not a conflict.
+  assert.equal((await post('bank-recon/entries/brc1/resolve', admin, { chosenRefs: [{ sourceTable: 'expenses', sourceId: 'e1' }] })).status, 200);
+
+  const unmatched = await post('bank-recon/entries/brc1/unmatch', admin);
+  assert.equal(unmatched.status, 200);
+  const u = await readJson(unmatched);
+  assert.equal(u.status, 'unrecorded');
+  assert.deepEqual(u.matchedRefs, []);
+  assert.deepEqual(u.candidates, []);
+  assert.equal(u.resolvedBy, '');
+  assert.equal(u.resolvedAt, '');
+  assert.equal(DB.sqlite.prepare(`SELECT resolved_at FROM bank_recon_entries WHERE id='brc1'`).get().resolved_at, null);
+
+  // e1 is free again.
+  const nowOk = await post('bank-recon/entries/brc2/resolve', admin, { chosenRefs: [{ sourceTable: 'expenses', sourceId: 'e1' }] });
+  assert.equal(nowOk.status, 200);
+
+  const ignored = await post('bank-recon/entries/brc1/ignore', admin);
+  assert.equal(ignored.status, 200);
+  const ig = await readJson(ignored);
+  assert.equal(ig.status, 'ignored');
+  assert.deepEqual(ig.matchedRefs, []);
+  assert.equal(ig.resolvedBy, 'IT Administrator');
+  assert.ok(ig.resolvedAt);
+});
+
+test('GET /api/bank-recon/entries: matchedDetails describes each matched record, flags missing ones', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,bank_amount,description,status) VALUES ('e1','2026-10-05',8000,'split',5000,'Generator diesel','approved')`).run();
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount,source,donor_name) VALUES ('i1','2026-10-04',2000,'donation','Bro. Ade')`).run();
+  DB.sqlite.prepare(`INSERT INTO remittances (id,label,amount,paid_date,bank_amount,status) VALUES ('r1','Area remittance',3000,'2026-10-03',3000,'paid')`).run();
+  DB.sqlite.prepare(`INSERT INTO cash_transactions (id,type,date,amount,description) VALUES ('c1','withdrawal','2026-10-02',1000,'')`).run();
+  DB.sqlite.prepare(`INSERT INTO petty_cash (id,type,purpose,amount,payment_method,created_at) VALUES ('p1','refill','Float top-up',4000,'bank_transfer','2026-10-01 09:00:00')`).run();
+  const refs = [
+    { sourceTable: 'expenses', sourceId: 'e1' }, { sourceTable: 'remittances', sourceId: 'r1' },
+    { sourceTable: 'cash_transactions', sourceId: 'c1' }, { sourceTable: 'petty_cash', sourceId: 'p1' },
+    { sourceTable: 'expenses', sourceId: 'gone' },
+  ];
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brc1','bal:1','2026-10-05',13000,'out','resolved',?)`).run(JSON.stringify(refs));
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brc2','bal:2','2026-10-04',2000,'in','auto','[{"sourceTable":"income","sourceId":"i1"}]')`).run();
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status) VALUES ('brc3','bal:3','2026-10-03',1,'in','unrecorded')`).run();
+
+  const res = await onRequest({ request: req('bank-recon/entries', { headers: bearer(await tokenFor(DB, 'u3')) }), env: baseEnv(DB) });
+  assert.equal(res.status, 200);
+  const list = await readJson(res);
+  const e1 = list.find(e => e.id === 'brc1');
+  assert.deepEqual(e1.matchedDetails, [
+    { sourceTable: 'expenses', sourceId: 'e1', date: '2026-10-05', amount: 5000, description: 'Generator diesel' },
+    { sourceTable: 'remittances', sourceId: 'r1', date: '2026-10-03', amount: 3000, description: 'Area remittance' },
+    { sourceTable: 'cash_transactions', sourceId: 'c1', date: '2026-10-02', amount: 1000, description: 'withdrawal' },
+    { sourceTable: 'petty_cash', sourceId: 'p1', date: '2026-10-01', amount: 4000, description: 'Float top-up' },
+    { sourceTable: 'expenses', sourceId: 'gone', missing: true },
+  ]);
+  assert.deepEqual(list.find(e => e.id === 'brc2').matchedDetails,
+    [{ sourceTable: 'income', sourceId: 'i1', date: '2026-10-04', amount: 2000, description: 'donation: Bro. Ade' }]);
+  assert.deepEqual(list.find(e => e.id === 'brc3').matchedDetails, []);
 });
