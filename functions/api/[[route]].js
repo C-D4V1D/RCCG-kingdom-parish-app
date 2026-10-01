@@ -8615,10 +8615,18 @@ async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
       max_tokens: 2000,
     }),
   });
-  if (!resp.ok) throw new Error(`DeepSeek vision API error ${resp.status}`);
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`DeepSeek vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
+  }
   const data = await resp.json();
   const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error('DeepSeek returned no transcription text');
+  if (!text) {
+    // Diagnostic detail for a 200-but-empty reply (e.g. a model that silently can't
+    // handle the image_url content block) — without this the real cause is invisible.
+    const diag = { model: data.model, finish_reason: data.choices?.[0]?.finish_reason, error: data.error };
+    throw new Error(`DeepSeek returned no transcription text (${JSON.stringify(diag)})`);
+  }
   return text;
 }
 
