@@ -4031,37 +4031,159 @@ function renderDashboardErrorState(failed){
   });
 }
 
-// Contract v3 — Dashboard's tappable "Available for new spending" panel. `avail` is
-// a computeAvailableForNewSpending() result; rangeTo is that period's end date, for
-// the "Could rise to…" line. Whole panel is one keyboard-reachable control (role,
-// tabindex, Enter/Space) that jumps to the Budget page's full breakdown.
-function renderDashAvailablePanel(avail, rangeTo){
+// Contract v3 — Dashboard budget breakdown: budget progress bar + commitments card
+// with cascading waterfall logic.  `avail` is a computeAvailableForNewSpending()
+// result; `rangeTo` is the period's end date; `fund` is dashSpendable (available fund
+// after all deductions); `color` is the petty-health colour for the card.
+function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
+  const budgetRemaining = avail.budgetTotal - avail.budgetSpent;
+  const totalNextPeriod = avail.parts.nextPeriodFloat + avail.parts.cushion;
+
+  // Next-month short name for the "Set aside for X budget" label
+  const nextKey = budgetMonthOffset(avail.monthKey, 1);
+  const nextMo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(nextKey.split('-')[1], 10) - 1];
+
+  // ── Budget progress bar ──
+  const spentPct = avail.budgetTotal > 0 ? (avail.budgetSpent / avail.budgetTotal) * 100 : 0;
+  const markerPct = avail.progress?.pct || 0;
+  const paceClass = spentPct > 100 ? 'over' : (spentPct > markerPct ? 'watch' : 'ontrack');
+  const pctLabel = Math.round(spentPct);
+  const pctColor = paceClass === 'over' ? 'var(--danger)' : (paceClass === 'watch' ? '#B8860B' : 'var(--success)');
+
+  // ── Ideal allocations (before waterfall) ──
+  const floatTarget     = Math.max(avail.parts.currentFloat || 0, totalNextPeriod);
+  const idealSetAside   = Math.max(0, floatTarget - budgetRemaining);
+  const idealKnownBills = avail.parts.knownBillsSaved;
+  const idealHeldBack   = avail.parts.heldBack;
+
+  let dispKnownBills = idealKnownBills;
+  let dispSetAside   = idealSetAside;
+  let dispHeldBack   = idealHeldBack;
+  let dispAvail      = fund - budgetRemaining - idealSetAside - idealKnownBills - idealHeldBack;
+  let shortFlags     = {};
+
+  // ── Waterfall: cap in priority order (available → heldBack → setAside → knownBills) ──
+  if (dispAvail < 0) {
+    let deficit = -dispAvail;
+    dispAvail = 0;
+    shortFlags.available = true;
+    if (deficit > 0 && dispHeldBack > 0) {
+      const cut = Math.min(dispHeldBack, deficit);
+      dispHeldBack -= cut; deficit -= cut;
+      if (dispHeldBack < idealHeldBack) shortFlags.heldBack = true;
+    }
+    if (deficit > 0 && dispSetAside > 0) {
+      const cut = Math.min(dispSetAside, deficit);
+      dispSetAside -= cut; deficit -= cut;
+      if (dispSetAside < idealSetAside) shortFlags.setAside = true;
+    }
+    if (deficit > 0 && dispKnownBills > 0) {
+      const cut = Math.min(dispKnownBills, deficit);
+      dispKnownBills -= cut; deficit -= cut;
+      if (dispKnownBills < idealKnownBills) shortFlags.knownBills = true;
+    }
+  }
+
+  // ── Status badge for "Available for new spending" ──
   const statusMap = {
-    yes:   { icon:'✅', label:'Yes',           color:'var(--success)' },
-    none:  { icon:'🟡', label:'Nothing spare', color:'#B8860B' },
-    short: { icon:'🔴', label:'Short',          color:'var(--danger)' },
+    yes:   { icon:'✅', label:'Yes',           sColor:'var(--success)' },
+    none:  { icon:'🟡', label:'Nothing spare', sColor:'#B8860B' },
+    short: { icon:'🔴', label:'Nothing spare', sColor:'var(--danger)' },
   };
   const st = statusMap[avail.status] || statusMap.short;
-  const negative = avail.free < 0;
-  const amountText = negative ? `−${fmt(Math.abs(avail.free))}` : fmt(avail.free);
+
+  // "Could rise to …" note
   const riseLine = (avail.freeEnd > avail.free && avail.freeEnd > 0)
     ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(avail.freeEnd)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
     : '';
-  const nextPeriodRow = Math.max(avail.parts.currentFloat||0, avail.parts.nextPeriodFloat + avail.parts.cushion);
-  return `<div role="button" tabindex="0" onclick="App.openBudgetBreakdown()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.openBudgetBreakdown();}" style="cursor:pointer;margin-bottom:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);border-left:4px solid ${st.color};background:var(--surface2, rgba(0,0,0,0.02))">
-    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3)">Available for new spending</div>
-    <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;flex-wrap:wrap">
-      <span style="font-size:14px">${st.icon} ${esc(st.label)}</span>
-      <span style="font-size:20px;font-weight:800;color:${st.color};letter-spacing:-0.5px">${amountText}</span>
-    </div>
-    ${riseLine}
-    <div style="margin-top:8px;font-size:11.5px;color:var(--text2);line-height:1.7">
-      <div style="display:flex;justify-content:space-between;gap:8px"><span>Next period's money + cushion</span><strong>${fmt(nextPeriodRow)}</strong></div>
-      <div style="display:flex;justify-content:space-between;gap:8px"><span>Known bills saved</span><strong>${fmt(avail.parts.knownBillsSaved)}</strong></div>
-      <div style="display:flex;justify-content:space-between;gap:8px"><span>Held back for savings</span><strong>${fmt(avail.parts.heldBack)}</strong></div>
-    </div>
-    <div style="margin-top:6px;font-size:12px;font-weight:600;color:var(--primary)">See full breakdown ›</div>
-  </div>`;
+
+  // ── Warning lines ──
+  let warningHtml = '';
+  if (shortFlags.setAside && shortFlags.knownBills) {
+    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">Fund is too low. Known bills and ${esc(nextMo)} budget set-aside are underfunded.</div>`;
+  } else if (shortFlags.setAside) {
+    warningHtml = `<div style="font-size:11.5px;color:var(--danger);margin-top:4px;font-weight:600">No money for new spending. ${esc(nextMo)} budget set-aside is underfunded by ${fmt(idealSetAside - dispSetAside)}.</div>`;
+  }
+
+  // ── Shortfall note helper ──
+  function shortNote(actual, ideal, zeroMsg, partialMsg) {
+    if (actual === 0) return `<div style="width:100%;font-size:10.5px;color:var(--danger);margin-top:2px;padding:4px 8px;background:var(--danger)0D;border-radius:6px">${zeroMsg}</div>`;
+    return `<div style="width:100%;font-size:10.5px;color:var(--danger);margin-top:2px;padding:4px 8px;background:var(--danger)0D;border-radius:6px">${partialMsg}</div>`;
+  }
+
+  // ── Budget remaining display ──
+  const brNeg = budgetRemaining < 0;
+  const brText = brNeg ? `−${fmt(Math.abs(budgetRemaining))}` : fmt(budgetRemaining);
+  const brColor = brNeg ? 'var(--danger)' : color;
+
+  // ── Known bills row ──
+  const knownBillsNote = shortFlags.knownBills
+    ? shortNote(dispKnownBills, idealKnownBills,
+        `⚠ Nothing saved for upcoming bills — ${fmt(idealKnownBills)} needed is completely unfunded`,
+        `⚠ ${fmt(idealKnownBills - dispKnownBills)} short — only ${fmt(dispKnownBills)} of ${fmt(idealKnownBills)} saved for upcoming bills`)
+    : '';
+  const knownBillsSub = shortFlags.knownBills
+    ? ` <span style="font-size:10px;color:var(--text3)">(target: ${fmt(idealKnownBills)})</span>` : '';
+
+  // ── Set-aside row ──
+  const setAsideNote = shortFlags.setAside
+    ? shortNote(dispSetAside, idealSetAside,
+        `⚠ Nothing set aside — ${fmt(idealSetAside)} needed for ${esc(nextMo)} budget is completely unfunded`,
+        `⚠ ${fmt(idealSetAside - dispSetAside)} short — only ${fmt(dispSetAside)} of ${fmt(idealSetAside)} set aside for ${esc(nextMo)} budget`)
+    : '';
+
+  // ── Held-back row ──
+  const heldBackNote = shortFlags.heldBack
+    ? shortNote(dispHeldBack, idealHeldBack,
+        `⚠ Nothing available for savings — ${fmt(idealHeldBack)} target is completely unfunded`,
+        `⚠ ${fmt(idealHeldBack - dispHeldBack)} short — only ${fmt(dispHeldBack)} of ${fmt(idealHeldBack)} held back for savings`)
+    : '';
+
+  // ── Row builder ──
+  function row(label, val, valColor, note) {
+    const wrap = note ? 'flex-wrap:wrap;' : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:11.5px;color:var(--text2);line-height:1.7;${wrap}">
+      <span>${label}</span><span style="font-weight:600;${valColor ? 'color:'+valColor : ''}">${fmt(val)}</span>${note || ''}
+    </div>`;
+  }
+
+  // ── Assemble HTML ──
+  const budgetBar = avail.budgetTotal > 0 ? `
+    <div style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+        <span style="font-size:11px;font-weight:600;color:var(--text3)">This Period's Budget</span>
+        <span style="font-size:11px;font-weight:700;color:${pctColor}">${pctLabel}% used</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:6px">
+        <span style="font-size:12px;font-weight:700;color:var(--text)">${fmt(avail.budgetSpent)}</span>
+        <span style="font-size:11px;color:var(--text3)">of ${fmt(avail.budgetTotal)}</span>
+      </div>
+      ${renderBudgetBar(spentPct, markerPct, paceClass)}
+    </div>` : '';
+
+  return `${budgetBar}
+    <div style="margin-top:14px;padding:12px;background:var(--surface2, rgba(0,0,0,0.02));border-radius:10px;border:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3)">Budget remaining</span>
+        <span style="font-size:16px;font-weight:800;color:${brColor}">${brText}</span>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:8px">
+        ${row('Known bills saved' + knownBillsSub, dispKnownBills, shortFlags.knownBills ? 'var(--danger)' : '', knownBillsNote)}
+        ${row('Set aside for ' + esc(nextMo) + ' budget <span style="font-size:10px;color:var(--text3)">(' + fmt(totalNextPeriod) + ')</span>', dispSetAside, shortFlags.setAside ? 'var(--danger)' : '', setAsideNote)}
+        ${row('Held back for savings', dispHeldBack, shortFlags.heldBack ? 'var(--danger)' : '', heldBackNote)}
+      </div>
+      <div style="border-top:1px dashed var(--border);margin-top:8px;padding-top:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:11.5px;font-weight:600;color:var(--text)">Available for new spending
+            <span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:12px;background:${st.sColor}15;font-size:10px;font-weight:700;color:${st.sColor};margin-left:4px">${st.icon} ${esc(st.label)}</span>
+          </span>
+          <span style="font-size:16px;font-weight:800;color:${st.sColor}">${dispAvail > 0 ? fmt(dispAvail) : '₦0'}</span>
+        </div>
+        ${riseLine}
+        ${warningHtml}
+      </div>
+      <div style="margin-top:6px;text-align:center"><a href="#" onclick="event.preventDefault();App.openBudgetBreakdown()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">See full breakdown ›</a></div>
+    </div>`;
 }
 
 async function renderDashboard(){
@@ -5070,7 +5192,7 @@ async function renderDashboard(){
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <!-- Petty Cash Sustainability -->
-          ${(!dashIsPastPeriod && dashAvailable) ? renderDashAvailablePanel(dashAvailable, dashAvailableRangeTo) : `
+          ${(!dashIsPastPeriod && dashAvailable) ? renderDashBudgetBreakdown(dashAvailable, dashAvailableRangeTo, dashSpendable, dashSpendColor) : `
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px">
             <span style="color:var(--text3)">Petty cash (committed)</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyCurrentFloat)}</span>
@@ -6116,10 +6238,12 @@ async function computeAvailableForNewSpending(monthKey, prefetched){
   const runway = engine.runwayMonths(result.free, growth);
   const status = result.free > 0 ? 'yes'
     : ((availableNow - Math.max(currentFloat, nextPeriodFloat)) >= 0 ? 'none' : 'short');
+  const budgetSpent = actuals.spentTotal || 0;
   return {
     ...result, growth, runway, income, normalMonthly, knownBillsMonthly,
     spendingStillToCome, expectedRestOfPeriod, monthKey, today, range,
     heldBackRows: heldBackInfo.rows, savedByKey: heldBackInfo.savedByKey, status, cfg,
+    budgetTotal: normalMonthly + Math.round(cushion), budgetSpent, progress,
   };
 }
 // Back-compat alias — kept in case anything else still calls the pre-v3 name.
