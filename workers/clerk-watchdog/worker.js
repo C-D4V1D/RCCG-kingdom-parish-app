@@ -106,13 +106,40 @@ export default {
       }
       const balance = Number(b.balance);
       if (!Number.isFinite(balance)) return json({ error: "balance must be a number" }, 400);
-      await env.KV.put("bank_balance", JSON.stringify({ balance, checked_at: new Date().toISOString() }));
+      const checked_at = new Date().toISOString();
+      await env.KV.put("bank_balance", JSON.stringify({ balance, checked_at }));
+      // Also keep a history entry for reconciliation, same id/list/cursor pattern as /events,
+      // but with no TTL: balance history should persist, unlike the 60-day event mailbox.
+      const id = `${String(Date.now()).padStart(13, "0")}-${crypto.randomUUID().slice(0, 8)}`;
+      await env.KV.put(`bal:${id}`, JSON.stringify({ balance, checked_at, id }));
+      await env.KV.put("balance_last", id);
       return json({ ok: true });
     }
 
     if (req.method === "GET" && url.pathname === "/bank-balance") {
       const v = await env.KV.get("bank_balance");
       return json(v ? JSON.parse(v) : { balance: null, checked_at: null });
+    }
+
+    if (req.method === "GET" && url.pathname === "/balance-history") {
+      const after = url.searchParams.get("after") || "";
+      // bal: entries never expire (unlike ev:, which TTLs out in 60 days), so the list can grow
+      // past KV's ~1000-keys-per-page cap — follow the cursor until list_complete, or a caught-up
+      // client's `after` id would eventually fall outside the single first page and see nothing new.
+      let keys = [], cursor;
+      for (;;) {
+        const page = await env.KV.list({ prefix: "bal:", cursor });
+        keys = keys.concat(page.keys);
+        if (page.list_complete || !page.cursor) break;
+        cursor = page.cursor;
+      }
+      const ids = keys.map((k) => k.name.slice(4)).filter((id) => id > after).sort().slice(0, 50);
+      const history = [];
+      for (const id of ids) {
+        const v = await env.KV.get(`bal:${id}`);
+        if (v) history.push(JSON.parse(v));
+      }
+      return json({ history, last: ids.length ? ids[ids.length - 1] : after });
     }
 
     if (req.method === "GET" && url.pathname === "/config") {
