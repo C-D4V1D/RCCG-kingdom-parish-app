@@ -10,7 +10,10 @@ function sha256Hex(s) {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
 
-// In-memory KV stub over a Map, matching the {get, put} surface the worker uses.
+// In-memory KV stub over a Map, matching the {get, put, list} surface the worker uses.
+// list() paginates for real (small fixed page size) so tests can exercise cursor-following —
+// Cloudflare's real KV list() is page-limited the same way, just at a much larger page size.
+const KV_LIST_PAGE_SIZE = 3;
 function createKV(seed = {}) {
   const map = new Map(Object.entries(seed));
   return {
@@ -23,8 +26,12 @@ function createKV(seed = {}) {
     async delete(key) {
       map.delete(key);
     },
-    async list({ prefix = '' } = {}) {
-      return { keys: [...map.keys()].filter(k => k.startsWith(prefix)).sort().map(name => ({ name })) };
+    async list({ prefix = '', cursor = '' } = {}) {
+      const all = [...map.keys()].filter(k => k.startsWith(prefix)).sort();
+      const start = cursor ? all.indexOf(cursor) + 1 : 0;
+      const page = all.slice(start, start + KV_LIST_PAGE_SIZE);
+      const list_complete = start + page.length >= all.length;
+      return { keys: page.map(name => ({ name })), list_complete, cursor: list_complete ? '' : page[page.length - 1] };
     },
     _map: map,
   };
@@ -434,6 +441,22 @@ test('GET /balance-history with no after returns entries in ascending id order, 
   assert.equal(all.last, await env.KV.get('balance_last'));
 });
 
+test('GET /balance-history follows the KV list cursor past a single page', async () => {
+  const env = createEnv();
+  // KV_LIST_PAGE_SIZE is 3 — seed more than that directly so a single-page list() would
+  // miss some, the way Cloudflare's real page-limited list() would once bal: entries
+  // (which never expire) pass its page size.
+  const ids = [];
+  for (let i = 0; i < 7; i++) {
+    const id = String(i).padStart(13, '0') + '-aaaaaaaa';
+    ids.push(id);
+    await env.KV.put(`bal:${id}`, JSON.stringify({ balance: i, checked_at: new Date().toISOString(), id }));
+  }
+  const all = await readJson(await worker.fetch(req('/balance-history'), env));
+  assert.deepEqual(all.history.map(h => h.id), ids);
+  assert.equal(all.last, ids[ids.length - 1]);
+});
+
 test('GET /balance-history?after=<id> returns only entries after that id', async () => {
   const env = createEnv();
   const post1 = await readJson(await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 10 } }), env));
@@ -483,4 +506,13 @@ test('validateConfig checks the new balance-check supervisor fields', () => {
   good.automations.supervisor.balance_check_active_until = '21:00';
   good.automations.supervisor.balance_match_window_days = 14;
   assert.deepEqual(validateConfig(good), []);
+});
+
+test('validateConfig stays backward compatible with a config saved before the balance-check fields existed', () => {
+  // A config saved before this change has only interval_seconds/ping_every_cycles under
+  // supervisor — the admin must still be able to save unrelated settings without being
+  // blocked by four fields the Settings UI doesn't even show yet.
+  const legacy = structuredClone(DEFAULT_CONFIG);
+  legacy.automations.supervisor = { interval_seconds: 300, ping_every_cycles: 2 };
+  assert.deepEqual(validateConfig(legacy), []);
 });

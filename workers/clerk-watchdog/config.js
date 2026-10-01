@@ -326,12 +326,22 @@ export function validateConfig(cfg) {
     else {
       if (!isNonNegFinite(sup.interval_seconds)) errors.push("automations.supervisor.interval_seconds must be a number >= 0");
       if (!isNonNegFinite(sup.ping_every_cycles)) errors.push("automations.supervisor.ping_every_cycles must be a number >= 0");
-      if (!(isNonNegFinite(sup.balance_check_interval_minutes) && sup.balance_check_interval_minutes >= 1)) {
+      // The four balance-check fields below are OPTIONAL on a saved config — a config saved
+      // before they existed has none of them, and must stay valid to save (the app's helpers
+      // all fall back to a built-in default when a field is absent, same as everywhere else
+      // in this file). Only validate their shape when the caller actually supplies one.
+      if (sup.balance_check_interval_minutes !== undefined
+          && !(isNonNegFinite(sup.balance_check_interval_minutes) && sup.balance_check_interval_minutes >= 1)) {
         errors.push("automations.supervisor.balance_check_interval_minutes must be a number >= 1");
       }
-      if (!isTime(sup.balance_check_active_from)) errors.push("automations.supervisor.balance_check_active_from must be HH:MM 24h");
-      if (!isTime(sup.balance_check_active_until)) errors.push("automations.supervisor.balance_check_active_until must be HH:MM 24h");
-      if (!(isNonNegFinite(sup.balance_match_window_days) && sup.balance_match_window_days >= 1)) {
+      if (sup.balance_check_active_from !== undefined && !isTime(sup.balance_check_active_from)) {
+        errors.push("automations.supervisor.balance_check_active_from must be HH:MM 24h");
+      }
+      if (sup.balance_check_active_until !== undefined && !isTime(sup.balance_check_active_until)) {
+        errors.push("automations.supervisor.balance_check_active_until must be HH:MM 24h");
+      }
+      if (sup.balance_match_window_days !== undefined
+          && !(isNonNegFinite(sup.balance_match_window_days) && sup.balance_match_window_days >= 1)) {
         errors.push("automations.supervisor.balance_match_window_days must be a number >= 1");
       }
     }

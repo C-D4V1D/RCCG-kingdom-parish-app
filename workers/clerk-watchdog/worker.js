@@ -123,8 +123,17 @@ export default {
 
     if (req.method === "GET" && url.pathname === "/balance-history") {
       const after = url.searchParams.get("after") || "";
-      const listed = await env.KV.list({ prefix: "bal:" });
-      const ids = listed.keys.map((k) => k.name.slice(4)).filter((id) => id > after).sort().slice(0, 50);
+      // bal: entries never expire (unlike ev:, which TTLs out in 60 days), so the list can grow
+      // past KV's ~1000-keys-per-page cap — follow the cursor until list_complete, or a caught-up
+      // client's `after` id would eventually fall outside the single first page and see nothing new.
+      let keys = [], cursor;
+      for (;;) {
+        const page = await env.KV.list({ prefix: "bal:", cursor });
+        keys = keys.concat(page.keys);
+        if (page.list_complete || !page.cursor) break;
+        cursor = page.cursor;
+      }
+      const ids = keys.map((k) => k.name.slice(4)).filter((id) => id > after).sort().slice(0, 50);
       const history = [];
       for (const id of ids) {
         const v = await env.KV.get(`bal:${id}`);
