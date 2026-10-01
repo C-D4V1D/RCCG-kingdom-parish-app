@@ -123,6 +123,55 @@ test('automations: accountant GET /api/automations/config is filtered to their o
   } finally { restore(); }
 });
 
+test('automations: it_admin POST /api/automations/test-alert proxies the Worker and hides the token', async () => {
+  const restore = stubFetch(() => jsonResponse(200, { ok: true, sent: 1, of: 1 }));
+  try {
+    const token = await financeToken({ role: 'it_admin' });
+    const res = await onRequest({ request: req('automations/test-alert', { method: 'POST', headers: bearer(token) }), env: baseEnv });
+    assert.equal(res.status, 200);
+    const data = await readJson(res);
+    assert.deepEqual(data, { ok: true, sent: 1, of: 1 });
+    assert.equal(JSON.stringify(data).includes(WATCHDOG_TOKEN), false);
+
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, `${WATCHDOG_URL}/test-alert`);
+    assert.equal(fetchCalls[0].init.method, 'POST');
+    assert.equal(fetchCalls[0].init.headers['x-watchdog-token'], WATCHDOG_TOKEN);
+  } finally { restore(); }
+});
+
+test('automations: it_admin POST /api/automations/test-alert passes through the Worker\'s own failure reason', async () => {
+  const restore = stubFetch(() => jsonResponse(200, { ok: false, error: 'no bot key (TELEGRAM_BOT_TOKEN) set on the Worker' }));
+  try {
+    const token = await financeToken({ role: 'it_admin' });
+    const res = await onRequest({ request: req('automations/test-alert', { method: 'POST', headers: bearer(token) }), env: baseEnv });
+    assert.equal(res.status, 200);
+    const data = await readJson(res);
+    assert.equal(data.ok, false);
+    assert.match(data.error, /TELEGRAM_BOT_TOKEN/);
+  } finally { restore(); }
+});
+
+test('automations: accountant POST /api/automations/test-alert is forbidden and never calls the Worker', async () => {
+  const restore = stubFetch(() => { throw new Error('Worker should not be called'); });
+  try {
+    const token = await financeToken({ role: 'accountant' });
+    const res = await onRequest({ request: req('automations/test-alert', { method: 'POST', headers: bearer(token) }), env: baseEnv });
+    assert.equal(res.status, 403);
+    assert.equal(fetchCalls.length, 0);
+  } finally { restore(); }
+});
+
+test('automations: GET /api/automations/test-alert (wrong method) is not found', async () => {
+  const restore = stubFetch(() => { throw new Error('Worker should not be called'); });
+  try {
+    const token = await financeToken({ role: 'it_admin' });
+    const res = await onRequest({ request: req('automations/test-alert', { headers: bearer(token) }), env: baseEnv });
+    assert.equal(res.status, 404);
+    assert.equal(fetchCalls.length, 0);
+  } finally { restore(); }
+});
+
 test('automations: accountant PUT /api/automations/config is forbidden and never calls the Worker', async () => {
   const restore = stubFetch(() => { throw new Error('Worker should not be called'); });
   try {
