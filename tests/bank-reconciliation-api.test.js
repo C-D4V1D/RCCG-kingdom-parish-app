@@ -458,6 +458,18 @@ test('POST /api/bank-recon/statement: re-uploading the same statement files noth
   assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE category='bank'`).get().n, 1, 'charge not re-filed');
 });
 
+test('POST /api/bank-recon/statement: a re-read with different AI narration wording is still a duplicate, and AI notes are stripped', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  const first = await uploadStatement(DB, admin, [{ date: '2026-09-26', amount: 115, type: 'income', narration: 'Bulk Credit - 291212 - 151824 [truncated]' }]);
+  assert.equal(first.body.duplicateCount, 0);
+  const second = await uploadStatement(DB, admin, [{ date: '2026-09-26', amount: 115, type: 'income', narration: 'Bulk Credit - 291212 - 151824[cut off]' }]);
+  assert.equal(second.body.duplicateCount, 1);
+  assert.equal(reconCount(DB), 1);
+  assert.equal(DB.sqlite.prepare(`SELECT narration FROM bank_recon_entries`).get().narration, 'Bulk Credit - 291212 - 151824');
+});
+
 test('POST /api/bank-recon/statement: two identical lines with only one matching record -> only one is auto', async () => {
   const DB = await freshDB();
   setDeepseekKey(DB);

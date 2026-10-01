@@ -8541,7 +8541,7 @@ function bankReconEntryFromRow(row) {
     status: row.status,
     matchedRefs: safeJsonParse(row.matched_refs_json, []),
     candidates: safeJsonParse(row.candidates_json, []),
-    narration: row.narration || '',
+    narration: cleanStatementNarration(row.narration),
     resolvedBy: row.resolved_by || '',
     resolvedAt: row.resolved_at || '',
     createdAt: row.created_at,
@@ -8703,7 +8703,17 @@ function classifyBankChargeNarration(narration, amount) {
 // transcribed text, or throws — the caller turns that into a user-facing error.
 const STATEMENT_OCR_PROMPT = 'You are transcribing a bank statement photo. Transcribe the statement table\'s rows as plain text '
   + '— date, narration, debit/credit amount and running balance for each row, one row per line. '
-  + 'Return only the transcribed text, no commentary, no markdown.';
+  + 'Copy each narration exactly as printed; if it is cut off or unreadable, copy only what is visible and never add '
+  + 'notes such as [truncated] or [cut off]. Return only the transcribed text, no commentary, no markdown.';
+
+// The OCR model sometimes annotates a cut-off narration ("[truncated]", "(cut off)") with
+// different wording on each read — strip those so stored narrations stay comparable.
+function cleanStatementNarration(n) {
+  return String(n || '')
+    .replace(/[\[(]\s*(truncated|cut[\s-]*off|illegible|unreadable|partially visible|continued)\s*[\])]/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 async function ocrStatementPhotoDeepSeek(DB, imageBase64, mimeType) {
   let deepseekKey = '';
@@ -8855,21 +8865,25 @@ async function handleBankReconStatement(DB, env, authz, body) {
   ).all();
   const priorStmt = (priorStmtRows || []).map(r => ({
     date: String(r.date || '').slice(0, 10), amount: Number(r.amount || 0), direction: r.direction,
-    narration: String(r.narration || '').trim(), consumed: false,
+    narration: cleanStatementNarration(r.narration), consumed: false,
   }));
   const takePriorStmtLine = (date, amount, direction, narration) => {
-    const hit = priorStmt.find(p => !p.consumed && p.date === date && p.direction === direction
-      && p.narration === narration && Math.abs(p.amount - amount) < 0.005);
+    // Narration is only a tie-breaker: the AI reads the same line's text slightly differently
+    // on each upload, so date + direction + amount decide. Still one-for-one, so a statement
+    // with two genuinely identical lines files both, and a re-upload files neither.
+    const same = p => !p.consumed && p.date === date && p.direction === direction && Math.abs(p.amount - amount) < 0.005;
+    const hit = priorStmt.find(p => same(p) && p.narration === narration) || priorStmt.find(same);
     if (hit) hit.consumed = true;
     return !!hit;
   };
+
 
   let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0, duplicateCount = 0;
   for (const item of parsed.items) {
     const date = String(item.date || '').slice(0, 10);
     const amount = Math.abs(Number(item.amount || 0));
     if (!date || !amount) continue; // AI gave us nothing usable for this line
-    const narration = String(item.narration || '').trim();
+    const narration = cleanStatementNarration(item.narration);
     const direction = item.type === 'expense' ? 'out' : 'in';
 
     if (takePriorStmtLine(date, amount, direction, narration)) { duplicateCount++; continue; }
