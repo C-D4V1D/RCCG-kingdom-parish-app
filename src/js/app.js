@@ -937,6 +937,10 @@ const DB = {
   getPortalBankBalance()       { return apiFetch('bank-portal-balance'); },
   requestPortalBankBalanceRefresh() { return apiFetch('bank-portal-balance/refresh','POST'); },
 
+  getBankReconEntries()        { return apiFetch('bank-recon/entries'); },
+  resolveBankReconEntry(id,d)  { return apiFetch(`bank-recon/entries/${id}/resolve`,'POST',d); },
+  uploadBankStatement(d)       { return apiFetch('bank-recon/statement','POST',d); },
+
   getNotifications()           { return apiFetch('notifications'); },
   addNotification(title,body,type='info'){
     if(isSatellite()) return;
@@ -12502,6 +12506,11 @@ function setBankTab(t){ state.bankTab=t; renderBank() }
 async function renderBank(){
   renderPageSkeleton({ pageTitle: 'Bank Account', pageSub: monthLabel(), kpiCount: 4, hint: 'Loading bank activity…' });
   // Pulled getRemRates into the parallel batch (was awaited sequentially after).
+  // Bank reconciliation entries are supplementary insight on top of the core Bank page
+  // (not essential to it, unlike everything else in this batch), so a failure here must
+  // never block the page — it's still fetched in the same parallel batch, but its own
+  // rejection is excluded from _bankFailed below and simply falls back to [].
+  const BANK_RECON_SOURCE_LABEL = 'Bank reconciliation entries';
   const _bankSources = [
     ['Cash transactions',  () => DB.getCashTransactions()],
     ['Expense records',    () => DB.getExpenses()],
@@ -12510,15 +12519,20 @@ async function renderBank(){
     ['Period range',       () => getCurrentPeriodRange()],
     ['Remittance rates',   () => getRemRates()],
     ['Satellite pass-through funds', () => DB.getSatelliteFunds()],
+    [BANK_RECON_SOURCE_LABEL, () => DB.getBankReconEntries()],
   ];
   const _bankSettled = await Promise.allSettled(_bankSources.map(([, fn]) => fn()));
-  const _bankFailed = _bankSettled.map((r, i) => r.status === 'rejected' ? { label: _bankSources[i][0], err: r.reason } : null).filter(Boolean);
+  const _bankFailed = _bankSettled.map((r, i) => r.status === 'rejected' && _bankSources[i][0] !== BANK_RECON_SOURCE_LABEL ? { label: _bankSources[i][0], err: r.reason } : null).filter(Boolean);
   if(_bankFailed.length > 0){
     renderPageErrorState({ pageId: 'bank', pageTitle: 'Bank Account', pageSub: monthLabel(), failed: _bankFailed });
     return;
   }
   const bankPortalBalance = await fetchPortalBankBalanceQuiet();
   const [allCashTx, allExpenses, allIncome, allRemittances, periodRange, _bankRatesData, allSatFundsRB] = _bankSettled.map(r => r.value);
+  const _bankReconSettled = _bankSettled[7];
+  const bankReconEntries = (_bankReconSettled && _bankReconSettled.status === 'fulfilled') ? (_bankReconSettled.value || []) : [];
+  // Stashed for the Review modal (reviewBankReconEntry) to look up by id without a refetch.
+  state._bankReconEntries = bankReconEntries;
   const remRates = _bankRatesData.rates || DEFAULT_REMITTANCE_RATES;
   const tab = state.bankTab||'overview';
   const { from: bankPeriodFrom, to: bankPeriodTo } = periodRange;
@@ -12747,7 +12761,7 @@ async function renderBank(){
       tab==='withdrawals'?renderBankWithdrawals(monthlyWithdrawals):
       tab==='deposits'?renderBankDeposits(monthlyDeposits):
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
-      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups)}`;
+      renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries)}`;
 
   // These populate their own DOM regions asynchronously after the page above
   // is already showing, so a slow/failed fetch never blocks the Bank page itself.
@@ -13171,7 +13185,7 @@ async function fetchPortalBankBalanceQuiet(){
   try { return await DB.getPortalBankBalance(); } catch { return { balance: null, checked_at: null }; }
 }
 
-function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0){
+function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRems,bankWithdrawals,pettyBankTopups=0,bankReconEntries=[]){
   return `
     <div class="card">
       <div class="card-header"><span class="card-title">Bank Reconciliation Summary</span></div>
@@ -13200,6 +13214,8 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
       </div>
       <div id="bankCompareResult"></div>
     </div>
+
+    ${renderBankReconCard(bankReconEntries, state.user?.role)}
 
     <div class="card">
       <div class="card-header"><span class="card-title">All Bank Transactions (Ledger)</span></div>
@@ -13263,6 +13279,149 @@ async function autoCheckBankReconciliation(){
       }
     }
   } catch(_) { /* supplementary check only — fail silently */ }
+}
+
+// ── Automatic Bank Reconciliation (box balance checks + statement OCR) ──────
+// Card shown on the Reconciliation tab. Gated client-side to mirror the server's
+// 403 on /api/bank-recon/* (it_admin + accountant can view; it_admin alone can
+// act — resolve an entry or upload a statement).
+const BANK_RECON_SOURCE_LABELS = {
+  expenses: 'Expense', income: 'Income', remittances: 'Remittance',
+  cash_transactions: 'Cash transaction', petty_cash: 'Petty cash'
+};
+function bankReconSourceLabel(t){ return BANK_RECON_SOURCE_LABELS[t] || t; }
+
+function bankReconStatusBadge(status){
+  switch(status){
+    case 'auto':             return `<span class="badge badge-success">✅ Auto-matched</span>`;
+    case 'resolved':         return `<span class="badge badge-success">✅ Resolved</span>`;
+    case 'needs_attention':  return `<span class="badge badge-warn">⚠️ Needs review</span>`;
+    case 'unrecorded':       return `<span class="badge badge-danger">❓ Unrecorded</span>`;
+    default:                 return `<span class="badge badge-info">${esc(status||'—')}</span>`;
+  }
+}
+
+function renderBankReconCard(entries, role){
+  if(role !== 'it_admin' && role !== 'accountant') return '';
+  const isAdmin = role === 'it_admin';
+  const sorted = [...(entries||[])].sort((a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0));
+  const shown = sorted.slice(0, 20);
+  const uploadBtn = isAdmin
+    ? `<button class="btn btn-sm btn-primary" onclick="App.showBankStatementUploadForm()">📄 Upload a statement</button>`
+    : `<button class="btn btn-sm" disabled title="Only the IT administrator can upload a statement">📄 Upload a statement</button>`;
+  const rowsHtml = shown.map(e=>{
+    const isIn = e.direction === 'in';
+    const color = isIn ? 'var(--success,#2e7d32)' : 'var(--danger)';
+    const reviewBtn = e.status === 'needs_attention'
+      ? (isAdmin
+          ? `<button class="btn btn-sm btn-primary" onclick="App.reviewBankReconEntry('${esc(e.id)}')">Review →</button>`
+          : `<button class="btn btn-sm" disabled title="Only the IT administrator can resolve this">Review →</button>`)
+      : '';
+    return `<div style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
+          ${e.narration?`<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.narration)}</div>`:''}
+        </div>
+        <div style="text-align:right;flex-shrink:0;white-space:nowrap">
+          <span style="font-size:14px;font-weight:700;color:${color}">${isIn?'↑':'↓'} ${fmt(e.amount)}</span>
+        </div>
+        <div style="flex-shrink:0">${bankReconStatusBadge(e.status)}</div>
+        ${reviewBtn?`<div style="flex-shrink:0">${reviewBtn}</div>`:''}
+      </div>`;
+  }).join('');
+  return `<div class="card">
+    <div class="card-header"><span class="card-title">Bank Reconciliation</span>${uploadBtn}</div>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
+    ${shown.length ? rowsHtml : `<div class="empty-table">No bank movements reported yet.</div>`}
+    ${sorted.length>20?`<div style="font-size:11px;color:var(--text3);margin-top:8px">Showing the most recent 20 of ${sorted.length} movements.</div>`:''}
+  </div>`;
+}
+
+function reviewBankReconEntry(id){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can resolve this.','danger'); return; }
+  const entry = (state._bankReconEntries||[]).find(e=>e.id===id);
+  if(!entry){ showAlert('This entry could not be found — please refresh the Bank page and try again.','danger'); return; }
+  const isIn = entry.direction === 'in';
+  const candidates = entry.candidates || [];
+  const comboHtml = candidates.length ? candidates.map((combo,i)=>{
+    const total = (combo||[]).reduce((s,c)=>s+(c.amount||0),0);
+    const items = (combo||[]).map(c=>`<div style="font-size:12px;color:var(--text2)">${esc(bankReconSourceLabel(c.sourceTable))} — ${fmt(c.amount)} (${fmtDate(c.date)})</div>`).join('');
+    return `<div class="at-subcard" style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Option ${i+1}${combo.length>1?` — ${combo.length} entries combined`:''}</div>
+        ${items}
+        <div style="font-size:13px;font-weight:700;margin-top:6px">Total: ${fmt(total)}</div>
+        <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="App.chooseBankReconMatch('${esc(entry.id)}',${i},this)">Choose this match</button>
+      </div>`;
+  }).join('') : `<p style="font-size:13px;color:var(--text3)">No candidate matches were found for this movement.</p>`;
+
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🔍 Review Bank Movement</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${isIn?'Money came into':'Money went out of'} the bank on <strong>${fmtDate(entry.date)}</strong> for <strong>${fmt(entry.amount)}</strong>. Choose which of your recorded entries this matches, or say none of them do.</span></div>
+    <div style="margin:12px 0">${comboHtml}</div>
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="App.resolveBankReconAddNew('${esc(entry.id)}',this)">None of these — I'll add the entry myself</button>
+    </div>`);
+}
+
+async function chooseBankReconMatch(entryId, comboIndex, btn){
+  const entry = (state._bankReconEntries||[]).find(e=>e.id===entryId);
+  const combo = entry?.candidates?.[comboIndex];
+  if(!combo){ showAlert('This match could not be found — please refresh the Bank page and try again.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.resolveBankReconEntry(entryId, { chosenRefs: combo.map(c=>({sourceTable:c.sourceTable, sourceId:c.sourceId})) });
+    closeModal();
+    showAlert('Bank movement matched to your records.','success');
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to resolve this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function resolveBankReconAddNew(entryId, btn){
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.resolveBankReconEntry(entryId, { addNew: true });
+    closeModal();
+    showAlert('Marked resolved. Remember to record the entry yourself through Income/Expenses.','info');
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to resolve this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+function showBankStatementUploadForm(){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can upload a statement.','danger'); return; }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">📄 Upload Bank Statement</div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Upload a photo or screenshot of the bank statement. The box reads it and matches it against your records — this can take a few seconds.</span></div>
+    <div class="form-group"><label class="form-label">Statement image *</label><input type="file" id="bs_photo" accept="image/*" class="form-input" /></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankStatementUpload(this)">Upload &amp; Check</button></div>`);
+}
+
+async function submitBankStatementUpload(btn){
+  const file = document.getElementById('bs_photo')?.files?.[0];
+  if(!file){ showAlert('Please choose an image of the statement.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Checking…');
+  try {
+    // Higher max dimension / quality than the deposit-slip compression (1200/0.75) —
+    // a statement has more, smaller text that OCR needs to be able to read.
+    const dataUrl = await compressPhoto(file, 1600, 0.85);
+    const imageBase64 = dataUrl.split(',')[1];
+    const res = await DB.uploadBankStatement({ imageBase64, mimeType: 'image/jpeg' });
+    closeModal();
+    const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
+    showAlert(`Statement processed: ${res.itemCount} line items found, ${res.autoCount} matched automatically (${res.chargeCount} were bank charges filed automatically), ${res.needsAttentionCount} need your review, ${res.unrecordedCount} not found in your records.`, needsFollowUp ? 'warn' : 'success');
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to process the statement: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function showBankChargeForm(){
@@ -19675,6 +19834,22 @@ function renderAutomationsSettings(config, isDefault, health){
       </div>
     </details>
 
+    <details class="at-details">
+      <summary>Bank reconciliation</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">The box checks your real bank balance this often, only during the active window below, and matches it against your recorded entries dated up to this many days from the bank movement.</p>
+        <div class="form-row">
+          ${automationsNumField('automations.supervisor.balance_check_interval_minutes', sup.balance_check_interval_minutes ?? 15, 'Minutes between balance checks', 5, 120, 5)}
+          ${automationsNumField('automations.supervisor.balance_match_window_days', sup.balance_match_window_days ?? 7, 'Match recorded entries up to this many days from the bank movement', 1, 30)}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsTimeField('automations.supervisor.balance_check_active_from', sup.balance_check_active_from ?? '06:00', 'Active window starts')}
+          ${automationsTimeField('automations.supervisor.balance_check_active_until', sup.balance_check_active_until ?? '22:00', 'Active window ends')}
+        </div>
+        ${saveBar}
+      </div>
+    </details>
+
     ${renderAutomationsRemittanceSection(config, health)}
   `;
 }
@@ -20245,6 +20420,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
+  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
