@@ -69,6 +69,12 @@ function jsonResponse(status, body) {
 function setDeepseekKey(DB) {
   DB.sqlite.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES ('ai_deepseek_key','test-deepseek-key')`).run();
 }
+function setOpenaiKey(DB) {
+  DB.sqlite.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES ('ai_openai_key','test-openai-key')`).run();
+}
+function setOcrProvider(DB, provider) {
+  DB.sqlite.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES ('bank_recon_ocr_provider',?)`).run(provider);
+}
 
 // ── GET /api/bank-recon/entries ───────────────────────────────────────────
 test('GET /api/bank-recon/entries: it_admin and accountant can read; other roles are forbidden', async () => {
@@ -150,6 +156,103 @@ function stubDeepseekForStatement(items, ocrText = 'OCR transcript of the statem
     throw new Error(`unexpected fetch in statement test: ${url}`);
   });
 }
+
+// bank_recon_ocr_provider='openai' routes the vision OCR call to OpenAI instead of
+// DeepSeek — the text-parsing step (parseStatementWithAI) is unaffected either way, it
+// always uses DeepSeek, so this still stubs both endpoints.
+function stubOpenAiForStatement(items, ocrText = 'OCR transcript of the statement') {
+  return stubFetch((url, init) => {
+    if (url === 'https://api.openai.com/v1/chat/completions') {
+      const sentBody = JSON.parse(init.body);
+      assert.equal(sentBody.model, 'gpt-4o');
+      assert.ok(sentBody.messages?.[0]?.content?.some(b => b.type === 'image_url'));
+      return jsonResponse(200, { choices: [{ message: { content: ocrText } }] });
+    }
+    if (url === 'https://api.deepseek.com/chat/completions') {
+      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(items) } }] });
+    }
+    throw new Error(`unexpected fetch in statement test: ${url}`);
+  });
+}
+
+test('POST /api/bank-recon/statement: bank_recon_ocr_provider=openai routes the vision call to OpenAI', async () => {
+  const DB = await freshDB();
+  setOpenaiKey(DB);
+  setDeepseekKey(DB); // parseStatementWithAI (the text-parsing step after OCR) always uses DeepSeek
+  setOcrProvider(DB, 'openai');
+  const items = [{ date: '2026-10-05', amount: 1000, type: 'expense', narration: 'Misc' }];
+  const restore = stubOpenAiForStatement(items);
+  let res;
+  try {
+    res = await onRequest({
+      request: req('bank-recon/statement', { method: 'POST', headers: bearer(await tokenFor(DB, 'u1')), body: { imageBase64: 'base64data', mimeType: 'image/jpeg' } }),
+      env: baseEnv(DB),
+    });
+  } finally { restore(); }
+  assert.equal(res.status, 200, 'OpenAI OCR path succeeds when the OpenAI key is set and the provider is selected');
+});
+
+test('POST /api/bank-recon/statement: multiple photos are OCR\'d separately and joined into one statement before parsing', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  let visionCallCount = 0;
+  const restore = stubFetch((url, init) => {
+    if (url === 'https://api.deepseek.com/chat/completions') {
+      const sentBody = JSON.parse(init.body);
+      const content = sentBody.messages?.[0]?.content;
+      if (Array.isArray(content)) {
+        visionCallCount++;
+        return jsonResponse(200, { choices: [{ message: { content: `PAGE-${visionCallCount}-TEXT` } }] });
+      }
+      // The text-parse call: assert both pages' text arrived, in order, then return no items —
+      // this test only cares about the OCR fan-out/join, not the matching that follows.
+      assert.match(content, /PAGE-1-TEXT[\s\S]*PAGE-2-TEXT/);
+      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify([]) } }] });
+    }
+    throw new Error(`unexpected fetch in multi-page statement test: ${url}`);
+  });
+  let res;
+  try {
+    res = await onRequest({
+      request: req('bank-recon/statement', {
+        method: 'POST', headers: bearer(await tokenFor(DB, 'u1')),
+        body: { images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }] },
+      }),
+      env: baseEnv(DB),
+    });
+  } finally { restore(); }
+  assert.equal(res.status, 200);
+  assert.equal(visionCallCount, 2, 'each photo gets its own OCR call');
+});
+
+test('POST /api/bank-recon/statement: a failure on any one photo fails the whole upload, not a partial result', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  let visionCallCount = 0;
+  const restore = stubFetch((url, init) => {
+    if (url === 'https://api.deepseek.com/chat/completions') {
+      visionCallCount++;
+      if (visionCallCount === 2) return jsonResponse(200, { choices: [{ message: { content: '' } }] }); // empty -> throws
+      return jsonResponse(200, { choices: [{ message: { content: 'PAGE-1-TEXT' } }] });
+    }
+    throw new Error('the text-parse call must never be reached when a photo fails');
+  });
+  let res, body;
+  try {
+    res = await onRequest({
+      request: req('bank-recon/statement', {
+        method: 'POST', headers: bearer(await tokenFor(DB, 'u1')),
+        body: { images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }] },
+      }),
+      env: baseEnv(DB),
+    });
+    body = await readJson(res);
+  } finally { restore(); }
+  assert.equal(res.status, 502);
+  assert.match(body.error, /photo 2 of 2/);
+  const reconRows = DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get();
+  assert.equal(reconRows.n, 0, 'nothing is filed when the upload fails partway through');
+});
 
 test('POST /api/bank-recon/statement: it_admin only', async () => {
   const DB = await freshDB();
@@ -235,7 +338,7 @@ function stubWatchdogForSweep(history) {
   });
 }
 
-test('run-bank-recon: processes new balance-history entries, updates the cursor, and notifies only for needs_attention', async () => {
+test('run-bank-recon: processes new balance-history entries, updates the cursor, and notifies on every movement (plus an extra alert for needs_attention)', async () => {
   const DB = await freshDB();
   // Entry0 seeds the baseline balance only (no prior cursor exists yet) — never itself a row.
   // Entry1: -12345 on 2026-10-05, one clean expense candidate (an amount that collides with
@@ -271,11 +374,15 @@ test('run-bank-recon: processes new balance-history entries, updates the cursor,
   assert.equal(body.needsAttentionCount, 1);
   assert.equal(body.unrecordedCount, 1);
 
-  const notifyCalls = fetchCalls.filter(c => c.url === `${WATCHDOG_URL}/notify`);
-  assert.equal(notifyCalls.length, 1, 'only the needs_attention movement triggers a notify');
-  const notifyBody = JSON.parse(notifyCalls[0].init.body);
-  assert.equal(notifyBody.type, 'bank_transaction_needs_review');
-  assert.match(notifyBody.text, /85,000|85000/);
+  const notifyCalls = fetchCalls.filter(c => c.url === `${WATCHDOG_URL}/notify`).map(c => JSON.parse(c.init.body));
+  const detected = notifyCalls.filter(n => n.type === 'bank_transaction_detected');
+  const needsReview = notifyCalls.filter(n => n.type === 'bank_transaction_needs_review');
+  assert.equal(detected.length, 3, 'every processed movement gets the plain FYI, regardless of status');
+  assert.equal(needsReview.length, 1, 'only the needs_attention movement also gets the actionable alert');
+  assert.match(needsReview[0].text, /85,000|85000/);
+  assert.ok(detected.some(n => /85,000|85000/.test(n.text)), 'the FYI for the ambiguous movement still names the amount');
+  assert.ok(detected.some(n => n.text.startsWith('✅')), 'the auto-matched movement gets a success-styled FYI');
+  assert.ok(detected.some(n => n.text.startsWith('❓')), 'the unrecorded movement gets a question-styled FYI');
 
   const reconRows = DB.sqlite.prepare(`SELECT * FROM bank_recon_entries ORDER BY date`).all();
   assert.equal(reconRows.length, 3);

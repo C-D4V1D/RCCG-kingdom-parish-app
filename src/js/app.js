@@ -13399,24 +13399,32 @@ function showBankStatementUploadForm(){
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">📄 Upload Bank Statement</div>
-    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Upload a photo or screenshot of the bank statement. The box reads it and matches it against your records — this can take a few seconds.</span></div>
-    <div class="form-group"><label class="form-label">Statement image *</label><input type="file" id="bs_photo" accept="image/*" class="form-input" /></div>
+    <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Upload one or more photos or screenshots of the bank statement (one per page, if it's more than one). The box reads them as a single statement and matches it against your records — this can take a few seconds per photo.</span></div>
+    <div class="form-group"><label class="form-label">Statement image(s) *</label><input type="file" id="bs_photo" accept="image/*" multiple class="form-input" /></div>
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="App.submitBankStatementUpload(this)">Upload &amp; Check</button></div>`);
 }
 
 async function submitBankStatementUpload(btn){
-  const file = document.getElementById('bs_photo')?.files?.[0];
-  if(!file){ showAlert('Please choose an image of the statement.','danger'); return; }
-  const restore = setBtnLoading(btn, 'Checking…');
+  const files = Array.from(document.getElementById('bs_photo')?.files || []);
+  if(!files.length){ showAlert('Please choose at least one image of the statement.','danger'); return; }
+  const restore = setBtnLoading(btn, files.length > 1 ? `Checking 1 of ${files.length}…` : 'Checking…');
   try {
-    // Higher max dimension / quality than the deposit-slip compression (1200/0.75) —
-    // a statement has more, smaller text that OCR needs to be able to read.
-    const dataUrl = await compressPhoto(file, 1600, 0.85);
-    const imageBase64 = dataUrl.split(',')[1];
-    const res = await DB.uploadBankStatement({ imageBase64, mimeType: 'image/jpeg' });
+    const images = [];
+    for(let i=0;i<files.length;i++){
+      // Update the spinner label in place — not another setBtnLoading call, which would
+      // re-snapshot the current (already-spinner) HTML as "original" and leave a second,
+      // orphaned auto-restore timer running past this one.
+      if(files.length > 1 && btn) btn.innerHTML = `<span class="btn-spinner-sm"></span> Checking ${i+1} of ${files.length}…`;
+      // Higher max dimension / quality than the deposit-slip compression (1200/0.75) —
+      // a statement has more, smaller text that OCR needs to be able to read.
+      const dataUrl = await compressPhoto(files[i], 1600, 0.85);
+      images.push({ imageBase64: dataUrl.split(',')[1], mimeType: 'image/jpeg' });
+    }
+    const res = await DB.uploadBankStatement({ images });
     closeModal();
     const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
-    showAlert(`Statement processed: ${res.itemCount} line items found, ${res.autoCount} matched automatically (${res.chargeCount} were bank charges filed automatically), ${res.needsAttentionCount} need your review, ${res.unrecordedCount} not found in your records.`, needsFollowUp ? 'warn' : 'success');
+    const pagesNote = files.length > 1 ? ` across ${files.length} pages` : '';
+    showAlert(`Statement processed${pagesNote}: ${res.itemCount} line items found, ${res.autoCount} matched automatically (${res.chargeCount} were bank charges filed automatically), ${res.needsAttentionCount} need your review, ${res.unrecordedCount} not found in your records.`, needsFollowUp ? 'warn' : 'success');
     navigate('bank');
   } catch(err) {
     restore();
@@ -16034,6 +16042,15 @@ function renderBankEmailAutomationSettings(s){
       <input type="text" id="set_church_bank_account" class="form-input" value="${esc(s.church_bank_account_number||'')}" placeholder="e.g. 147******487" />
       <div class="form-hint">Enter the masked account number exactly as it appears in the bank's own alert emails (comma-separate if more than one). Alerts from any other account number are always ignored, never recorded.</div>
     </div>
+    <div style="border-top:1px solid var(--border);margin:14px 0" ></div>
+    <div class="form-group">
+      <label class="form-label">Statement Upload Reads Photos With</label>
+      <select id="set_bank_recon_ocr_provider" class="form-select">
+        <option value="deepseek" ${(s.bank_recon_ocr_provider||'deepseek')==='deepseek'?'selected':''}>DeepSeek</option>
+        <option value="openai" ${s.bank_recon_ocr_provider==='openai'?'selected':''}>OpenAI (gpt-4o)</option>
+      </select>
+      <div class="form-hint">Which AI reads your uploaded bank statement photos on the Bank page's "Upload a statement" button. Switch this if one provider's reading isn't working well — requires that provider's key above to be configured.</div>
+    </div>
     <button class="btn btn-primary" onclick="App.saveBankEmailAutomationSettings(this)">Save Automation Settings</button>
   </div>`;
 }
@@ -16042,6 +16059,7 @@ async function saveBankEmailAutomationSettings(btn=null){
   if(!requireAdmin()) return;
   const s = await DB.getSettings();
   s.church_bank_account_number = document.getElementById('set_church_bank_account')?.value?.trim() || '';
+  s.bank_recon_ocr_provider = document.getElementById('set_bank_recon_ocr_provider')?.value || 'deepseek';
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.saveSettings(s);
@@ -18937,6 +18955,7 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
   { key:'bank_transaction_needs_review', label:'Bank transaction needs review' },
+  { key:'bank_transaction_detected',     label:'Any bank transaction detected' },
 ];
 // Who gets a message type the saved settings don't have yet (added after they were saved). Without this its
 // boxes would show unticked and the next Save would switch that message off for everyone.
@@ -18947,6 +18966,7 @@ const AUTOMATION_ROUTING_DEFAULTS = {
     fabian: { telegram: true, email: true }, pastor: { telegram: true, email: true },
   },
   bank_transaction_needs_review: { david: { telegram: true, email: false } },
+  bank_transaction_detected: { david: { telegram: true, email: false } },
 };
 // What each message is, when the box sends it and roughly what it looks like on Telegram (Automations → Message
 // guide). Examples only: the real message fills in the live figures and names, so the wording can differ a little.
@@ -19050,6 +19070,11 @@ const AUTOMATION_MESSAGE_GUIDE = {
     what: 'A real bank balance change the box found that could match more than one combination of your own recorded entries — you pick which one is right from the Bank page.',
     when: 'Whenever the periodic balance check or an uploaded statement finds an ambiguous match.',
     sample: '⚠️ A ₦52,000 drop on 9 Oct could match 2 different combinations of your expense records.\nOpen Bank → Reconciliation in the app to pick the right one.',
+  },
+  bank_transaction_detected: {
+    what: 'Every real bank balance change the periodic check finds — whether it matched automatically, needs your review, or wasn\'t found in your records at all. A plain FYI, separate from the "needs review" alert above.',
+    when: 'Every time the periodic balance check (every 15 minutes, 6am-10pm) sees the balance move.',
+    sample: '✅ ₦245,000 came into the bank on 4 Oct — matched automatically to 1 of your records.',
   },
 };
 function automationsMessageGuideHtml(keys){

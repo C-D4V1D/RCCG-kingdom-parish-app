@@ -8588,8 +8588,11 @@ function classifyBankChargeNarration(narration, amount) {
 // Modelled directly on ocrReceipt (same image_url content-block shape), but DeepSeek vision
 // instead of OpenAI, since this must use DeepSeek per the reconciliation plan. Returns the
 // transcribed text, or throws — the caller turns that into a user-facing error.
-async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
-  if (!imageBase64) throw new Error('imageBase64 is required');
+const STATEMENT_OCR_PROMPT = 'You are transcribing a bank statement photo. Transcribe the statement table\'s rows as plain text '
+  + '— date, narration, debit/credit amount and running balance for each row, one row per line. '
+  + 'Return only the transcribed text, no commentary, no markdown.';
+
+async function ocrStatementPhotoDeepSeek(DB, imageBase64, mimeType) {
   let deepseekKey = '';
   try {
     const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
@@ -8597,9 +8600,6 @@ async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
   } catch { /* ignore */ }
   if (!deepseekKey) throw new Error('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.');
 
-  const prompt = 'You are transcribing a bank statement photo. Transcribe the statement table\'s rows as plain text '
-    + '— date, narration, debit/credit amount and running balance for each row, one row per line. '
-    + 'Return only the transcribed text, no commentary, no markdown.';
   const resp = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
@@ -8608,18 +8608,73 @@ async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: prompt },
+          { type: 'text', text: STATEMENT_OCR_PROMPT },
           { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
         ],
       }],
       max_tokens: 2000,
     }),
   });
-  if (!resp.ok) throw new Error(`DeepSeek vision API error ${resp.status}`);
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`DeepSeek vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
+  }
   const data = await resp.json();
   const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error('DeepSeek returned no transcription text');
+  if (!text) {
+    // Diagnostic detail for a 200-but-empty reply (e.g. a model that silently can't
+    // handle the image_url content block) — without this the real cause is invisible.
+    const diag = { model: data.model, finish_reason: data.choices?.[0]?.finish_reason, error: data.error };
+    throw new Error(`DeepSeek returned no transcription text (${JSON.stringify(diag)})`);
+  }
   return text;
+}
+
+// Same vision shape ocrReceipt already uses for OpenAI — offered as an alternative to
+// DeepSeek (automations.supervisor.bank_recon_ocr_provider / settings.bank_recon_ocr_provider)
+// since a vision call either provider makes can fail or change behavior without notice.
+async function ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType) {
+  const openaiKey = await resolveOpenAiKey(env, DB);
+  if (!openaiKey) throw new Error('OpenAI API key is required. Configure it in Settings → AI Provider Keys.');
+
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: STATEMENT_OCR_PROMPT },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+        ],
+      }],
+      max_completion_tokens: 2000,
+    }),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`OpenAI vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  const text = (data.choices?.[0]?.message?.content || '').trim();
+  if (!text) {
+    const diag = { model: data.model, finish_reason: data.choices?.[0]?.finish_reason, error: data.error };
+    throw new Error(`OpenAI returned no transcription text (${JSON.stringify(diag)})`);
+  }
+  return text;
+}
+
+async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
+  if (!imageBase64) throw new Error('imageBase64 is required');
+  let provider = 'deepseek';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='bank_recon_ocr_provider'`).first();
+    if (row?.value === 'openai') provider = 'openai';
+  } catch { /* default to deepseek */ }
+  return provider === 'openai'
+    ? ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType)
+    : ocrStatementPhotoDeepSeek(DB, imageBase64, mimeType);
 }
 
 /**
@@ -8631,16 +8686,28 @@ async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
  * real Worker history id for a statement-derived line).
  */
 async function handleBankReconStatement(DB, env, authz, body) {
-  const imageBase64 = String(body?.imageBase64 || '').trim();
-  const mimeType = String(body?.mimeType || 'image/jpeg').trim();
-  if (!imageBase64) return err('imageBase64 is required', 400);
+  // Accepts one or more photos (e.g. a multi-page statement) — each is OCR'd separately,
+  // then the transcribed pages are joined into one statement text before parsing, so a
+  // row split across two photos' worth of text never needs special-casing downstream.
+  const images = Array.isArray(body?.images) ? body.images
+    : body?.imageBase64 ? [{ imageBase64: body.imageBase64, mimeType: body.mimeType }]
+    : [];
+  if (!images.length) return err('images is required (at least one photo)', 400);
 
-  let statementText;
-  try {
-    statementText = await ocrStatementPhoto(env, DB, imageBase64, mimeType);
-  } catch (e) {
-    return err(`Could not read the statement photo: ${e.message}`, 502);
+  const pageTexts = [];
+  for (let i = 0; i < images.length; i++) {
+    const imageBase64 = String(images[i]?.imageBase64 || '').trim();
+    const mimeType = String(images[i]?.mimeType || 'image/jpeg').trim();
+    if (!imageBase64) return err(`Photo ${i + 1} of ${images.length} is missing image data`, 400);
+    try {
+      pageTexts.push(await ocrStatementPhoto(env, DB, imageBase64, mimeType));
+    } catch (e) {
+      // Fail the whole upload rather than silently filing a partial statement — an
+      // incomplete read must never look the same as a complete, successfully-matched one.
+      return err(`Could not read photo ${i + 1} of ${images.length}: ${e.message}`, 502);
+    }
   }
+  const statementText = pageTexts.join('\n');
 
   const parseRes = await parseStatementWithAI(env, DB, { statementText });
   let parsed = null;
@@ -8820,6 +8887,19 @@ async function runBankReconciliationSweep(DB, env, request) {
       matchedRefs, candidates: candidatesOut, narration: '',
     });
     processed++;
+
+    // A plain FYI for every real movement the box finds, separate from the actionable
+    // "needs review" alert below — so a "just let me know what's happening" preference
+    // doesn't depend on whether this particular movement happened to be ambiguous.
+    // recipients() on the Worker is a no-op (not an error) when nobody is routed for the
+    // type, so this is safe to fire unconditionally even before anyone opts in.
+    const movementWord = direction === 'out' ? 'left' : 'came into';
+    const detectedText = result.status === 'auto'
+      ? `✅ ₦${amount.toLocaleString('en-NG')} ${movementWord} the bank on ${date} — matched automatically to ${result.matches.length} of your record(s).`
+      : result.status === 'needs_attention'
+        ? `⚠️ ₦${amount.toLocaleString('en-NG')} ${movementWord} the bank on ${date} — could match ${result.matches.length} different combinations of your records. See the follow-up message.`
+        : `❓ ₦${amount.toLocaleString('en-NG')} ${movementWord} the bank on ${date} — not found in your records. You may need to add it.`;
+    await callClerkWatchdog(env, '/notify', { method: 'POST', body: { type: 'bank_transaction_detected', text: detectedText } });
 
     if (result.status === 'auto') autoCount++;
     else if (result.status === 'needs_attention') {
