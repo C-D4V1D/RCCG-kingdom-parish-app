@@ -13378,11 +13378,38 @@ function renderBankReconCard(entries, role){
     <div class="card-header" style="flex-wrap:wrap;gap:8px">
       <span class="card-title">Bank Reconciliation</span>${uploadBtn}
     </div>
+    ${renderLastStatementUpload()}
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
     ${counts?`<div style="font-size:12px;color:var(--text3);margin-bottom:8px">${counts}</div>`:''}
     ${rowsHtml || `<div class="empty-table">No bank movements reported yet.</div>`}
     ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}
   </div>`;
+}
+
+function renderLastStatementUpload(){
+  const r = state._lastStatementUpload;
+  if(!r) return '';
+  const total = r.itemCount||0, dup = r.duplicateCount||0, fresh = total - dup;
+  const allDup = total > 0 && dup >= total;
+  const lines = allDup
+    ? [`<strong>This statement was already uploaded.</strong> All ${total} line${total===1?'':'s'} were already on file, so nothing new was added.`]
+    : [
+        `<strong>${fresh} new line${fresh===1?'':'s'} added</strong> from ${total} found on the statement${r.pages>1?` (${r.pages} pages)`:''}.`,
+        dup ? `${dup} line${dup===1?' was':'s were'} already uploaded before, so skipped.` : '',
+        `${r.autoCount||0} matched automatically${r.chargeCount?` (incl. ${r.chargeCount} bank charge${r.chargeCount===1?'':'s'} filed)`:''} · ${r.needsAttentionCount||0} need review · ${r.unrecordedCount||0} not in your records.`,
+      ].filter(Boolean);
+  const cls = allDup ? 'alert-info' : ((r.needsAttentionCount||0)+(r.unrecordedCount||0) > 0 ? 'alert-warn' : 'alert-success');
+  return `<div class="alert ${cls}" style="margin-bottom:12px;align-items:flex-start">
+      <span class="alert-icon">${allDup?'ℹ':'📄'}</span>
+      <span style="flex:1;font-size:12.5px;line-height:1.5">${lines.map(l=>`<div>${l}</div>`).join('')}</span>
+      <button onclick="App.dismissStatementUploadResult()" aria-label="Dismiss" style="background:transparent;border:none;font-size:16px;cursor:pointer;color:inherit;padding:0 2px">✕</button>
+    </div>`;
+}
+
+function dismissStatementUploadResult(){
+  state._lastStatementUpload = null;
+  const el = document.getElementById('bankReconCard');
+  if(el) el.outerHTML = renderBankReconCard(state._bankReconEntries||[], state.user?.role);
 }
 
 function showMoreBankRecon(){
@@ -13573,6 +13600,8 @@ async function submitBankStatementUpload(btn){
     const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records${res.duplicateCount > 0 ? `, ${res.duplicateCount} already uploaded (skipped)` : ''}.`;
     state.bankTab = 'reconciliation';
     state._pendingAlert = { msg: alertMsg, type: needsFollowUp ? 'warn' : 'success' };
+    // The alert fades after a few seconds; this box stays on the card until dismissed.
+    state._lastStatementUpload = { ...res, pages: files.length };
     navigate('bank');
   } catch(err) {
     restore();
@@ -20593,7 +20622,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
