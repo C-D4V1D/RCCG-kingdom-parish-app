@@ -8681,8 +8681,8 @@ async function unmatchBankReconEntry(DB, id) {
   return ok(bankReconEntryFromRow(updated));
 }
 
-// Deterministic keyword match — not another AI call: cheap, and the statement text already
-// came from one AI step (OCR) and parsing step, so a third AI call per line item would be
+// Deterministic keyword match — not another AI call: cheap, and the statement lines already
+// came from one AI step (reading the photo), so a second AI call per line item would be
 // both slow and another place to hallucinate. See CHURCH_BANK_CHARGE_SUBCATS for the enum.
 function classifyBankChargeNarration(narration, amount) {
   const n = String(narration || '').toLowerCase();
@@ -8698,13 +8698,29 @@ function classifyBankChargeNarration(narration, amount) {
   return null;
 }
 
-// Modelled directly on ocrReceipt (same image_url content-block shape), but DeepSeek vision
-// instead of OpenAI, since this must use DeepSeek per the reconciliation plan. Returns the
-// transcribed text, or throws — the caller turns that into a user-facing error.
-const STATEMENT_OCR_PROMPT = 'You are transcribing a bank statement photo. Transcribe the statement table\'s rows as plain text '
-  + '— date, narration, debit/credit amount and running balance for each row, one row per line. '
-  + 'Copy each narration exactly as printed; if it is cut off or unreadable, copy only what is visible and never add '
-  + 'notes such as [truncated] or [cut off]. Return only the transcribed text, no commentary, no markdown.';
+// One vision call per photo reads the statement table straight into structured JSON — the
+// model that sees the debit / credit / balance columns is the one that decides each row's
+// amount and direction (no second text model guessing from a flattened transcript). Every
+// row is then checked against the statement's own running balance (verifyStatementRows)
+// before anything is filed.
+const STATEMENT_READ_PROMPT = [
+  'You are reading a photo of a bank statement for a church\'s accounts. Every figure must be copied exactly as printed.',
+  'Return ONLY a JSON object with exactly this shape:',
+  '{"period_start": "YYYY-MM-DD" or null, "period_end": "YYYY-MM-DD" or null, "opening_balance": number or null, "closing_balance": number or null,',
+  ' "rows": [{"date": "YYYY-MM-DD" or null, "date_as_printed": "...", "narration": "...", "reference": "...", "debit": number, "credit": number, "balance": number or null}]}',
+  'Rules:',
+  '- Copy exactly what is printed. Never invent, merge, split or reorder rows: one entry in "rows" per transaction line, in the order printed (top to bottom).',
+  '- Skip lines that are not transactions: column headers, page headers and footers, sub-totals and totals. A "balance brought forward" / "opening balance" line is not a row — put its figure in opening_balance.',
+  '- Amounts are plain numbers with no commas, currency symbols or CR/DR letters (for example 1250000.5).',
+  '- debit = money OUT of the account (withdrawals, transfers out, charges); credit = money IN (deposits, transfers in). Use 0 for the empty side. Never put an amount in both.',
+  '- balance = that row\'s figure in the running-balance column, exactly as printed (negative if shown as overdrawn), or null if the row has none.',
+  '- date: the row\'s transaction date as YYYY-MM-DD, taking the year from anywhere on the statement (header, statement period or other rows). If no year is visible anywhere, use null. Always fill date_as_printed with the date exactly as printed on the row.',
+  '- narration: the description exactly as printed, joining wrapped lines with a space. If part of it is cut off or unreadable, copy only what is visible and never add notes such as [truncated] or [illegible].',
+  '- reference: the transaction reference or cheque number if it has its own column, otherwise "".',
+  '- If a figure cannot be read with certainty, still include the row but use null for that figure — never guess digits.',
+  '- period_start / period_end: the statement period if printed, else null. closing_balance: the closing balance if printed on this photo, else null.',
+  '- If the photo shows no transaction rows, return "rows": [].',
+].join('\n');
 
 // The OCR model sometimes annotates a cut-off narration ("[truncated]", "(cut off)") with
 // different wording on each read — strip those so stored narrations stay comparable.
@@ -8715,103 +8731,329 @@ function cleanStatementNarration(n) {
     .trim();
 }
 
-async function ocrStatementPhotoDeepSeek(DB, imageBase64, mimeType) {
-  let deepseekKey = '';
-  try {
-    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
-    deepseekKey = row ? String(row.value || '').trim() : '';
-  } catch { /* ignore */ }
-  if (!deepseekKey) throw new Error('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.');
-
-  const resp = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-    body: JSON.stringify({
-      model: 'deepseek-flash',
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: STATEMENT_OCR_PROMPT },
-          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
-        ],
-      }],
-      max_tokens: 2000,
-    }),
-  });
-  if (!resp.ok) {
-    const errBody = await resp.text().catch(() => '');
-    throw new Error(`DeepSeek vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
-  }
-  const data = await resp.json();
-  const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) {
-    // Diagnostic detail for a 200-but-empty reply (e.g. a model that silently can't
-    // handle the image_url content block) — without this the real cause is invisible.
-    const diag = { model: data.model, finish_reason: data.choices?.[0]?.finish_reason, error: data.error };
-    throw new Error(`DeepSeek returned no transcription text (${JSON.stringify(diag)})`);
-  }
-  return text;
+/** A figure from the model as a number rounded to kobo: null when absent, NaN when present but unreadable. */
+function parseStatementNumber(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? Math.round(v * 100) / 100 : NaN;
+  const s = String(v).replace(/[\s,₦]/g, '').replace(/^NGN/i, '');
+  if (!s) return null;
+  return /^-?\d+(\.\d+)?$/.test(s) ? Math.round(Number(s) * 100) / 100 : NaN;
 }
 
-// Same vision shape ocrReceipt already uses for OpenAI — offered as an alternative to
-// DeepSeek (automations.supervisor.bank_recon_ocr_provider / settings.bank_recon_ocr_provider)
-// since a vision call either provider makes can fail or change behavior without notice.
-async function ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType) {
-  const openaiKey = await resolveOpenAiKey(env, DB);
-  if (!openaiKey) throw new Error('OpenAI API key is required. Configure it in Settings → AI Provider Keys.');
+function isValidYmd(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+  if (!m) return false;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
+}
+const ymdOf = (y, m, d) => `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-    body: JSON.stringify({
-      model: 'gpt-6.1-sol',
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: STATEMENT_OCR_PROMPT },
-          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
-        ],
-      }],
-      max_completion_tokens: 2000,
-    }),
-  });
-  if (!resp.ok) {
-    const errBody = await resp.text().catch(() => '');
-    throw new Error(`OpenAI vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
+const STATEMENT_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+/** Day, month and (if printed) year from a date as printed on a statement row — day-first
+ * for all-number dates (Nigerian convention) unless only month-first makes sense. */
+function parsePrintedStatementDate(s) {
+  const t = String(s || '').trim();
+  if (!t) return null;
+  const year = (y) => (y ? (y.length === 2 ? 2000 + Number(y) : Number(y)) : null);
+  let m = /(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(t);
+  if (m) return { year: +m[1], month: +m[2], day: +m[3] };
+  m = /(\d{1,2})(?:st|nd|rd|th)?[\s\-/.]*([A-Za-z]{3,9})\.?(?:[\s\-/.,]+(\d{4}|\d{2})(?!\d))?/.exec(t);
+  if (m && STATEMENT_MONTHS[m[2].slice(0, 3).toLowerCase()]) {
+    return { day: +m[1], month: STATEMENT_MONTHS[m[2].slice(0, 3).toLowerCase()], year: year(m[3]) };
   }
-  const data = await resp.json();
-  const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) {
-    const diag = { model: data.model, finish_reason: data.choices?.[0]?.finish_reason, error: data.error };
-    throw new Error(`OpenAI returned no transcription text (${JSON.stringify(diag)})`);
+  m = /([A-Za-z]{3,9})\.?[\s\-/.]*(\d{1,2})(?:st|nd|rd|th)?(?:[\s\-/.,]+(\d{4}|\d{2})(?!\d))?/.exec(t);
+  if (m && STATEMENT_MONTHS[m[1].slice(0, 3).toLowerCase()]) {
+    return { day: +m[2], month: STATEMENT_MONTHS[m[1].slice(0, 3).toLowerCase()], year: year(m[3]) };
   }
-  return text;
+  m = /(\d{1,2})[-/.](\d{1,2})(?:[-/.](\d{4}|\d{2})(?!\d))?/.exec(t);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    return b > 12 && a <= 12 ? { month: a, day: b, year: year(m[3]) } : { day: a, month: b, year: year(m[3]) };
+  }
+  return null;
 }
 
-async function ocrStatementPhoto(env, DB, imageBase64, mimeType) {
-  if (!imageBase64) throw new Error('imageBase64 is required');
+/**
+ * A row's date as YYYY-MM-DD, or '' when it can't be worked out. The model's own `date` is
+ * used when it's a real calendar date (and not impossibly in the future); otherwise the
+ * year for `date_as_printed` comes from the statement period, else the current year (or
+ * the previous one, if that would put the line more than 7 days in the future).
+ */
+function resolveStatementRowDate(row, period, today) {
+  const latest = addDaysYmd(today, 7);
+  if (isValidYmd(row?.date) && row.date <= latest) return row.date;
+  const p = parsePrintedStatementDate(row?.date_as_printed);
+  if (!p) return '';
+  if (p.year) {
+    const d = ymdOf(p.year, p.month, p.day);
+    return isValidYmd(d) && d <= latest ? d : '';
+  }
+  const start = isValidYmd(period?.start) ? period.start : null;
+  const end = isValidYmd(period?.end) ? period.end : null;
+  const years = [...new Set([end, start].filter(Boolean).map(d => Number(d.slice(0, 4))))];
+  // A period spanning New Year (e.g. 15 Dec – 14 Jan): pick the year that puts the line inside it.
+  for (const y of years) {
+    const d = ymdOf(y, p.month, p.day);
+    if (isValidYmd(d) && (!start || d >= addDaysYmd(start, -7)) && (!end || d <= addDaysYmd(end, 7))) return d;
+  }
+  if (years.length) {
+    const d = ymdOf(years[0], p.month, p.day);
+    return isValidYmd(d) ? d : '';
+  }
+  const thisYear = Number(today.slice(0, 4));
+  let d = ymdOf(thisYear, p.month, p.day);
+  if (isValidYmd(d) && d > latest) d = ymdOf(thisYear - 1, p.month, p.day);
+  return isValidYmd(d) ? d : '';
+}
+
+const STMT_REASON_MISMATCH = 'doesn\'t add up with the running balance — the amount or balance may have been misread, or a line next to it was missed';
+const STMT_REASON_NO_START = 'it\'s the earliest line read and there was no earlier balance (such as "balance brought forward") to check it against — include the line before it in the photo';
+const STMT_REASON_OWN_BALANCE = 'its running balance couldn\'t be read, so it couldn\'t be checked';
+const STMT_REASON_PREV_BALANCE = 'the running balance on the line before it couldn\'t be read, so it couldn\'t be checked';
+const STMT_REASON_DIRECTION = 'couldn\'t tell whether the statement lists the oldest or the newest line first, so it couldn\'t be checked';
+
+/**
+ * Checks every statement row against the statement's own running balance. `pages` are the
+ * photos in upload order, each `{ opening_balance, rows: [{ debit, credit, balance, date? }] }`
+ * with rows in printed order (oldest-first or newest-first — decided here by whichever
+ * reading makes more adjacent rows add up; ties fall back to the dates' order).
+ *
+ * All arithmetic is in whole kobo, so "within 0.01" is exact equality (no float drift, and
+ * a one-kobo misread is still caught). A row is verified only when its own
+ * amount is proven by the balance link that contains it: (previous balance) ± (this row's
+ * amount) = (this row's balance), where "previous" is the chronologically earlier row (across
+ * photo boundaries too) or that photo's opening balance. Its OTHER link (to the next row)
+ * proves the next row's amount, not its own, so a misread amount fails exactly its own row.
+ * A misread balance fails that row and the one after it (both links touch it) — strict on
+ * purpose: an unproven row is never filed. Rows with both or neither of debit/credit are
+ * rejected outright. Rows repeated at the end of one photo and the start of the next (two
+ * overlapping halves of a page; same date, amounts and balance) are marked 'overlap' and left
+ * out of the chain, so they're never filed twice. With fewer than two balance figures there is
+ * nothing to check: verification 'unavailable', rows 'unchecked' (structural checks still apply).
+ *
+ * Returns { verification: 'passed'|'partial'|'unavailable', direction, rows: [{ page, index,
+ * row, status: 'verified'|'unverified'|'unchecked'|'overlap', reason }] } in upload order.
+ */
+export function verifyStatementRows(pages) {
+  const list = Array.isArray(pages) ? pages : [];
+  const cents = v => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) : null);
+  // Debit/credit: absent -> 0; a number -> its size in kobo; anything else -> undefined (unreadable).
+  const amountCents = v => (v === null || v === undefined || v === '' ? 0
+    : typeof v === 'number' && Number.isFinite(v) ? Math.round(Math.abs(v) * 100) : undefined);
+
+  const all = [];
+  const byPage = list.map((pg, p) => (Array.isArray(pg?.rows) ? pg.rows : []).map((row, index) => {
+    const d = amountCents(row?.debit), c = amountCents(row?.credit);
+    let problem = null;
+    if (d === undefined || c === undefined) problem = 'the amount couldn\'t be read';
+    else if (d > 0 && c > 0) problem = 'both a money-in and a money-out amount were read for this line';
+    else if (d === 0 && c === 0) problem = 'no amount could be read for this line';
+    const e = { page: p, index, row, d, c, net: d === undefined || c === undefined ? null : c - d,
+      bal: cents(row?.balance), date: isValidYmd(row?.date) ? row.date : '', problem, status: null, reason: null };
+    all.push(e);
+    return e;
+  }));
+
+  // Overlapping photos: the longest run at the end of photo p-1 repeated at the start of photo p.
+  const sameRow = (a, b) => !a.problem && !b.problem && a.bal !== null && a.bal === b.bal
+    && a.d === b.d && a.c === b.c && (!a.date || !b.date || a.date === b.date);
+  for (let p = 1; p < byPage.length; p++) {
+    const prev = byPage[p - 1], cur = byPage[p];
+    for (let k = Math.min(prev.length, cur.length); k >= 1; k--) {
+      let match = true;
+      for (let j = 0; j < k && match; j++) match = sameRow(prev[prev.length - k + j], cur[j]);
+      if (match) { for (let j = 0; j < k; j++) cur[j].status = 'overlap'; break; }
+    }
+  }
+  const live = all.filter(e => e.status !== 'overlap');
+  const result = (verification, direction) => ({
+    verification, direction,
+    rows: all.map(e => ({ page: e.page, index: e.index, row: e.row, status: e.status, reason: e.reason })),
+  });
+
+  const openings = list.map(pg => cents(pg?.opening_balance));
+  const balanceCount = live.filter(e => e.bal !== null).length + openings.filter(o => o !== null).length;
+  if (balanceCount < 2) {
+    for (const e of live) {
+      e.status = e.problem ? 'unverified' : 'unchecked';
+      e.reason = e.problem;
+    }
+    return result('unavailable', null);
+  }
+
+  // Walk the rows in chronological order; each row's own link is to the balance just before it.
+  const chain = (newestFirst) => {
+    const seq = [];
+    const order = list.map((_, p) => p);
+    for (const p of newestFirst ? order.reverse() : order) {
+      const rows = byPage[p].filter(e => e.status !== 'overlap');
+      if (openings[p] !== null) seq.push({ anchor: true, bal: openings[p] });
+      seq.push(...(newestFirst ? rows.reverse() : rows));
+    }
+    const verified = new Set(), reasons = new Map();
+    let holds = 0, prevBal = null, started = false;
+    for (const e of seq) {
+      if (e.anchor) {
+        if (prevBal !== null && prevBal === e.bal) holds++;
+      } else if (e.bal === null) {
+        reasons.set(e, STMT_REASON_OWN_BALANCE);
+      } else if (!started) {
+        reasons.set(e, STMT_REASON_NO_START);
+      } else if (prevBal === null) {
+        reasons.set(e, STMT_REASON_PREV_BALANCE);
+      } else if (e.net !== null && prevBal + e.net === e.bal) {
+        verified.add(e); holds++;
+      } else {
+        reasons.set(e, STMT_REASON_MISMATCH);
+      }
+      started = true;
+      prevBal = e.bal;
+    }
+    return { holds, verified, reasons };
+  };
+  const fwd = chain(false), bwd = chain(true);
+  let direction, isVerified, reasonOf;
+  const pickFwd = () => { direction = 'oldest-first'; isVerified = e => fwd.verified.has(e); reasonOf = e => fwd.reasons.get(e); };
+  const pickBwd = () => { direction = 'newest-first'; isVerified = e => bwd.verified.has(e); reasonOf = e => bwd.reasons.get(e); };
+  if (fwd.holds > bwd.holds) pickFwd();
+  else if (bwd.holds > fwd.holds) pickBwd();
+  else {
+    let up = 0, down = 0;
+    const dated = live.filter(e => e.date);
+    for (let i = 1; i < dated.length; i++) {
+      if (dated[i].date > dated[i - 1].date) up++;
+      else if (dated[i].date < dated[i - 1].date) down++;
+    }
+    if (up > down) pickFwd();
+    else if (down > up) pickBwd();
+    else {
+      direction = 'unknown';
+      isVerified = e => fwd.verified.has(e) && bwd.verified.has(e);
+      reasonOf = e => fwd.reasons.get(e) || bwd.reasons.get(e) || STMT_REASON_DIRECTION;
+    }
+  }
+  for (const e of live) {
+    if (e.problem) { e.status = 'unverified'; e.reason = e.problem; }
+    else if (isVerified(e)) e.status = 'verified';
+    else { e.status = 'unverified'; e.reason = reasonOf(e) || STMT_REASON_MISMATCH; }
+  }
+  return result(live.every(e => e.status === 'verified') ? 'passed' : 'partial', direction);
+}
+
+/** The model's JSON for one photo, with every figure parsed (see parseStatementNumber), or null if it isn't the expected shape. */
+function normaliseStatementPage(raw) {
+  const obj = Array.isArray(raw) ? { rows: raw } : raw;
+  if (!obj || typeof obj !== 'object' || !Array.isArray(obj.rows)) return null;
+  const balanceOrNull = v => { const n = parseStatementNumber(v); return Number.isFinite(n) ? n : null; };
+  const amount = v => { const n = parseStatementNumber(v); return n === null ? 0 : Number.isFinite(n) ? Math.abs(n) : NaN; };
+  return {
+    period_start: isValidYmd(obj.period_start) ? obj.period_start : null,
+    period_end: isValidYmd(obj.period_end) ? obj.period_end : null,
+    opening_balance: balanceOrNull(obj.opening_balance),
+    closing_balance: balanceOrNull(obj.closing_balance),
+    rows: obj.rows.map(r => {
+      const row = r && typeof r === 'object' ? r : {};
+      return {
+        date: typeof row.date === 'string' ? row.date.trim() : null,
+        date_as_printed: String(row.date_as_printed ?? '').trim(),
+        narration: cleanStatementNarration(row.narration),
+        reference: String(row.reference ?? '').trim(),
+        debit: amount(row.debit),
+        credit: amount(row.credit),
+        balance: balanceOrNull(row.balance),
+      };
+    }),
+  };
+}
+
+/** Which vision provider reads statements (settings.bank_recon_ocr_provider) and its API key. */
+async function statementVisionProvider(env, DB) {
   let provider = 'deepseek';
   try {
     const row = await DB.prepare(`SELECT value FROM settings WHERE key='bank_recon_ocr_provider'`).first();
     if (row?.value === 'openai') provider = 'openai';
   } catch { /* default to deepseek */ }
-  return provider === 'openai'
-    ? ocrStatementPhotoOpenAI(env, DB, imageBase64, mimeType)
-    : ocrStatementPhotoDeepSeek(DB, imageBase64, mimeType);
+  if (provider === 'openai') {
+    const key = await resolveOpenAiKey(env, DB);
+    if (!key) throw new Error('OpenAI API key is required. Configure it in Settings → AI Provider Keys.');
+    return { provider, key };
+  }
+  let key = '';
+  try {
+    const row = await DB.prepare(`SELECT value FROM settings WHERE key='ai_deepseek_key'`).first();
+    key = row ? String(row.value || '').trim() : '';
+  } catch { /* ignore */ }
+  if (!key) throw new Error('DeepSeek API key is required. Configure it in Settings → AI Provider Keys.');
+  return { provider, key };
 }
 
 /**
- * A photographed statement: OCR it, parse it with the existing AI parser, then for each
- * line item either file it straight into expenses (a recognised bank charge — real
- * narration text makes this possible, unlike the balance-only sweep) or run it through the
- * subset-sum matcher like any other movement. Every item becomes exactly one
- * bank_recon_entries row (synthetic balance_history_id 'stmt:<uuid>', since there is no
- * real Worker history id for a statement-derived line).
+ * Reads one statement photo into normalised JSON with a single vision call (same image_url
+ * content-block shape as ocrReceipt). temperature 0 + JSON mode so the same photo reads the
+ * same way every time; a reply cut off for length is an error, never a silently short read.
+ */
+async function readStatementPhoto({ provider, key }, imageBase64, mimeType) {
+  const openai = provider === 'openai';
+  const label = openai ? 'OpenAI' : 'DeepSeek';
+  const send = (withTemperature) => fetch(openai ? 'https://api.openai.com/v1/chat/completions' : 'https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+    body: JSON.stringify({
+      model: openai ? 'gpt-6.1-sol' : 'deepseek-flash',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: STATEMENT_READ_PROMPT },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+        ],
+      }],
+      ...(withTemperature ? { temperature: 0 } : {}),
+      response_format: { type: 'json_object' },
+      // Reasoning-style OpenAI models spend part of this budget on hidden reasoning.
+      ...(openai ? { max_completion_tokens: 16000 } : { max_tokens: 8000 }),
+    }),
+  });
+  let resp = await send(true);
+  // Some models only accept their default temperature; retry once without it rather than
+  // failing every upload (the JSON shape + balance check still guard accuracy).
+  if (resp.status === 400) {
+    const firstErr = await resp.clone().text().catch(() => '');
+    if (/temperature/i.test(firstErr)) resp = await send(false);
+  }
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`${label} vision API error ${resp.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = await resp.json();
+  const choice = data.choices?.[0];
+  // Diagnostic detail for a 200-but-unusable reply (e.g. a model that silently can't
+  // handle the image_url content block) — without this the real cause is invisible.
+  const diag = () => JSON.stringify({ model: data.model, finish_reason: choice?.finish_reason, error: data.error });
+  if (choice?.finish_reason === 'length') {
+    const e = new Error('this photo has too many rows to read in one go — take it in two halves (top half, then bottom half) and upload both photos together');
+    e.httpStatus = 422;
+    throw e;
+  }
+  const text = String(choice?.message?.content || '').trim();
+  if (!text) throw new Error(`${label} returned no statement data (${diag()})`);
+  const json = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  const page = normaliseStatementPage(safeJsonParse(json, null));
+  if (!page) throw new Error(`${label} returned statement data in an unexpected format (${diag()}; began: ${JSON.stringify(text.slice(0, 120))})`);
+  return page;
+}
+
+/**
+ * A photographed statement: read each photo into rows with one vision call, prove each row
+ * against the statement's running balance (verifyStatementRows), then for each proven line
+ * either file it straight into expenses (a recognised bank charge — real narration text
+ * makes this possible, unlike the balance-only sweep) or run it through the subset-sum
+ * matcher like any other movement. Lines that can't be proven are never filed — they come
+ * back in unverifiedRows. Every filed line becomes exactly one bank_recon_entries row
+ * (synthetic balance_history_id 'stmt:<uuid>', since there is no real Worker history id).
  */
 async function handleBankReconStatement(DB, env, authz, body) {
-  // Accepts one or more photos (e.g. a multi-page statement) — each is OCR'd separately,
-  // then the transcribed pages are joined into one statement text before parsing, so a
-  // row split across two photos' worth of text never needs special-casing downstream.
+  // Accepts one or more photos (e.g. a multi-page statement). Each is read separately; the
+  // rows are then checked as one statement, in upload order, across photo boundaries.
   const images = Array.isArray(body?.images) ? body.images
     : body?.imageBase64 ? [{ imageBase64: body.imageBase64, mimeType: body.mimeType }]
     : [];
@@ -8822,38 +9064,69 @@ async function handleBankReconStatement(DB, env, authz, body) {
   for (let i = 0; i < images.length; i++) {
     if (!String(images[i]?.imageBase64 || '').trim()) return err(`Photo ${i + 1} of ${images.length} is missing image data`, 400);
   }
-  // Each photo's OCR is independent, so they run in parallel rather than one-by-one —
-  // a pure speed win (the slowest single photo, not the sum of all of them) with no
-  // accuracy tradeoff, since it's the exact same per-photo call either way. Promise.all
-  // preserves array order regardless of which photo's call actually finishes first, so
-  // the joined text still reads page 1, then page 2, etc.
-  let pageTexts;
+  // Each photo's read is independent, so they run in parallel — the slowest single photo,
+  // not the sum of all of them. Promise.all preserves array order regardless of which call
+  // finishes first, so page 1's rows still come before page 2's.
+  let pages;
   try {
-    pageTexts = await Promise.all(images.map((img) =>
-      ocrStatementPhoto(env, DB, String(img.imageBase64).trim(), String(img.mimeType || 'image/jpeg').trim())
+    const vision = await statementVisionProvider(env, DB);
+    pages = await Promise.all(images.map((img, i) =>
+      readStatementPhoto(vision, String(img.imageBase64).trim(), String(img.mimeType || 'image/jpeg').trim())
+        .catch((e) => {
+          if (images.length > 1) e.message = `photo ${i + 1} of ${images.length}: ${e.message}`;
+          throw e;
+        })
     ));
   } catch (e) {
     // Fail the whole upload rather than silently filing a partial statement — an
     // incomplete read must never look the same as a complete, successfully-matched one.
-    // (Promise.all rejects with the first failure; which photo it was is secondary to
-    // just surfacing the real reason when several ran concurrently.)
-    return err(`Could not read the statement: ${e.message}`, 502);
+    return err(`Could not read the statement: ${e.message}`, e.httpStatus || 502);
   }
-  const statementText = pageTexts.join('\n');
 
-  const parseRes = await parseStatementWithAI(env, DB, { statementText });
-  let parsed = null;
-  try { parsed = await parseRes.json(); } catch { parsed = null; }
-  if (parseRes.status !== 200 || !parsed || !Array.isArray(parsed.items)) {
-    return err(parsed?.error || 'Could not parse the statement text', parseRes.status >= 400 ? parseRes.status : 502);
-  }
-  // Nothing readable is a failure, not an empty success — otherwise "0 found" looks like the
-  // statement was processed. Show the start of what was read so a wrong/blurry photo is obvious.
-  const usableItems = parsed.items.filter(it => String(it?.date || '').slice(0, 10) && Math.abs(Number(it?.amount || 0)));
-  if (!usableItems.length) {
-    const seen = statementText.replace(/\s+/g, ' ').trim().slice(0, 140);
+  const rowsRead = pages.reduce((n, pg) => n + pg.rows.length, 0);
+  if (!rowsRead) {
+    // Nothing readable is a failure, not an empty success — otherwise "0 found" looks like
+    // the statement was processed.
     return err('No transactions could be read from the photo(s). Make sure each photo clearly shows the rows of the '
-      + 'statement (date, description, amount) and try again.' + (seen ? ` What was read began: "${seen}${statementText.length > 140 ? '…' : ''}"` : ''), 422);
+      + 'statement (date, description, amount) and try again.', 422);
+  }
+
+  // Dates first (verification uses them only to break a tie on which way the rows run).
+  const period = {
+    start: pages.map(pg => pg.period_start).filter(Boolean).sort()[0] || null,
+    end: pages.map(pg => pg.period_end).filter(Boolean).sort().pop() || null,
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  for (const pg of pages) for (const row of pg.rows) row.date = resolveStatementRowDate(row, period, today);
+
+  const check = verifyStatementRows(pages);
+  const items = [], unverifiedRows = [];
+  let overlapCount = 0;
+  for (const r of check.rows) {
+    if (r.status === 'overlap') { overlapCount++; continue; }
+    const row = r.row;
+    const direction = row.credit > 0 && !(row.debit > 0) ? 'in' : row.debit > 0 && !(row.credit > 0) ? 'out' : '';
+    const amount = direction === 'in' ? row.credit : direction === 'out' ? row.debit
+      : (Number.isFinite(row.credit) && row.credit) || (Number.isFinite(row.debit) && row.debit) || 0;
+    let reason = r.status === 'unverified' ? r.reason : '';
+    if (!row.date) reason = reason ? `${reason}; also its date couldn't be read` : 'date couldn\'t be read';
+    if (reason) {
+      unverifiedRows.push({ date: row.date, dateAsPrinted: row.date_as_printed, amount, direction, narration: row.narration, reason });
+      continue;
+    }
+    items.push({ date: row.date, amount, direction, narration: row.narration, reference: row.reference });
+  }
+  const verification = check.verification === 'unavailable' ? 'unavailable' : (unverifiedRows.length ? 'partial' : 'passed');
+
+  if (!items.length) {
+    const sample = unverifiedRows.slice(0, 3).map(u =>
+      `${u.date || u.dateAsPrinted || 'no date'} · ₦${Number(u.amount || 0).toLocaleString('en-NG')}${u.direction ? ` ${u.direction}` : ''}`
+      + `${u.narration ? ` · "${u.narration.slice(0, 60)}"` : ''} — ${u.reason}`).join('; ');
+    return new Response(JSON.stringify({
+      error: `None of the ${unverifiedRows.length} line${unverifiedRows.length === 1 ? '' : 's'} read could be double-checked, `
+        + `so nothing was added. ${sample}${unverifiedRows.length > 3 ? '; …' : ''}. Retake clearer photo(s) of the statement and try again.`,
+      unverifiedCount: unverifiedRows.length, unverifiedRows, verification,
+    }), { status: 422, headers: CORS_HEADERS });
   }
 
   // Unlike the sweep, this path never depends on the Worker being reachable (the box being
@@ -8887,12 +9160,9 @@ async function handleBankReconStatement(DB, env, authz, body) {
 
 
   let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0, duplicateCount = 0;
-  for (const item of parsed.items) {
-    const date = String(item.date || '').slice(0, 10);
-    const amount = Math.abs(Number(item.amount || 0));
-    if (!date || !amount) continue; // AI gave us nothing usable for this line
+  for (const item of items) {
+    const { date, amount, direction } = item;
     const narration = cleanStatementNarration(item.narration);
-    const direction = item.type === 'expense' ? 'out' : 'in';
 
     if (takePriorStmtLine(date, amount, direction, narration)) { duplicateCount++; continue; }
 
@@ -8943,7 +9213,11 @@ async function handleBankReconStatement(DB, env, authz, body) {
     else unrecordedCount++;
   }
 
-  return ok({ itemCount: parsed.items.length, autoCount, chargeCount, needsAttentionCount, unrecordedCount, duplicateCount });
+  // Rows repeated where two photos overlap count as found-but-already-seen, like a re-upload.
+  return ok({
+    itemCount: items.length + overlapCount, autoCount, chargeCount, needsAttentionCount, unrecordedCount,
+    duplicateCount: duplicateCount + overlapCount, unverifiedCount: unverifiedRows.length, unverifiedRows, verification,
+  });
 }
 
 // GET /api/bank-recon/entries (it_admin or accountant) and POST .../entries/:id/{resolve,ignore,unmatch}

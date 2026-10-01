@@ -13442,7 +13442,18 @@ function renderLastStatementUpload(){
         dup ? `${dup} line${dup===1?' was':'s were'} already uploaded before, so skipped.` : '',
         `${r.autoCount||0} matched automatically${r.chargeCount?` (incl. ${r.chargeCount} bank charge${r.chargeCount===1?'':'s'} filed)`:''} · ${r.needsAttentionCount||0} need review · ${r.unrecordedCount||0} not in your records.`,
       ].filter(Boolean);
-  const cls = total === 0 ? 'alert-danger' : allDup ? 'alert-info' : ((r.needsAttentionCount||0)+(r.unrecordedCount||0) > 0 ? 'alert-warn' : 'alert-success');
+  // Lines that didn't add up with the statement's running balance were NOT filed (the server
+  // never files an unproven line) — say so plainly, with the lines, so they get re-photographed.
+  const unv = r.unverifiedCount||0;
+  if(unv > 0){
+    const shown = (Array.isArray(r.unverifiedRows) ? r.unverifiedRows : []).slice(0,5);
+    lines.push(`<strong>⚠ ${unv} line${unv===1?'':'s'} didn't add up with the statement's running balance and ${unv===1?'was':'were'} NOT added:</strong>`);
+    for(const u of shown) lines.push(`<span style="padding-left:10px">${u.date ? fmtDate(u.date) : esc(u.dateAsPrinted||'—')} · ${fmt(Number(u.amount)||0)} · ${esc(u.narration||'')}${u.reason?` <span style="opacity:.75">— ${esc(u.reason)}</span>`:''}</span>`);
+    if(unv > shown.length) lines.push(`<span style="padding-left:10px">…and ${unv-shown.length} more.</span>`);
+    lines.push('Retake a clearer photo of that part and upload again — lines already added will be skipped.');
+  }
+  if(r.verification === 'unavailable') lines.push(`<span style="font-size:11.5px;opacity:.8">This statement has no running-balance column, so lines couldn't be double-checked.</span>`);
+  const cls = total === 0 ? 'alert-danger' : (r.unverifiedCount||0) > 0 ? 'alert-warn' : allDup ? 'alert-info' : ((r.needsAttentionCount||0)+(r.unrecordedCount||0) > 0 ? 'alert-warn' : 'alert-success');
   return `<div class="alert ${cls}" style="margin-bottom:12px;align-items:flex-start">
       <span class="alert-icon">${allDup?'ℹ':'📄'}</span>
       <span style="flex:1;font-size:12.5px;line-height:1.5">${lines.map(l=>`<div>${l}</div>`).join('')}</span>
@@ -13625,8 +13636,8 @@ async function submitBankStatementUpload(btn){
       // auto-restore timer running past this one.
       if(files.length > 1 && btn) btn.innerHTML = `<span class="btn-spinner-sm"></span> Preparing ${i+1} of ${files.length}…`;
       // Higher max dimension / quality than the deposit-slip compression (1200/0.75) —
-      // a statement has more, smaller text that OCR needs to be able to read.
-      const dataUrl = await compressPhoto(files[i], 1600, 0.85);
+      // a statement has dense, small figures that must be read digit-perfect.
+      const dataUrl = await compressPhoto(files[i], 2400, 0.9);
       images.push({ imageBase64: dataUrl.split(',')[1], mimeType: 'image/jpeg' });
     }
     // The box now reads every photo at once (not one-by-one), so what's left is one
@@ -13639,9 +13650,9 @@ async function submitBankStatementUpload(btn){
     const timeoutMs = Math.min(240000, 60000 + files.length * 30000);
     const res = await DB.uploadBankStatement({ images }, timeoutMs);
     closeModal();
-    const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
+    const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0 || (res.unverifiedCount||0) > 0;
     const pagesNote = files.length > 1 ? ` across ${files.length} pages` : '';
-    const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records${res.duplicateCount > 0 ? `, ${res.duplicateCount} already uploaded (skipped)` : ''}.`;
+    const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records${res.duplicateCount > 0 ? `, ${res.duplicateCount} already uploaded (skipped)` : ''}${res.unverifiedCount > 0 ? `, ${res.unverifiedCount} NOT added (didn't add up with the running balance — see the box below)` : ''}.`;
     state.bankTab = 'reconciliation';
     state._pendingAlert = { msg: alertMsg, type: needsFollowUp ? 'warn' : 'success' };
     // The alert fades after a few seconds; this box stays on the card until dismissed.

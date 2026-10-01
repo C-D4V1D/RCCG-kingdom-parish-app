@@ -139,119 +139,209 @@ test('POST /api/bank-recon/entries/:id/resolve: it_admin only; chosenRefs and ad
 });
 
 // ── POST /api/bank-recon/statement ────────────────────────────────────────
-function stubDeepseekForStatement(items, ocrText = 'OCR transcript of the statement') {
+// The statement reader makes ONE vision call per photo, which returns the statement's rows
+// as JSON: { period_start, period_end, opening_balance, closing_balance, rows: [{ date,
+// date_as_printed, narration, reference, debit, credit, balance }] }. itemsToPage turns
+// simple test lines ({ date, amount, type, narration }) into such a page with a consistent
+// running balance (oldest first, from an opening balance), so every line passes the
+// running-balance check unless a test deliberately breaks it.
+function itemsToPage(items, opening = 1000000) {
+  let bal = opening;
+  return {
+    period_start: null, period_end: null, opening_balance: opening, closing_balance: null,
+    rows: items.map(it => {
+      const out = it.type === 'expense';
+      bal = Math.round((bal + (out ? -it.amount : it.amount)) * 100) / 100;
+      return {
+        date: it.date, date_as_printed: it.date, narration: it.narration ?? '', reference: it.reference ?? '',
+        debit: out ? it.amount : 0, credit: out ? 0 : it.amount, balance: bal,
+      };
+    }),
+  };
+}
+const visionReply = (page) => jsonResponse(200, { model: 'm', choices: [{ message: { content: JSON.stringify(page) }, finish_reason: 'stop' }] });
+const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+const reconCount = (DB) => DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get().n;
+
+// Every statement read is deterministic (temperature 0), in JSON mode, and sends the photo at high detail.
+function assertStatementVisionRequest(sentBody, model) {
+  assert.equal(sentBody.model, model);
+  assert.equal(sentBody.temperature, 0, 'the same photo must read the same way every time');
+  assert.deepEqual(sentBody.response_format, { type: 'json_object' });
+  const content = sentBody.messages?.[0]?.content;
+  assert.ok(Array.isArray(content) && content.some(b => b.type === 'image_url' && b.image_url?.detail === 'high'));
+  assert.ok(content.some(b => b.type === 'text' && /running-balance/.test(b.text) && /never guess digits/.test(b.text)));
+}
+
+function stubDeepseekForStatement(pageOrItems) {
+  const page = Array.isArray(pageOrItems) ? itemsToPage(pageOrItems) : pageOrItems;
   return stubFetch((url, init) => {
-    if (url === 'https://api.deepseek.com/chat/completions') {
+    if (url === DEEPSEEK_URL) {
       const sentBody = JSON.parse(init.body);
-      const content = sentBody.messages?.[0]?.content;
-      if (Array.isArray(content)) {
-        // The vision OCR call (ocrStatementPhoto): content is an array of blocks.
-        assert.equal(sentBody.model, 'deepseek-flash');
-        assert.ok(content.some(b => b.type === 'image_url'));
-        return jsonResponse(200, { choices: [{ message: { content: ocrText } }] });
-      }
-      // The text parse call (parseStatementWithAI): plain string content.
-      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(items) } }] });
+      assertStatementVisionRequest(sentBody, 'deepseek-flash');
+      assert.equal(sentBody.max_tokens, 8000);
+      return visionReply(page);
     }
     throw new Error(`unexpected fetch in statement test: ${url}`);
   });
 }
 
-// bank_recon_ocr_provider='openai' routes the vision OCR call to OpenAI instead of
-// DeepSeek — the text-parsing step (parseStatementWithAI) is unaffected either way, it
-// always uses DeepSeek, so this still stubs both endpoints.
-function stubOpenAiForStatement(items, ocrText = 'OCR transcript of the statement') {
+// bank_recon_ocr_provider='openai' routes the (only) vision call to OpenAI — no DeepSeek
+// call is made at all, so no DeepSeek key is needed.
+function stubOpenAiForStatement(pageOrItems) {
+  const page = Array.isArray(pageOrItems) ? itemsToPage(pageOrItems) : pageOrItems;
   return stubFetch((url, init) => {
-    if (url === 'https://api.openai.com/v1/chat/completions') {
+    if (url === OPENAI_URL) {
       const sentBody = JSON.parse(init.body);
-      assert.equal(sentBody.model, 'gpt-6.1-sol');
-      assert.ok(sentBody.messages?.[0]?.content?.some(b => b.type === 'image_url'));
-      return jsonResponse(200, { choices: [{ message: { content: ocrText } }] });
-    }
-    if (url === 'https://api.deepseek.com/chat/completions') {
-      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify(items) } }] });
+      assertStatementVisionRequest(sentBody, 'gpt-6.1-sol');
+      assert.equal(sentBody.max_completion_tokens, 16000);
+      return visionReply(page);
     }
     throw new Error(`unexpected fetch in statement test: ${url}`);
   });
 }
 
-test('POST /api/bank-recon/statement: bank_recon_ocr_provider=openai routes the vision call to OpenAI', async () => {
+async function postStatement(DB, token, body) {
+  const res = await onRequest({ request: req('bank-recon/statement', { method: 'POST', headers: bearer(token), body }), env: baseEnv(DB) });
+  return { status: res.status, body: await readJson(res) };
+}
+
+test('POST /api/bank-recon/statement: a model that rejects temperature 0 is retried once without it', async () => {
   const DB = await freshDB();
   setOpenaiKey(DB);
-  setDeepseekKey(DB); // parseStatementWithAI (the text-parsing step after OCR) always uses DeepSeek
+  setOcrProvider(DB, 'openai');
+  const items = [{ date: '2026-10-05', amount: 1000, type: 'expense', narration: 'Misc' }];
+  const page = itemsToPage(items);
+  const sent = [];
+  const restore = stubFetch((url, init) => {
+    assert.equal(url, OPENAI_URL);
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    if ('temperature' in body) {
+      return jsonResponse(400, { error: { message: "Unsupported value: 'temperature' does not support 0 with this model." } });
+    }
+    return visionReply(page);
+  });
+  let res;
+  try {
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), { imageBase64: 'b', mimeType: 'image/jpeg' });
+  } finally { restore(); }
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].temperature, 0);
+  assert.ok(!('temperature' in sent[1]));
+  assert.deepEqual(sent[1].response_format, { type: 'json_object' });
+});
+
+test('POST /api/bank-recon/statement: bank_recon_ocr_provider=openai routes the one vision call to OpenAI', async () => {
+  const DB = await freshDB();
+  setOpenaiKey(DB);
   setOcrProvider(DB, 'openai');
   const items = [{ date: '2026-10-05', amount: 1000, type: 'expense', narration: 'Misc' }];
   const restore = stubOpenAiForStatement(items);
   let res;
   try {
-    res = await onRequest({
-      request: req('bank-recon/statement', { method: 'POST', headers: bearer(await tokenFor(DB, 'u1')), body: { imageBase64: 'base64data', mimeType: 'image/jpeg' } }),
-      env: baseEnv(DB),
-    });
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), { imageBase64: 'base64data', mimeType: 'image/jpeg' });
   } finally { restore(); }
-  assert.equal(res.status, 200, 'OpenAI OCR path succeeds when the OpenAI key is set and the provider is selected');
+  assert.equal(res.status, 200, 'OpenAI path succeeds when the OpenAI key is set and the provider is selected');
+  assert.deepEqual(fetchCalls.map(c => c.url), [OPENAI_URL], 'one call per photo, and no separate text-parsing call');
+  assert.equal(res.body.verification, 'passed');
+  const rows = DB.sqlite.prepare(`SELECT date, amount, direction FROM bank_recon_entries`).all();
+  assert.deepEqual(rows.map(r => ({ ...r })), [{ date: '2026-10-05', amount: 1000, direction: 'out' }]);
 });
 
-test('POST /api/bank-recon/statement: multiple photos are OCR\'d separately and joined into one statement before parsing', async () => {
+test('POST /api/bank-recon/statement: multiple photos are read in parallel, one call each, and checked as one statement in upload order', async () => {
   const DB = await freshDB();
   setDeepseekKey(DB);
-  let visionCallCount = 0;
-  const restore = stubFetch((url, init) => {
-    if (url === 'https://api.deepseek.com/chat/completions') {
-      const sentBody = JSON.parse(init.body);
-      const content = sentBody.messages?.[0]?.content;
-      if (Array.isArray(content)) {
-        visionCallCount++;
-        return jsonResponse(200, { choices: [{ message: { content: `PAGE-${visionCallCount}-TEXT` } }] });
-      }
-      // The text-parse call: assert both pages' text arrived, in order, then return one line —
-      // this test only cares about the OCR fan-out/join, not the matching that follows.
-      assert.match(content, /PAGE-1-TEXT[\s\S]*PAGE-2-TEXT/);
-      return jsonResponse(200, { choices: [{ message: { content: JSON.stringify([{ date: '2026-09-20', amount: 999, type: 'income', narration: 'x' }]) } }] });
-    }
-    throw new Error(`unexpected fetch in multi-page statement test: ${url}`);
+  const full = itemsToPage([
+    { date: '2026-09-20', amount: 999, type: 'income', narration: 'Page one credit' },
+    { date: '2026-09-21', amount: 120, type: 'expense', narration: 'Page one debit' },
+    { date: '2026-09-22', amount: 4321, type: 'income', narration: 'Page two credit' },
+    { date: '2026-09-23', amount: 700, type: 'expense', narration: 'Page two debit' },
+  ]);
+  // Page 2 has no opening balance of its own: its first row is proven by page 1's last balance.
+  const page1 = { ...full, rows: full.rows.slice(0, 2) };
+  const page2 = { ...full, opening_balance: null, rows: full.rows.slice(2) };
+  let visionCallCount = 0, inFlight = 0, maxInFlight = 0;
+  const restore = stubFetch(async (url, init) => {
+    if (url !== DEEPSEEK_URL) throw new Error(`unexpected fetch in multi-page statement test: ${url}`);
+    const sentBody = JSON.parse(init.body);
+    assertStatementVisionRequest(sentBody, 'deepseek-flash');
+    visionCallCount++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    const isPage1 = sentBody.messages[0].content.some(b => b.type === 'image_url' && b.image_url.url.endsWith('page1data'));
+    // Page 1 answers LAST, so anything built in completion order would put page 2 first
+    // and break the running-balance chain across the two photos.
+    await new Promise(r => setTimeout(r, isPage1 ? 30 : 0));
+    inFlight--;
+    return visionReply(isPage1 ? page1 : page2);
   });
   let res;
   try {
-    res = await onRequest({
-      request: req('bank-recon/statement', {
-        method: 'POST', headers: bearer(await tokenFor(DB, 'u1')),
-        body: { images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }] },
-      }),
-      env: baseEnv(DB),
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), {
+      images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }],
     });
   } finally { restore(); }
   assert.equal(res.status, 200);
-  assert.equal(visionCallCount, 2, 'each photo gets its own OCR call');
+  assert.equal(visionCallCount, 2, 'each photo gets exactly one call');
+  assert.equal(maxInFlight, 2, 'the photos are read in parallel');
+  assert.equal(res.body.itemCount, 4);
+  assert.equal(res.body.unverifiedCount, 0);
+  assert.equal(res.body.verification, 'passed');
+  const rows = DB.sqlite.prepare(`SELECT narration FROM bank_recon_entries ORDER BY date`).all();
+  assert.deepEqual(rows.map(r => r.narration), ['Page one credit', 'Page one debit', 'Page two credit', 'Page two debit']);
 });
 
-test('POST /api/bank-recon/statement: a failure on any one photo fails the whole upload, not a partial result', async () => {
+test('POST /api/bank-recon/statement: a failure on any one photo fails the whole upload with diagnostics, not a partial result', async () => {
   const DB = await freshDB();
   setDeepseekKey(DB);
-  let visionCallCount = 0;
   const restore = stubFetch((url, init) => {
-    if (url === 'https://api.deepseek.com/chat/completions') {
-      visionCallCount++;
-      if (visionCallCount === 2) return jsonResponse(200, { choices: [{ message: { content: '' } }] }); // empty -> throws
-      return jsonResponse(200, { choices: [{ message: { content: 'PAGE-1-TEXT' } }] });
-    }
-    throw new Error('the text-parse call must never be reached when a photo fails');
+    if (url !== DEEPSEEK_URL) throw new Error(`unexpected fetch: ${url}`);
+    const isPage2 = JSON.parse(init.body).messages[0].content.some(b => b.image_url?.url.endsWith('page2data'));
+    if (isPage2) return jsonResponse(200, { model: 'deepseek-flash', choices: [{ message: { content: '' }, finish_reason: 'stop' }] });
+    return visionReply(itemsToPage([{ date: '2026-10-05', amount: 100, type: 'income', narration: 'x' }]));
   });
-  let res, body;
+  let res;
   try {
-    res = await onRequest({
-      request: req('bank-recon/statement', {
-        method: 'POST', headers: bearer(await tokenFor(DB, 'u1')),
-        body: { images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }] },
-      }),
-      env: baseEnv(DB),
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), {
+      images: [{ imageBase64: 'page1data', mimeType: 'image/jpeg' }, { imageBase64: 'page2data', mimeType: 'image/jpeg' }],
     });
-    body = await readJson(res);
   } finally { restore(); }
   assert.equal(res.status, 502);
-  assert.match(body.error, /Could not read the statement/);
-  const reconRows = DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get();
-  assert.equal(reconRows.n, 0, 'nothing is filed when the upload fails partway through');
+  assert.match(res.body.error, /Could not read the statement: photo 2 of 2: DeepSeek returned no statement data/);
+  assert.match(res.body.error, /"finish_reason":"stop"/, 'diagnostic detail is kept');
+  assert.equal(reconCount(DB), 0, 'nothing is filed when the upload fails partway through');
+});
+
+test('POST /api/bank-recon/statement: a ```json-fenced reply is still read; a reply in the wrong shape fails with diagnostics', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  const page = itemsToPage([{ date: '2026-10-05', amount: 2500, type: 'income', narration: 'Fenced' }]);
+  let restore = stubFetch(() => jsonResponse(200, { choices: [{ message: { content: '```json\n' + JSON.stringify(page) + '\n```' }, finish_reason: 'stop' }] }));
+  let res;
+  try { res = await postStatement(DB, admin, { imageBase64: 'x', mimeType: 'image/jpeg' }); } finally { restore(); }
+  assert.equal(res.status, 200);
+  assert.equal(reconCount(DB), 1);
+
+  restore = stubFetch(() => jsonResponse(200, { model: 'deepseek-flash', choices: [{ message: { content: 'Sorry, I cannot read this.' }, finish_reason: 'stop' }] }));
+  try { res = await postStatement(DB, admin, { imageBase64: 'x', mimeType: 'image/jpeg' }); } finally { restore(); }
+  assert.equal(res.status, 502);
+  assert.match(res.body.error, /unexpected format.*"model":"deepseek-flash".*Sorry, I cannot read this/);
+  assert.equal(reconCount(DB), 1, 'nothing more filed');
+});
+
+test('POST /api/bank-recon/statement: a reply cut off for length fails clearly ("take it in two halves") and files nothing', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const restore = stubFetch(() => jsonResponse(200, { choices: [{ message: { content: '{"rows":[{"date":"2026-' }, finish_reason: 'length' }] }));
+  let res;
+  try {
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), { imageBase64: 'x', mimeType: 'image/jpeg' });
+  } finally { restore(); }
+  assert.equal(res.status, 422);
+  assert.match(res.body.error, /too many rows to read in one go — take it in two halves/);
+  assert.equal(reconCount(DB), 0);
 });
 
 test('POST /api/bank-recon/statement: it_admin only', async () => {
@@ -290,7 +380,8 @@ test('POST /api/bank-recon/statement: a clean single-candidate match lands as au
   } finally { restore(); }
 
   assert.equal(res.status, 200);
-  assert.deepEqual(body, { itemCount: 2, autoCount: 2, chargeCount: 1, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 0 });
+  assert.deepEqual(body, { itemCount: 2, autoCount: 2, chargeCount: 1, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 0,
+    unverifiedCount: 0, unverifiedRows: [], verification: 'passed' });
 
   const expenseRows = DB.sqlite.prepare(`SELECT * FROM expenses WHERE category='bank'`).all();
   assert.equal(expenseRows.length, 1, 'the SMS-alert charge was filed once');
@@ -432,8 +523,6 @@ async function uploadStatement(DB, token, items) {
     return { status: res.status, body: await readJson(res) };
   } finally { restore(); }
 }
-const reconCount = (DB) => DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries`).get().n;
-
 test('POST /api/bank-recon/statement: re-uploading the same statement files nothing new and reports duplicateCount', async () => {
   const DB = await freshDB();
   setDeepseekKey(DB);
@@ -453,7 +542,8 @@ test('POST /api/bank-recon/statement: re-uploading the same statement files noth
   const again = items.map(i => ({ ...i, amount: i.amount + 0.001, narration: ` ${i.narration.trim()} ` }));
   const second = await uploadStatement(DB, admin, again);
   assert.equal(second.status, 200);
-  assert.deepEqual(second.body, { itemCount: 3, autoCount: 0, chargeCount: 0, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 3 });
+  assert.deepEqual(second.body, { itemCount: 3, autoCount: 0, chargeCount: 0, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 3,
+    unverifiedCount: 0, unverifiedRows: [], verification: 'passed' });
   assert.equal(reconCount(DB), 3, 'no new rows on re-upload');
   assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE category='bank'`).get().n, 1, 'charge not re-filed');
 });
@@ -616,23 +706,136 @@ test('POST /api/bank-recon/statement: a photo with no readable transactions is a
   assert.equal(reconCount(DB), 0);
 });
 
-test('parseStatementWithAI: a reply cut off for length is reported clearly', async () => {
+// ── Running-balance verification at the endpoint ───────────────────────────
+test('POST /api/bank-recon/statement: a line that doesn\'t add up with the running balance is NOT filed and comes back in unverifiedRows', async () => {
   const DB = await freshDB();
   setDeepseekKey(DB);
-  const admin = await tokenFor(DB, 'u1');
+  const page = itemsToPage([
+    { date: '2026-09-20', amount: 5000, type: 'income', narration: 'Transfer from Bro. A' },
+    { date: '2026-09-21', amount: 3000, type: 'expense', narration: 'Diesel' },
+    { date: '2026-09-22', amount: 2000, type: 'income', narration: 'Transfer from Sis. B' },
+  ]);
+  page.rows[1].debit = 8000; // misread: the printed balances say 3,000 left the account
+  const res = await uploadStatement(DB, await tokenFor(DB, 'u1'), page);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.verification, 'partial');
+  assert.equal(res.body.itemCount, 2, 'only the two proven lines go on to matching');
+  assert.equal(res.body.unverifiedCount, 1);
+  assert.equal(res.body.unverifiedRows.length, 1);
+  const u = res.body.unverifiedRows[0];
+  assert.deepEqual({ date: u.date, amount: u.amount, direction: u.direction, narration: u.narration },
+    { date: '2026-09-21', amount: 8000, direction: 'out', narration: 'Diesel' });
+  assert.match(u.reason, /doesn't add up with the running balance/);
+  const rows = DB.sqlite.prepare(`SELECT amount, narration FROM bank_recon_entries ORDER BY date`).all();
+  assert.deepEqual(rows.map(r => r.narration), ['Transfer from Bro. A', 'Transfer from Sis. B']);
+  assert.ok(!rows.some(r => r.amount === 8000 || r.amount === 3000), 'the unproven line was not filed at any amount');
+});
+
+test('POST /api/bank-recon/statement: when lines are read but none can be proven, it is a 422 listing them, and nothing is filed', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const page = itemsToPage([
+    { date: '2026-09-20', amount: 5000, type: 'income', narration: 'First' },
+    { date: '2026-09-21', amount: 3000, type: 'expense', narration: 'Second' },
+  ]);
+  page.rows[0].credit = 6000;
+  page.rows[1].debit = 2000;
+  const res = await uploadStatement(DB, await tokenFor(DB, 'u1'), page);
+  assert.equal(res.status, 422);
+  assert.match(res.body.error, /None of the 2 lines read could be double-checked, so nothing was added/);
+  assert.match(res.body.error, /2026-09-20 · ₦6,000 in · "First" — doesn't add up/);
+  assert.equal(res.body.unverifiedRows.length, 2);
+  assert.equal(reconCount(DB), 0);
+});
+
+test('POST /api/bank-recon/statement: a statement with no running-balance column is filed as before but reported as "unavailable"', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const page = itemsToPage([
+    { date: '2026-09-20', amount: 5000, type: 'income', narration: 'In' },
+    { date: '2026-09-21', amount: 3000, type: 'expense', narration: 'Out' },
+  ]);
+  page.opening_balance = null;
+  for (const r of page.rows) r.balance = null;
+  page.rows.push({ date: '2026-09-22', date_as_printed: '22 Sep', narration: 'Both columns', reference: '', debit: 100, credit: 100, balance: null });
+  const res = await uploadStatement(DB, await tokenFor(DB, 'u1'), page);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.verification, 'unavailable');
+  assert.equal(res.body.itemCount, 2);
+  assert.equal(res.body.unverifiedCount, 1, 'a line with both a debit and a credit is still rejected');
+  assert.match(res.body.unverifiedRows[0].reason, /both a money-in and a money-out/);
+  assert.equal(reconCount(DB), 2);
+});
+
+test('POST /api/bank-recon/statement: a missing year comes from the statement period; a line with no readable date is not filed', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const page = itemsToPage([
+    { date: null, amount: 5000, type: 'income', narration: 'No year printed' },
+    { date: null, amount: 3000, type: 'expense', narration: 'No date at all' },
+    { date: '2026-13-45', amount: 1000, type: 'income', narration: 'Bad ISO, good print' },
+  ]);
+  page.period_start = '2025-12-15';
+  page.period_end = '2026-01-14';
+  page.rows[0].date_as_printed = '28 Dec';      // inside the period -> 2025, not 2026
+  page.rows[1].date_as_printed = '';
+  page.rows[2].date_as_printed = '03/01';        // day-first -> 3 Jan, inside the period -> 2026
+  const res = await uploadStatement(DB, await tokenFor(DB, 'u1'), page);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.unverifiedCount, 1);
+  assert.equal(res.body.unverifiedRows[0].narration, 'No date at all');
+  assert.equal(res.body.unverifiedRows[0].reason, 'date couldn\'t be read');
+  const rows = DB.sqlite.prepare(`SELECT date, narration FROM bank_recon_entries ORDER BY date`).all();
+  assert.deepEqual(rows.map(r => [r.date, r.narration]), [['2025-12-28', 'No year printed'], ['2026-01-03', 'Bad ISO, good print']]);
+});
+
+test('POST /api/bank-recon/statement: rows repeated where two photos overlap are filed once (counted as duplicates)', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const full = itemsToPage([
+    { date: '2026-09-20', amount: 999, type: 'income', narration: 'A' },
+    { date: '2026-09-21', amount: 120, type: 'expense', narration: 'B' },
+    { date: '2026-09-22', amount: 4321, type: 'income', narration: 'C' },
+    { date: '2026-09-23', amount: 700, type: 'expense', narration: 'D' },
+  ]);
+  const top = { ...full, rows: full.rows.slice(0, 3) };
+  const bottom = { ...full, opening_balance: null, rows: full.rows.slice(1).map(r => ({ ...r, narration: r.narration + ' (re-read)' })) };
   const restore = stubFetch((url, init) => {
-    const content = JSON.parse(init.body).messages?.[0]?.content;
-    if (Array.isArray(content)) return jsonResponse(200, { choices: [{ message: { content: 'rows' } }] });
+    const isTop = JSON.parse(init.body).messages[0].content.some(b => b.image_url?.url.endsWith('top'));
+    return visionReply(isTop ? top : bottom);
+  });
+  let res;
+  try {
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), { images: [{ imageBase64: 'top' }, { imageBase64: 'bottom' }] });
+  } finally { restore(); }
+  assert.equal(res.status, 200);
+  assert.equal(res.body.verification, 'passed');
+  assert.equal(res.body.itemCount, 6);
+  assert.equal(res.body.duplicateCount, 2, 'B and C appear on both photos');
+  const rows = DB.sqlite.prepare(`SELECT narration FROM bank_recon_entries ORDER BY date`).all();
+  assert.deepEqual(rows.map(r => r.narration), ['A', 'B', 'C', 'D (re-read)']);
+});
+
+// parseStatementWithAI is no longer part of the bank-recon upload, but still serves the
+// KPSC portal's paste-a-statement route — its own cut-off check must keep working there.
+test('kpsc-parse-statement (parseStatementWithAI): a reply cut off for length is reported clearly', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO kpsc_accounts (id,name,role,pin,status) VALUES ('k1','Treasurer','treasurer','x','active')`).run();
+  DB.sqlite.prepare(`INSERT INTO kpsc_sessions (id,account_id,expires_at) VALUES ('tok','k1',?)`).run(Date.now() + 3600000);
+  const restore = stubFetch((url, init) => {
+    assert.equal(url, DEEPSEEK_URL);
     assert.equal(JSON.parse(init.body).max_tokens, 8000);
     return jsonResponse(200, { choices: [{ message: { content: '[{"date":"2026-' }, finish_reason: 'length' }] });
   });
+  let res, body;
   try {
-    const res = await onRequest({
-      request: req('bank-recon/statement', { method: 'POST', headers: bearer(admin), body: { imageBase64: 'x', mimeType: 'image/jpeg' } }),
+    res = await onRequest({
+      request: req('kpsc-parse-statement', { method: 'POST', headers: { 'X-KPSC-Session': JSON.stringify({ accountId: 'k1', token: 'tok' }) }, body: { statementText: 'some rows' } }),
       env: baseEnv(DB),
     });
-    const body = await readJson(res);
-    assert.ok(res.status >= 400);
-    assert.match(body.error, /too many lines/);
+    body = await readJson(res);
   } finally { restore(); }
+  assert.ok(res.status >= 400);
+  assert.match(body.error, /too many lines/);
 });
