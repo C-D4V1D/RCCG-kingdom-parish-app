@@ -74,9 +74,9 @@ P["tools/clerkcfg.py"] = [
 
 # poller.py (the Telegram bot): /balance checks now and replies with the real figure (also updates the app).
 P["telegram/srcdoc/poller.py"] = [
-    ("after", '"/statement - the latest financial statement (link + PDF)\\n"', [
+    ("after", '"/statement - the latest financial statement (link + PDF; tap for previous months)\\n"', [
         '"/balance - check the real bank balance from the RCCG portal now\\n"']),
-    ("before", "def cmd_statement(chat):", [
+    ("before", "def cmd_paid(chat, month=''):  # monthclose-20260930", [
         "def cmd_balance(chat):  # " + MARK,
         "    import json, shutil, subprocess",
         "    try:",
