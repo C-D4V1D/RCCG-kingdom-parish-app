@@ -12765,6 +12765,7 @@ async function renderBank(){
   // Populates its own DOM region asynchronously after the page above is already
   // showing, so a slow/failed fetch never blocks the Bank page itself.
   if(tab==='charges') loadBankEmailIngestCard();
+  if(state._pendingAlert){ showAlert(state._pendingAlert.msg, state._pendingAlert.type); state._pendingAlert=null; }
 }
 
 function renderBankOverview(monthBankTx,bankBalance){
@@ -13434,7 +13435,9 @@ async function submitBankStatementUpload(btn){
     closeModal();
     const needsFollowUp = (res.needsAttentionCount||0) > 0 || (res.unrecordedCount||0) > 0;
     const pagesNote = files.length > 1 ? ` across ${files.length} pages` : '';
-    showAlert(`Statement processed${pagesNote}: ${res.itemCount} line items found, ${res.autoCount} matched automatically (${res.chargeCount} were bank charges filed automatically), ${res.needsAttentionCount} need your review, ${res.unrecordedCount} not found in your records.`, needsFollowUp ? 'warn' : 'success');
+    const alertMsg = `Statement processed${pagesNote}: ${res.itemCount||0} line items found, ${res.autoCount||0} matched automatically${res.chargeCount ? ` (${res.chargeCount} bank charges filed)` : ''}, ${res.needsAttentionCount||0} need your review, ${res.unrecordedCount||0} not found in your records.`;
+    state.bankTab = 'reconciliation';
+    state._pendingAlert = { msg: alertMsg, type: needsFollowUp ? 'warn' : 'success' };
     navigate('bank');
   } catch(err) {
     restore();
