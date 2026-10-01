@@ -13112,16 +13112,17 @@ async function ackChurchBankIngestAttention(lastActivityAt){
 function renderPortalBalanceBlock(portal, appBalance){
   const notChecked = !portal || portal.balance === null || portal.balance === undefined;
   const checkedAt = !notChecked && portal.checked_at ? `${fmtDate(portal.checked_at)} ${fmtTime(portal.checked_at)}` : '';
+  const prevTs = notChecked ? '' : (portal.checked_at || '');
   if(notChecked){
-    return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
+    return `<div data-portal-balance-block style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
       <span>Real Balance: not checked yet</span>
-      <button onclick="App.refreshPortalBankBalance(this)" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>`;
   }
   const diff = appBalance - portal.balance;
   const behind = diff < 0;
   const aligned = Math.abs(diff) < 1;
-  return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px">
+  return `<div data-portal-balance-block style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px">
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text2)">
       <span>Real Balance</span><span style="font-weight:600">${fmt(portal.balance)}</span>
     </div>
@@ -13130,21 +13131,38 @@ function renderPortalBalanceBlock(portal, appBalance){
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);margin-top:4px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
-      <button onclick="App.refreshPortalBankBalance(this)" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>
   </div>`;
 }
 
-async function refreshPortalBankBalance(btn){
-  const restore = btn ? setBtnLoading(btn, 'Requesting…') : null;
+// Keeps the button spinning and polls for the box's updated figure, rather than firing the
+// request and reverting immediately — the box may take a little while to pick up the request
+// and log into the portal. Gives up after ~80s (comfortably above the box's worst-case pickup
+// time) and leaves the old figure in place; the normal page-load fetch will pick it up later.
+async function refreshPortalBankBalance(btn, appBalance, prevCheckedAt){
+  const wrapper = btn ? btn.closest('[data-portal-balance-block]') : null;
+  const restore = btn ? setBtnLoading(btn, 'Checking…') : null;
   try {
     await DB.requestPortalBankBalanceRefresh();
-    showAlert('Refresh requested — the box will check the portal and update this shortly.', 'success');
   } catch(e){
-    showAlert(`Could not request a refresh: ${e.message}`, 'danger');
-  } finally {
     if(restore) restore();
+    showAlert(`Could not request a refresh: ${e.message}`, 'danger');
+    return;
   }
+  const maxAttempts = 26, intervalMs = 3000;
+  for(let i = 0; i < maxAttempts; i++){
+    await new Promise(r => setTimeout(r, intervalMs));
+    let fresh;
+    try { fresh = await DB.getPortalBankBalance(); } catch { continue; }
+    if(fresh && fresh.checked_at && fresh.checked_at !== prevCheckedAt){
+      if(restore) restore();
+      if(wrapper) wrapper.outerHTML = renderPortalBalanceBlock(fresh, appBalance);
+      return;
+    }
+  }
+  if(restore) restore();
+  showAlert("Still checking the portal — this is taking longer than usual. The figure will update automatically once it's done.", 'info');
 }
 
 // Best-effort fetch — the Dashboard/Bank page must never fail to render just because the box
