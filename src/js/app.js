@@ -19136,6 +19136,11 @@ async function renderAutomations(){
     catch(e){ state.automations.satUsers = null; }
     state.automations.areaLoaded = false;
     settingsEl.innerHTML = renderAutomationsSettings(configData.config, configData.is_default, healthData);
+    // Baseline for the unsaved-changes check in sendTestAlert(): collectAutomationsConfig() fills in
+    // the form's own defaults for fields the saved config doesn't have yet (e.g. alert_after_hours —
+    // DEFAULT_CONFIG.automations.supervisor doesn't carry it). Comparing against the raw saved config
+    // would see those filled-in defaults as "edits" and block the button on a page nobody has touched.
+    state.automations.configBaseline = JSON.stringify(collectAutomationsConfig());
   } else {
     settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
   }
@@ -20143,10 +20148,12 @@ async function sendTestAlert(btn){
   // The Worker tests against the already-SAVED config in KV, not whatever is sitting in this
   // form — sending while there are unsaved edits (e.g. a just-ticked recipient) would silently
   // test the old settings and could report success for a change that was never actually saved.
-  if(state.automations?.config){
+  // Compared against configBaseline (also collectAutomationsConfig() output, captured right after
+  // load), not the raw saved config — the form fills in its own defaults for fields the saved
+  // config doesn't carry yet, and comparing against the raw config would flag those as "unsaved".
+  if(state.automations?.configBaseline){
     const pending = JSON.stringify(collectAutomationsConfig());
-    const saved = JSON.stringify(state.automations.config);
-    if(pending !== saved){
+    if(pending !== state.automations.configBaseline){
       showAlert('You have unsaved changes. Press "Save changes" first, then send the test alert — otherwise it tests the old settings.', 'danger');
       return;
     }
@@ -20188,6 +20195,7 @@ async function saveAutomationsConfig(btn){
     if(res.ok && data.ok){
       state.automations.configVersion = data.config_version;
       state.automations.config = config;
+      state.automations.configBaseline = JSON.stringify(config);
       state.automations.isDefault = false;
       // The app itself needs the parish list too (parish name, and refusing a paused parish's pastor).
       let listErr = null;
