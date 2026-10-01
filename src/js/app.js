@@ -933,7 +933,6 @@ const DB = {
   saveSettings(d)              { return apiFetch('settings','POST',d); },
 
   getChurchBankIngestLog()     { return apiFetch('church-bank-ingest-log'); },
-  getBankBalanceSnapshot()     { return apiFetch('bank-balance-snapshot'); },
   getPortalBankBalance()       { return apiFetch('bank-portal-balance'); },
   requestPortalBankBalanceRefresh() { return apiFetch('bank-portal-balance/refresh','POST'); },
 
@@ -12763,10 +12762,9 @@ async function renderBank(){
       tab==='charges'?renderBankCharges(periodExpenses.filter(e=>e.category==='bank')):
       renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashDepositedToBank,bankExpenses,paidRemsBank,bankWithdrawals,pettyBankTopups,bankReconEntries)}`;
 
-  // These populate their own DOM regions asynchronously after the page above
-  // is already showing, so a slow/failed fetch never blocks the Bank page itself.
+  // Populates its own DOM region asynchronously after the page above is already
+  // showing, so a slow/failed fetch never blocks the Bank page itself.
   if(tab==='charges') loadBankEmailIngestCard();
-  if(tab==='reconciliation') autoCheckBankReconciliation();
 }
 
 function renderBankOverview(monthBankTx,bankBalance){
@@ -13136,6 +13134,9 @@ function renderPortalBalanceBlock(portal, appBalance){
   const diff = appBalance - portal.balance;
   const behind = diff < 0;
   const aligned = Math.abs(diff) < 1;
+  // Only it_admin/accountant can act on a discrepancy (same gating as the Bank
+  // Reconciliation card itself) — no point sending anyone else to a dead end.
+  const canReconcile = state.user?.role === 'it_admin' || state.user?.role === 'accountant';
   return `<div data-portal-balance-block style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px">
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text2)">
       <span>Real Balance</span><span style="font-weight:600">${fmt(portal.balance)}</span>
@@ -13143,11 +13144,20 @@ function renderPortalBalanceBlock(portal, appBalance){
     <div style="margin-top:2px;color:${aligned?'var(--success)':(behind?'var(--danger)':'var(--amber)')}">
       ${aligned ? '✓ Matches the app' : `⚠ App is ${fmt(Math.abs(diff))} ${behind?'behind':'ahead of'} the real balance`}
     </div>
+    ${!aligned && canReconcile ? `<button onclick="App.goToBankReconciliation()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px;font-size:12px;padding:7px">🔍 Reconcile This Difference</button>` : ''}
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);margin-top:4px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
       <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>
   </div>`;
+}
+
+// Jumps straight to the Bank page's Reconciliation tab — used by the "Reconcile This
+// Difference" button, reachable from both the Bank page itself and the Dashboard's own
+// copy of the same Real-vs-App balance block.
+function goToBankReconciliation(){
+  state.bankTab = 'reconciliation';
+  navigate('bank');
 }
 
 // Keeps the button spinning and polls for the box's updated figure, rather than firing the
@@ -13205,16 +13215,6 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header"><span class="card-title">Statement Entry Check</span></div>
-      <p style="font-size:13px;color:var(--text2);margin-bottom:12px">Automatically checked against the balance in the bank's own alert emails whenever one arrives. You can also enter a balance manually below to compare on demand.</p>
-      <div class="form-row">
-        <div class="form-group"><label class="form-label">Bank Statement Balance (₦)</label><input type="number" id="bank_stmt_bal" class="form-input" placeholder="Enter actual balance from bank statement" /></div>
-        <div class="form-group" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="App.compareBankBalance()">Compare</button></div>
-      </div>
-      <div id="bankCompareResult"></div>
-    </div>
-
     ${renderBankReconCard(bankReconEntries, state.user?.role)}
 
     <div class="card">
@@ -13233,52 +13233,6 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
           </tr>`}).join('')}
       </table></div>`:'<div class="empty-table">No bank transactions found.</div>'}
     </div>`;
-}
-
-function compareBankBalance(){
-  const stmtBal = parseFloat(document.getElementById('bank_stmt_bal')?.value);
-  if(isNaN(stmtBal)){ showAlert('Please enter the bank statement balance.','danger'); return }
-  calcChurchBalance().then(bal=>{
-    const diff = bal.bankBalance - stmtBal;
-    const el = document.getElementById('bankCompareResult');
-    if(!el) return;
-    if(Math.abs(diff) < 1){
-      el.innerHTML = `<div class="alert alert-success" style="margin-top:12px"><span class="alert-icon">✓</span><span><strong>Reconciled!</strong> The computed bank balance matches the bank statement.</span></div>`;
-    } else {
-      el.innerHTML = `<div class="alert ${diff>0?'alert-warn':'alert-danger'}" style="margin-top:12px"><span class="alert-icon">⚠</span><span><strong>Discrepancy: ${fmt(Math.abs(diff))}</strong><br>Computed balance: ${fmt(bal.bankBalance)}<br>Statement balance: ${fmt(stmtBal)}<br>${diff>0?'System shows more than bank statement. Check for unrecorded bank charges or debits.':'Bank statement shows more than system. Check for unrecorded deposits or credits.'}</span></div>`;
-    }
-  });
-}
-
-// Auto-fills and auto-runs the Statement Entry Check using the balance figure
-// captured from the most recent bank alert email, comparing the computed
-// balance "as of" that same date (not "as of now") so later, legitimately
-// unreflected transactions never produce a false-positive mismatch. Reuses
-// calcChurchBalance's own asOfDate support rather than re-deriving the bank
-// balance formula server-side, so there is only ever one source of truth for it.
-async function autoCheckBankReconciliation(){
-  const input = document.getElementById('bank_stmt_bal');
-  const el = document.getElementById('bankCompareResult');
-  if(!input || !el) return;
-  try {
-    const snap = await DB.getBankBalanceSnapshot();
-    if(!snap || !snap.date || snap.balance===null || snap.balance===undefined) return;
-    if(!input.value) input.value = snap.balance;
-    const bal = await calcChurchBalance(snap.date);
-    const diff = bal.bankBalance - snap.balance;
-    const asOfNote = `<div style="font-size:11px;color:var(--text3);margin-top:4px">Auto-checked against the balance reported in the bank's own alert email as of ${fmtDate(snap.date)}.</div>`;
-    if(Math.abs(diff) < 1){
-      el.innerHTML = `<div class="alert alert-success" style="margin-top:12px"><span class="alert-icon">✓</span><span><strong>Reconciled!</strong> Computed balance matches the bank's last reported balance as of ${fmtDate(snap.date)}.</span></div>${asOfNote}`;
-    } else {
-      el.innerHTML = `<div class="alert ${diff>0?'alert-warn':'alert-danger'}" style="margin-top:12px"><span class="alert-icon">⚠</span><span><strong>Discrepancy: ${fmt(Math.abs(diff))}</strong><br>Computed balance (as of ${fmtDate(snap.date)}): ${fmt(bal.bankBalance)}<br>Bank's reported balance: ${fmt(snap.balance)}<br>${diff>0?'System shows more than the bank. Check for unrecorded bank charges or debits.':'Bank shows more than the system. Check for unrecorded deposits or credits.'}</span></div>${asOfNote}`;
-      const s = await DB.getSettings();
-      if(s.bank_balance_last_notified_snapshot_id !== snap.id){
-        DB.addNotification('Bank Balance Mismatch', `Computed bank balance differs from the bank's reported balance (as of ${fmtDate(snap.date)}) by ${fmt(Math.abs(diff))}. Check Bank → Reconciliation.`, 'warn');
-        s.bank_balance_last_notified_snapshot_id = snap.id;
-        DB.saveSettings(s);
-      }
-    }
-  } catch(_) { /* supplementary check only — fail silently */ }
 }
 
 // ── Automatic Bank Reconciliation (box balance checks + statement OCR) ──────
@@ -13317,20 +13271,29 @@ function renderBankReconCard(entries, role){
           ? `<button class="btn btn-sm btn-primary" onclick="App.reviewBankReconEntry('${esc(e.id)}')">Review →</button>`
           : `<button class="btn btn-sm" disabled title="Only the IT administrator can resolve this">Review →</button>`)
       : '';
-    return `<div style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
-        <div style="flex:1;min-width:0">
-          <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
-          ${e.narration?`<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.narration)}</div>`:''}
+    // Two lines, not one packed row: line 1 is just date/narration (flexible) + amount
+    // (fixed), which always fits; line 2 (badge + any button) wraps freely on its own,
+    // so a "Needs review" badge plus button never gets squeezed off a narrow phone screen.
+    return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
+            ${e.narration?`<div style="font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.narration)}</div>`:''}
+          </div>
+          <div style="text-align:right;flex-shrink:0;white-space:nowrap">
+            <span style="font-size:14px;font-weight:700;color:${color}">${isIn?'↑':'↓'} ${fmt(e.amount)}</span>
+          </div>
         </div>
-        <div style="text-align:right;flex-shrink:0;white-space:nowrap">
-          <span style="font-size:14px;font-weight:700;color:${color}">${isIn?'↑':'↓'} ${fmt(e.amount)}</span>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px">
+          ${bankReconStatusBadge(e.status)}
+          ${reviewBtn}
         </div>
-        <div style="flex-shrink:0">${bankReconStatusBadge(e.status)}</div>
-        ${reviewBtn?`<div style="flex-shrink:0">${reviewBtn}</div>`:''}
       </div>`;
   }).join('');
   return `<div class="card">
-    <div class="card-header"><span class="card-title">Bank Reconciliation</span>${uploadBtn}</div>
+    <div class="card-header" style="flex-wrap:wrap;gap:8px">
+      <span class="card-title">Bank Reconciliation</span>${uploadBtn}
+    </div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
     ${shown.length ? rowsHtml : `<div class="empty-table">No bank movements reported yet.</div>`}
     ${sorted.length>20?`<div style="font-size:11px;color:var(--text3);margin-top:8px">Showing the most recent 20 of ${sorted.length} movements.</div>`:''}
@@ -20444,9 +20407,9 @@ return {
   updateExpenseSubcats, updateExpenseDescRequired,
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
-  setBankTab, showBankChargeForm, submitBankCharge, compareBankBalance, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
+  setBankTab, showBankChargeForm, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
   reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, showBankStatementUploadForm, submitBankStatementUpload,
-  refreshPortalBankBalance,
+  refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,
   renderPettyCash, recalcPettyFloat, showPettyDetail, confirmDeletePetty, submitDeletePetty, showPettyRequest, showTopUpRequest, submitTopUpRequest, onTopupOverrideToggle, cancelTopUpRequest, showAdvanceRequest, submitAdvanceRequest, onReceiptToggle, setPettySearch, setPettyTypeFilter, setPettyStatusFilter, setPettySort, clearPettyFilters,
