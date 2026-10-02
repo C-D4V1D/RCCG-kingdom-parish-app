@@ -13293,9 +13293,13 @@ function renderBankLedgerCard(){
   const shown = list.slice(0, limit);
   const left = list.length - shown.length;
   const title = showAll ? 'All Bank Transactions' : `Bank Transactions — ${monthLabel()}`;
+  const matchLookup = buildBankMatchLookup(); // built once per render, not per row
   const rows = shown.map(t=>{
     const isCredit = t.txAmt > 0;
     const color = isCredit ? 'var(--success,#2e7d32)' : 'var(--danger)';
+    const matched = bankLedgerMatchedEntries(t, matchLookup);
+    const chip = matched.length
+      ? `<button type="button" onclick="App.showBankLedgerMatch('${matched.map(e=>esc(e.id)).join(',')}')" style="background:var(--success-light,#e8f5e9);color:var(--success,#2e7d32);border:none;border-radius:10px;padding:2px 8px;font-size:10.5px;font-weight:600;cursor:pointer;white-space:nowrap">✓ Matched to bank</button>` : '';
     return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0">
       <div style="display:flex;align-items:center;gap:10px">
         <div style="flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fmtDate(t.date||t.createdAt)} &nbsp;·&nbsp; ${esc(t.txLabel)}</div>
@@ -13303,6 +13307,7 @@ function renderBankLedgerCard(){
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:11px;color:var(--text3)">
         <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${esc(t.txType)}</span>
+        ${chip}
         ${t.reference?`<span style="min-width:0;word-break:break-word">${esc(t.reference)}</span>`:''}
       </div>
     </div>`;
@@ -13315,6 +13320,82 @@ function renderBankLedgerCard(){
     <div style="padding:0 4px">${rows || `<div class="empty-table">${showAll?'No bank transactions found.':'No bank transactions this month.'}</div>`}</div>
     ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankLedger()">Show more (${left} left)</button>`:''}
   </div>`;
+}
+
+// ref → recon entries lookup (auto/resolved entries only), keyed "<sourceTable>:<sourceId>".
+function buildBankMatchLookup(){
+  const map = new Map();
+  for(const e of (state._bankReconEntries||[])){
+    if(e.status !== 'auto' && e.status !== 'resolved') continue;
+    for(const r of (e.matchedRefs||[])){
+      if(!r || !r.sourceTable || r.sourceId == null) continue;
+      const k = `${r.sourceTable}:${r.sourceId}`;
+      if(!map.has(k)) map.set(k, []);
+      const arr = map.get(k);
+      if(!arr.includes(e)) arr.push(e);
+    }
+  }
+  return map;
+}
+const BANK_TX_SOURCE_TABLE = { income:'income', expense:'expenses', remittance:'remittances', withdrawal:'cash_transactions', deposit:'cash_transactions', 'petty-topup':'petty_cash' };
+function bankLedgerMatchedEntries(t, lookup){
+  const table = BANK_TX_SOURCE_TABLE[t.txType];
+  if(!table || !lookup.size) return [];
+  // A merged cash deposit carries its member records in _splitParts; match on any member id.
+  const ids = (t._splitParts && t._splitParts.length ? t._splitParts.map(p=>p.id) : [t.id]).filter(x=>x!=null);
+  const out = [];
+  for(const id of ids){
+    for(const e of (lookup.get(`${table}:${id}`)||[])) if(!out.includes(e)) out.push(e);
+  }
+  return out;
+}
+
+// Tap on "✓ Matched to bank": list the bank line(s) behind it.
+function showBankLedgerMatch(idsCsv){
+  const all = state._bankReconEntries||[];
+  const entries = String(idsCsv||'').split(',').map(id=>all.find(e=>e.id===id)).filter(Boolean);
+  if(!entries.length) return;
+  const rows = entries.map(e=>{
+    const isIn = e.direction === 'in';
+    const grp = e.groupId && e.groupSize > 1 ? `<div style="font-size:11px;color:var(--text3)">1 of ${esc(e.groupSize)} lines</div>` : '';
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border-light,#f0f0f0)">
+        <div style="display:flex;gap:10px;align-items:center">
+          <div style="flex:1;min-width:0;font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
+          <div style="flex-shrink:0;white-space:nowrap;font-size:14px;font-weight:700;color:${isIn?'var(--success,#2e7d32)':'var(--danger)'}">${isIn?'↑':'↓'} ${fmt(e.amount)}</div>
+        </div>
+        ${e.narration?`<div style="font-size:11.5px;color:var(--text3);word-break:break-word">${esc(e.narration)}</div>`:''}
+        ${grp}
+      </div>`;
+  }).join('');
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Matched bank line(s)</div>
+    <div style="margin:8px 0">${rows}</div>
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px"><button class="btn" onclick="closeModal()">Close</button><button class="btn btn-primary" onclick="App.viewBankReconEntry('${esc(entries[0].id)}')">View in reconciliation</button></div>`);
+}
+
+// Close any modal, make sure the entry's row is on screen (page the list if needed), scroll to it, flash it.
+function viewBankReconEntry(id){
+  closeModal();
+  let el = document.getElementById(`brc-${id}`);
+  if(!el){
+    const all = state._bankReconEntries||[];
+    const byNewest = (a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0);
+    const finished = all.filter(e=>!(e.status==='needs_attention'||e.status==='unrecorded')).sort(byNewest);
+    const idx = finished.findIndex(e=>e.id===id);
+    if(idx >= 0){
+      state.bankReconShown = Math.max(state.bankReconShown||20, Math.ceil((idx+1)/20)*20);
+      const card = document.getElementById('bankReconCard');
+      if(card) card.outerHTML = renderBankReconCard(all, state.user?.role);
+      el = document.getElementById(`brc-${id}`);
+    }
+  }
+  if(!el){ showAlert('That bank line is not on screen — open the Bank Reconciliation list to find it.','warn'); return; }
+  el.scrollIntoView({ behavior:'smooth', block:'center' });
+  const prev = el.style.background;
+  el.style.transition = 'background .4s';
+  el.style.background = 'var(--warning-light,#fff8e1)';
+  setTimeout(()=>{ el.style.background = prev; }, 2200);
 }
 
 function rerenderBankLedger(){
@@ -13372,7 +13453,10 @@ function renderBankReconRow(e, isAdmin){
   // Two lines, not one packed row: line 1 is just date/narration (flexible) + amount
   // (fixed), which always fits; line 2 (badge + any buttons) wraps freely on its own,
   // so a badge plus buttons never gets squeezed off a narrow phone screen.
-  return `<div style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0;${tappable?'cursor:pointer':''}" ${tappable?`onclick="App.showBankReconMatch('${eid}')"`:''}>
+  const grouped = e.groupId && e.groupSize > 1;
+  const groupNote = grouped && tappable
+    ? `<div style="font-size:11px;color:var(--text3);margin-top:4px">Matched together with ${e.groupSize-1} other bank line${e.groupSize-1===1?'':'s'}</div>` : '';
+  return `<div id="brc-${eid}" style="border-bottom:1px solid var(--border-light,#f0f0f0);padding:10px 0;${tappable?'cursor:pointer':''}" ${tappable?`onclick="App.showBankReconMatch('${eid}')"`:''}>
       <div style="display:flex;align-items:center;gap:10px">
         <div style="flex:1;min-width:0">
           <div style="font-size:13px;font-weight:600">${fmtDate(e.date)}</div>
@@ -13386,6 +13470,7 @@ function renderBankReconRow(e, isAdmin){
         ${bankReconStatusBadge(e.status)}
         ${actions}
       </div>
+      ${groupNote}
     </div>`;
 }
 
@@ -13441,7 +13526,9 @@ function renderLastStatementUpload(){
         `<strong>${fresh} new line${fresh===1?'':'s'} added</strong> from ${total} found on the statement${r.pages>1?` (${r.pages} pages)`:''}.`,
         dup ? `${dup} line${dup===1?' was':'s were'} already uploaded before, so skipped.` : '',
         `${r.autoCount||0} matched automatically${r.chargeCount?` (incl. ${r.chargeCount} bank charge${r.chargeCount===1?'':'s'} filed)`:''} · ${r.needsAttentionCount||0} need review · ${r.unrecordedCount||0} not in your records.`,
+        (r.groupsMatched||0) > 0 ? `${Number(r.groupsMatched)} group${Number(r.groupsMatched)===1?'':'s'} of bank lines matched to single records.` : '',
       ].filter(Boolean);
+  if(r.directionInferred) lines.push(`<span style="font-size:11.5px;opacity:.8">Money in/out was worked out from each line's description (this statement shows arrows, not debit/credit columns).</span>`);
   // Lines that didn't add up with the statement's running balance were NOT filed (the server
   // never files an unproven line) — say so plainly, with the lines, so they get re-photographed.
   const unv = r.unverifiedCount||0;
@@ -13485,19 +13572,31 @@ function showBankReconMatch(id){
         <div style="font-size:13px;font-weight:600">${esc(bankReconSourceLabel(d.sourceTable))} — ${fmt(d.amount)}</div>
         <div style="font-size:11.5px;color:var(--text3);word-break:break-word">${fmtDate(d.date)}${d.description?` · ${esc(d.description)}`:''}</div>
       </div>`).join('') : `<p style="font-size:13px;color:var(--text3)">No match details are available for this movement.</p>`;
+  const grouped = entry.groupId && entry.groupSize > 1;
+  const siblings = grouped ? (state._bankReconEntries||[]).filter(e=>e.groupId===entry.groupId && e.id!==entry.id) : [];
+  const siblingHtml = grouped ? `<div style="margin:10px 0">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:4px">Matched together with ${entry.groupSize-1} other bank line${entry.groupSize-1===1?'':'s'}:</div>
+      ${siblings.map(s=>`<div style="display:flex;gap:10px;align-items:center;padding:4px 0;font-size:12px;border-bottom:1px solid var(--border-light,#f0f0f0)">
+        <div style="flex:1;min-width:0;word-break:break-word">${fmtDate(s.date)}${s.narration?` · ${esc(s.narration)}`:''}</div>
+        <div style="flex-shrink:0;white-space:nowrap;font-weight:700;color:${s.direction==='in'?'var(--success,#2e7d32)':'var(--danger)'}">${s.direction==='in'?'↑':'↓'} ${fmt(s.amount)}</div>
+      </div>`).join('') || `<div style="font-size:11.5px;color:var(--text3)">The other lines are not in the current list.</div>`}
+    </div>` : '';
   const undo = state.user?.role === 'it_admin'
-    ? `<button class="btn btn-danger" onclick="App.unmatchBankReconEntry('${esc(entry.id)}',this)">Undo match</button>` : '';
+    ? `<button class="btn btn-danger" onclick="App.unmatchBankReconEntry('${esc(entry.id)}',this)">${grouped?`Undo match (all ${esc(entry.groupSize)} lines)`:'Undo match'}</button>` : '';
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Matched to:</div>
     <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Bank ${entry.direction==='in'?'credit':'debit'} of <strong>${fmt(entry.amount)}</strong> on ${fmtDate(entry.date)}</div>
     <div style="margin:8px 0">${items}</div>
+    ${siblingHtml}
     <div class="modal-footer" style="flex-wrap:wrap;gap:8px"><button class="btn" onclick="closeModal()">Close</button>${undo}</div>`);
 }
 
 async function unmatchBankReconEntry(id, btn){
   if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can undo a match.','danger'); return; }
-  if(!confirm('Undo this match? The bank movement will go back to "Unrecorded".')) return;
+  const ent = (state._bankReconEntries||[]).find(e=>e.id===id);
+  const grpN = ent && ent.groupId && ent.groupSize > 1 ? ent.groupSize : 0;
+  if(!confirm(grpN ? `Undo this match? All ${grpN} bank lines matched together will go back to "Unrecorded".` : 'Undo this match? The bank movement will go back to "Unrecorded".')) return;
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.unmatchBankReconEntry(id);
@@ -13571,37 +13670,87 @@ function reviewBankReconEntry(id){
   if(!entry){ showAlert('This entry could not be found — please refresh the Bank page and try again.','danger'); return; }
   const isIn = entry.direction === 'in';
   const candidates = entry.candidates || [];
-  const comboHtml = candidates.length ? candidates.map((combo,i)=>{
-    const total = (combo||[]).reduce((s,c)=>s+(c.amount||0),0);
-    const items = (combo||[]).map(c=>`<div style="font-size:12px;color:var(--text2)">${esc(bankReconSourceLabel(c.sourceTable))} — ${fmt(c.amount)} (${fmtDate(c.date)})</div>`).join('');
-    return `<div class="at-subcard" style="margin-bottom:10px">
+  // Records already tied to another bank line must never be offered again (stale options).
+  const usedRefs = new Set();
+  for(const e of (state._bankReconEntries||[])){
+    if(e.id === entry.id || (e.status !== 'auto' && e.status !== 'resolved')) continue;
+    for(const r of (e.matchedRefs||[])) if(r) usedRefs.add(`${r.sourceTable}:${r.sourceId}`);
+  }
+  const isUsed = c => !!c && usedRefs.has(`${c.sourceTable}:${c.sourceId}`);
+  const allEntries = state._bankReconEntries||[];
+  const optionHtml = candidates.map((combo,i)=>{
+    if(Array.isArray(combo)){
+      if(!combo.length || combo.some(isUsed)) return '';
+      const total = combo.reduce((s,c)=>s+(c.amount||0),0);
+      const items = combo.map(c=>`<div style="font-size:12px;color:var(--text2)">${esc(bankReconSourceLabel(c.sourceTable))} — ${fmt(c.amount)} (${fmtDate(c.date)})</div>`).join('');
+      return `<div class="at-subcard" style="margin-bottom:10px">
         <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Option ${i+1}${combo.length>1?` — ${combo.length} entries combined`:''}</div>
         ${items}
         <div style="font-size:13px;font-weight:700;margin-top:6px">Total: ${fmt(total)}</div>
         <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="App.chooseBankReconMatch('${esc(entry.id)}',${i},this)">Choose this match</button>
       </div>`;
-  }).join('') : `<p style="font-size:13px;color:var(--text3)">No candidate matches were found for this movement.</p>`;
+    }
+    if(combo && combo.type === 'group' && combo.record){
+      if(isUsed(combo.record)) return '';
+      const rec = combo.record;
+      const lines = (combo.lineIds||[]).filter(id=>id!==entry.id).map(id=>allEntries.find(e=>e.id===id)).filter(Boolean);
+      const linesHtml = lines.map(l=>`<div style="display:flex;gap:10px;align-items:center;font-size:12px;color:var(--text2);padding:2px 0">
+          <div style="flex:1;min-width:0;word-break:break-word">${fmtDate(l.date)}${l.narration?` · ${esc(l.narration)}`:''}</div>
+          <div style="flex-shrink:0;white-space:nowrap;font-weight:700">${l.direction==='in'?'↑':'↓'} ${fmt(l.amount)}</div>
+        </div>`).join('') || `<div style="font-size:12px;color:var(--text3)">(the other bank lines are not in the current list)</div>`;
+      return `<div class="at-subcard" style="margin-bottom:10px">
+        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Option ${i+1} — several bank lines = one record</div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px">Together with these bank lines:</div>
+        ${linesHtml}
+        <div style="font-size:12px;color:var(--text2);margin-top:6px">= ${esc(bankReconSourceLabel(rec.sourceTable))} — ${fmt(rec.amount)} (${fmtDate(rec.date)})</div>
+        <div style="font-size:13px;font-weight:700;margin-top:6px">Total of lines: ${fmt(combo.total!=null?combo.total:rec.amount)}</div>
+        <button class="btn btn-sm btn-primary" style="margin-top:8px" onclick="App.chooseBankReconGroupMatch('${esc(entry.id)}',${i},this)">Choose this match</button>
+      </div>`;
+    }
+    return '';
+  }).join('');
+  const hasOptions = optionHtml.trim() !== '';
+  const comboHtml = hasOptions ? optionHtml : `<p style="font-size:13px;color:var(--text3)">${candidates.length ? 'No matching records left — record it or ignore it.' : 'No candidate matches were found for this movement.'}</p>`;
+  const footer = hasOptions
+    ? `<button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="App.resolveBankReconAddNew('${esc(entry.id)}',this)">None of these — I'll add the entry myself</button>`
+    : `<button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="App.recordBankReconEntry('${esc(entry.id)}')">Record this</button>
+      <button class="btn" onclick="closeModal();App.ignoreBankReconEntry('${esc(entry.id)}')">Ignore</button>`;
 
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">🔍 Review Bank Movement</div>
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>${isIn?'Money came into':'Money went out of'} the bank on <strong>${fmtDate(entry.date)}</strong> for <strong>${fmt(entry.amount)}</strong>. Choose which of your recorded entries this matches, or say none of them do.</span></div>
     <div style="margin:12px 0">${comboHtml}</div>
-    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
-      <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-danger" onclick="App.resolveBankReconAddNew('${esc(entry.id)}',this)">None of these — I'll add the entry myself</button>
-    </div>`);
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">${footer}</div>`);
 }
 
 async function chooseBankReconMatch(entryId, comboIndex, btn){
   const entry = (state._bankReconEntries||[]).find(e=>e.id===entryId);
   const combo = entry?.candidates?.[comboIndex];
-  if(!combo){ showAlert('This match could not be found — please refresh the Bank page and try again.','danger'); return; }
+  if(!Array.isArray(combo)){ showAlert('This match could not be found — please refresh the Bank page and try again.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
     await DB.resolveBankReconEntry(entryId, { chosenRefs: combo.map(c=>({sourceTable:c.sourceTable, sourceId:c.sourceId})) });
     closeModal();
     showAlert('Bank movement matched to your records.','success');
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to resolve this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function chooseBankReconGroupMatch(entryId, idx, btn){
+  const entry = (state._bankReconEntries||[]).find(e=>e.id===entryId);
+  const opt = entry?.candidates?.[idx];
+  if(!opt || Array.isArray(opt) || opt.type !== 'group' || !opt.record){ showAlert('This match could not be found — please refresh the Bank page and try again.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.resolveBankReconEntry(entryId, { groupOption: { sourceTable: opt.record.sourceTable, sourceId: opt.record.sourceId, lineIds: opt.lineIds||[] } });
+    closeModal();
+    showAlert('Bank lines matched together to your record.','success');
     navigate('bank');
   } catch(err) {
     restore();
@@ -20677,7 +20826,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, toggleBankLedgerAll, showMoreBankLedger, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,

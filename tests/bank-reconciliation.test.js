@@ -6,7 +6,7 @@
 // engine, matched against income-type or expense-type ('in'/'out') candidates either way.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, verifyStatementRows } from '../functions/api/[[route]].js';
+import { findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, verifyStatementRows, findManyToOneMatches, inferDirectionFromNarration, applyNarrationDirections } from '../functions/api/[[route]].js';
 
 function cand(sourceTable, sourceId, date, amount, direction) {
   return { sourceTable, sourceId, date, amount, direction };
@@ -277,4 +277,183 @@ test('verifyStatementRows: amounts are compared exactly to the kobo — no float
   assert.deepEqual(statuses(res), ['verified', 'verified', 'verified', 'unverified'], '0.1 + 0.2 style sums are exact; 0.49 - 0.01 is not 0.49');
   const off = verifyStatementRows([{ opening_balance: 0.2, rows: [R(0, 0.1, 0.3), R(0, 0.2, 0.52)] }]);
   assert.deepEqual(statuses(off), ['verified', 'unverified']);
+});
+
+test('verifyStatementRows: balance-less rows repeated where two scrolled screenshots overlap are marked "overlap" (same date, amount and direction)', () => {
+  const A = R(0, 11000, null, '2026-10-01');
+  const B = R(5000, 0, null, '2026-10-02');
+  const C = R(0, 2500, null, '2026-10-03');
+  const res = verifyStatementRows([{ opening_balance: null, rows: [A, B] }, { opening_balance: null, rows: [{ ...B }, C] }]);
+  assert.equal(res.verification, 'unavailable');
+  assert.deepEqual(statuses(res), ['unchecked', 'unchecked', 'overlap', 'unchecked']);
+
+  // Same amount but a different date, or the other direction, is a different line.
+  const otherDate = verifyStatementRows([{ opening_balance: null, rows: [A, B] }, { opening_balance: null, rows: [R(5000, 0, null, '2026-10-03'), C] }]);
+  assert.deepEqual(statuses(otherDate), ['unchecked', 'unchecked', 'unchecked', 'unchecked']);
+  const otherWay = verifyStatementRows([{ opening_balance: null, rows: [A, B] }, { opening_balance: null, rows: [R(0, 5000, null, '2026-10-02'), C] }]);
+  assert.deepEqual(statuses(otherWay), ['unchecked', 'unchecked', 'unchecked', 'unchecked']);
+  // Without a date on both rows there is nothing to tie them together.
+  const noDate = verifyStatementRows([{ opening_balance: null, rows: [A, R(5000, 0, null)] }, { opening_balance: null, rows: [R(5000, 0, null), C] }]);
+  assert.deepEqual(statuses(noDate), ['unchecked', 'unchecked', 'unchecked', 'unchecked']);
+  // Only a run at the very end of one photo and the very start of the next counts.
+  const notAtEdge = verifyStatementRows([{ opening_balance: null, rows: [B, A] }, { opening_balance: null, rows: [{ ...B }, C] }]);
+  assert.deepEqual(statuses(notAtEdge), ['unchecked', 'unchecked', 'unchecked', 'unchecked']);
+});
+
+// ── Direction from the narration (Access Bank alert emails / app screenshots) ──────────────
+test('inferDirectionFromNarration: transfers out, cheque/Remita payments and bank charges are out; everything else is in', () => {
+  const cases = {
+    'MOBILE TRF FROM ACCESS /HrH Lords offering': 'in',
+    'Transfer from FATK ENTERPRISES': 'in',
+    'TRF TO ABC LTD': 'out',
+    'CHQ 00123 REMITA': 'out',
+    'REMITA PAYMENT LAGOS STATE': 'out',
+    'SMS ALERT CHARGES': 'out',
+    'VAT ON COMMISSION': 'out',
+    'STAMP DUTY': 'out',
+    'LAWRENCE/Balance province pastor': 'in',
+    'for my TITHE': 'in',
+    'MOBILE TRANSFER TO JOHN OKAFOR': 'out',
+    'Account maintenance fee': 'out',
+    'NIP CHARGE': 'out',
+    '': 'in',
+    // Word boundaries: no partial-word hits.
+    'TRF TOWARDS BUILDING FUND': 'in',
+    'HOLY COMMUNION OFFERING': 'in',
+    'THANKSGIVING FEEDING': 'in',
+    // A sender's own remark on an incoming transfer doesn't make it a charge…
+    'TRF FROM JOHN DOE/school fees': 'in',
+    'Transfer from Bro. Ade/pastor in charge welfare': 'in',
+    // …but charge-only terms still do.
+    'STAMP DUTY ON TRF FROM JOHN': 'out',
+  };
+  for (const [narration, expected] of Object.entries(cases)) {
+    assert.equal(inferDirectionFromNarration(narration), expected, narration);
+  }
+  assert.equal(inferDirectionFromNarration('trf to abc ltd'), 'out', 'case-insensitive');
+});
+
+test('applyNarrationDirections: moves each amount to the side the narration says; unreadable or two-sided rows are left for verification to reject', () => {
+  const page = { rows: [
+    { narration: 'MOBILE TRF FROM ACCESS /HrH Lords offering', debit: 11000, credit: 0 },
+    { narration: 'TRF TO ABC LTD', debit: 0, credit: 5000 },
+    { narration: 'SMS ALERT CHARGES', debit: 4, credit: 0 },
+    { narration: 'TRF TO X', debit: Number.NaN, credit: 0 },
+    { narration: 'TRF TO Y', debit: 100, credit: 100 },
+    { narration: 'TRF TO Z', debit: 0, credit: 0 },
+  ] };
+  applyNarrationDirections(page);
+  assert.deepEqual(page.rows.map(r => [r.debit, r.credit]), [[0, 11000], [5000, 0], [4, 0], [Number.NaN, 0], [100, 100], [0, 0]]);
+});
+
+// ── Many-to-one: several bank lines = one app record ──────────────────────────────────────
+const line = (id, date, amount, direction = 'in', extra = {}) => ({ id, date, amount, direction, ...extra });
+
+test('findManyToOneMatches: two transfers that add up to one income record are grouped automatically', () => {
+  const res = findManyToOneMatches(
+    [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000), line('L3', '2026-10-06', 7000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in')],
+    7,
+  );
+  assert.deepEqual(res.groups, [{ record: { sourceTable: 'income', sourceId: 'i1', amount: 50000, date: '2026-10-05' }, lineIds: ['L1', 'L2'], total: 50000 }]);
+  assert.deepEqual(res.options, {});
+});
+
+test('findManyToOneMatches: kobo amounts add up exactly (no float drift)', () => {
+  const res = findManyToOneMatches(
+    [line('L1', '2026-10-05', 1000.1), line('L2', '2026-10-05', 2000.2)],
+    [cand('income', 'i1', '2026-10-05', 3000.3, 'in')],
+    7,
+  );
+  assert.equal(res.groups.length, 1);
+  assert.equal(res.groups[0].total, 3000.3);
+});
+
+test('findManyToOneMatches: the same record reachable by two different groups is ambiguous — options, never a guess', () => {
+  const res = findManyToOneMatches(
+    [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000), line('L3', '2026-10-06', 20000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in')],
+    7,
+  );
+  assert.deepEqual(res.groups, []);
+  assert.equal(res.options.L1.length, 2);
+  assert.deepEqual(res.options.L1.map(o => o.lineIds), [['L1', 'L2'], ['L1', 'L3']]);
+  assert.deepEqual(res.options.L2, [{ type: 'group', record: { sourceTable: 'income', sourceId: 'i1', amount: 50000, date: '2026-10-05' }, lineIds: ['L1', 'L2'], total: 50000 }]);
+  assert.deepEqual(res.options.L3.map(o => o.lineIds), [['L1', 'L3']]);
+});
+
+test('findManyToOneMatches: lines that could make up two different records are ambiguous too', () => {
+  const res = findManyToOneMatches(
+    [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in'), cand('income', 'i2', '2026-10-06', 50000, 'in')],
+    7,
+  );
+  assert.deepEqual(res.groups, []);
+  assert.deepEqual(res.options.L1.map(o => o.record.sourceId).sort(), ['i1', 'i2']);
+});
+
+test('findManyToOneMatches: every line must be within ±window days of the record (boundary inclusive)', () => {
+  const recs = [cand('income', 'i1', '2026-10-10', 50000, 'in')];
+  const inside = findManyToOneMatches([line('L1', '2026-10-03', 30000), line('L2', '2026-10-17', 20000)], recs, 7);
+  assert.equal(inside.groups.length, 1, 'exactly 7 days either side is inside the window');
+  const outside = findManyToOneMatches([line('L1', '2026-10-02', 30000), line('L2', '2026-10-10', 20000)], recs, 7);
+  assert.deepEqual(outside, { groups: [], options: {} }, '8 days away is outside');
+  assert.equal(findManyToOneMatches([line('L1', '2026-10-02', 30000), line('L2', '2026-10-10', 20000)], recs, 8).groups.length, 1);
+});
+
+test('findManyToOneMatches: only the records passed in (the unused ones) are considered, and only lines of the record\'s direction', () => {
+  const lines = [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000)];
+  assert.deepEqual(findManyToOneMatches(lines, [], 7), { groups: [], options: {} });
+  assert.deepEqual(findManyToOneMatches(lines, [cand('expenses', 'e1', '2026-10-05', 50000, 'out')], 7), { groups: [], options: {} });
+  const mixed = findManyToOneMatches([line('L1', '2026-10-05', 30000, 'in'), line('L2', '2026-10-06', 20000, 'out')], [cand('income', 'i1', '2026-10-05', 50000, 'in')], 7);
+  assert.deepEqual(mixed, { groups: [], options: {} });
+});
+
+test('findManyToOneMatches: a line with its own match, or a record that alone explains another line, is never grouped automatically', () => {
+  // L1 alone equals i2 — its own one-to-one match — so grouping it into i1 would be a guess.
+  const own = findManyToOneMatches(
+    [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in'), cand('income', 'i2', '2026-10-05', 30000, 'in')],
+    7,
+  );
+  assert.deepEqual(own.groups, []);
+  assert.deepEqual(own.options.L2.map(o => o.lineIds), [['L1', 'L2']], 'still offered for review');
+  // i1 alone explains the ₦50,000 line L3 — so it is not handed to L1 + L2 automatically.
+  const recordTaken = findManyToOneMatches(
+    [line('L1', '2026-10-05', 30000), line('L2', '2026-10-06', 20000), line('L3', '2026-10-07', 50000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in')],
+    7,
+  );
+  assert.deepEqual(recordTaken.groups, []);
+  assert.equal(recordTaken.options.L1.length, 1);
+});
+
+test('findManyToOneMatches: lines from different feeds, or a record the user unmatched from a line, are never grouped', () => {
+  const recs = [cand('income', 'i1', '2026-10-05', 50000, 'in')];
+  const feeds = findManyToOneMatches([line('L1', '2026-10-05', 30000, 'in', { source: 'statement' }), line('L2', '2026-10-06', 20000, 'in', { source: 'balance' })], recs, 7);
+  assert.deepEqual(feeds, { groups: [], options: {} });
+  const rejected = findManyToOneMatches([line('L1', '2026-10-05', 30000, 'in', { rejectedKeys: ['income:i1'] }), line('L2', '2026-10-06', 20000)], recs, 7);
+  assert.deepEqual(rejected, { groups: [], options: {} });
+});
+
+test('findManyToOneMatches: up to four lines per record; the search stays bounded on a crowded window', () => {
+  const four = findManyToOneMatches(
+    [line('L1', '2026-10-05', 10000), line('L2', '2026-10-05', 15000), line('L3', '2026-10-06', 17000), line('L4', '2026-10-06', 8000)],
+    [cand('income', 'i1', '2026-10-05', 50000, 'in')],
+    7,
+  );
+  assert.deepEqual(four.groups.map(g => g.lineIds), [['L1', 'L2', 'L3', 'L4']]);
+
+  const many = Array.from({ length: 60 }, (_, i) => line(`L${String(i).padStart(2, '0')}`, '2026-10-05', 1000 + i * 37));
+  const t0 = Date.now();
+  findManyToOneMatches(many, Array.from({ length: 30 }, (_, i) => cand('income', `i${i}`, '2026-10-05', 3000 + i * 111, 'in')), 7);
+  assert.ok(Date.now() - t0 < 2000);
+});
+
+test('inferDirectionFromNarration: a transfer to the parish itself and a cheque paid in are credits', () => {
+  assert.equal(inferDirectionFromNarration('TRF TO RCCG KINGDOM PARISH/tithe'), 'in');
+  assert.equal(inferDirectionFromNarration('TRF TO ABC LTD'), 'out');
+  assert.equal(inferDirectionFromNarration('CHQ DEPOSIT 0045'), 'in');
+  assert.equal(inferDirectionFromNarration('CHQ LODGEMENT 778'), 'in');
+  assert.equal(inferDirectionFromNarration('CHQ 00123 REMITA'), 'out');
 });
