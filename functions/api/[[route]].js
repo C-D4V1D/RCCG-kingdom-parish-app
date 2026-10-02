@@ -2960,6 +2960,11 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     if (route === 'internal') {
       // run-followups / run-prebriefs are handled by the cronJobRunners() branch below.
       if (method === 'POST' && param === 'run-all')             return await runAllCronJobs(DB, env, request);
+      // The clerk-watchdog Worker calls this the moment the box reports a changed balance; it runs
+      // the bank sweep only (no sweep of the other jobs) and authenticates inside the runner.
+      if (method === 'POST' && param === 'run-bank-recon' && request.headers.get('x-watchdog-token')) {
+        return await runBankReconciliationSweep(DB, env, request);
+      }
       // Every other run-* endpoint does its own job and then sweeps whatever
       // else has fallen overdue — see runSingleCronJob.
       if (method === 'POST' && cronJobRunners().some(([, ep]) => ep === param)) {
@@ -9812,7 +9817,12 @@ async function putBankReconCursor(DB, afterId, lastBalance) {
  * when it is retried — it just skips what it already did and carries on from there.
  */
 async function runBankReconciliationSweep(DB, env, request) {
-  const authErr = requireCronSecret(env, request);
+  // Callable by the scheduler (CRON_SECRET) or by the clerk-watchdog Worker the moment the box
+  // reports a changed balance (it forwards the box's watchdog token, which this app also holds).
+  const watchdogToken = String(env?.CLERK_WATCHDOG_TOKEN || '').trim();
+  const sentToken = request?.headers?.get?.('x-watchdog-token') || '';
+  const viaWatchdog = !!watchdogToken && !!sentToken && constantTimeEqual(sentToken, watchdogToken);
+  const authErr = viaWatchdog ? null : requireCronSecret(env, request);
   if (authErr) return authErr;
 
   const cursor = await getBankReconCursor(DB);

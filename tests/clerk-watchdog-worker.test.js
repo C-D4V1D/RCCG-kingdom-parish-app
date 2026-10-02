@@ -549,3 +549,39 @@ test('validateConfig stays backward compatible with a config saved before the ba
   legacy.automations.supervisor = { interval_seconds: 300, ping_every_cycles: 2 };
   assert.deepEqual(validateConfig(legacy), []);
 });
+
+test('POST /bank-balance asks the app to reconcile when the balance changes, retrying until it succeeds', async () => {
+  const env = { ...createEnv(), APP_URL: 'https://app.example/' };
+  const calls = [];
+  let appStatus = 500;
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { calls.push({ url: String(url), init }); return new Response('{}', { status: appStatus }); };
+  try {
+    const post = (balance) => worker.fetch(req('/bank-balance', { method: 'POST', body: { balance } }), env);
+    await post(1061.73);                       // first ever reading: sync once
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://app.example/api/internal/run-bank-recon');
+    assert.equal(calls[0].init.headers['x-watchdog-token'], TEST_TOKEN);
+    await post(1061.73);                       // unchanged, but the last sync failed: retry
+    assert.equal(calls.length, 2);
+    appStatus = 200;
+    await post(1061.73);                       // retry succeeds
+    assert.equal(calls.length, 3);
+    await post(1061.73);                       // unchanged and synced: nothing to do
+    assert.equal(calls.length, 3);
+    await post(27101.73);                      // money moved
+    assert.equal(calls.length, 4);
+  } finally { globalThis.fetch = original; }
+});
+
+test('POST /bank-balance never calls out when APP_URL is not configured', async () => {
+  const env = createEnv();
+  const original = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response('{}'); };
+  try {
+    await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 5 } }), env);
+    await worker.fetch(req('/bank-balance', { method: 'POST', body: { balance: 6 } }), env);
+  } finally { globalThis.fetch = original; }
+  assert.equal(called, false);
+});

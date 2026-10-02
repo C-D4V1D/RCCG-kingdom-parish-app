@@ -59,3 +59,11 @@ npx wrangler deploy
 `wrangler.toml` already has the `KV` binding configured, and intentionally
 has no `[triggers]` block so `wrangler deploy` doesn't touch the existing
 cron schedule on the deployed Worker.
+
+## Bank balance → reconciliation
+
+`POST /bank-balance` (the box, every 15 minutes) stores the reading and a `bal:<id>` history entry. When the
+balance changed — or the last hand-off failed (`recon_synced` != "1") — it calls the app's
+`POST {APP_URL}/api/internal/run-bank-recon`, forwarding the box's own `x-watchdog-token` (the app holds the same
+value as `CLERK_WATCHDOG_TOKEN`), so movements are recorded and announced on Telegram straight away. `APP_URL` is a
+plain var in wrangler.toml; without it nothing is called.

@@ -30,7 +30,7 @@ async function authed(req, env) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
     // One-time: the script claims the Worker and receives its private token. Locks after first use.
@@ -107,12 +107,23 @@ export default {
       const balance = Number(b.balance);
       if (!Number.isFinite(balance)) return json({ error: "balance must be a number" }, 400);
       const checked_at = new Date().toISOString();
+      let previous = null;
+      try { previous = JSON.parse((await env.KV.get("bank_balance")) || "null")?.balance ?? null; } catch { /* unreadable */ }
       await env.KV.put("bank_balance", JSON.stringify({ balance, checked_at }));
       // Also keep a history entry for reconciliation, same id/list/cursor pattern as /events,
       // but with no TTL: balance history should persist, unlike the 60-day event mailbox.
       const id = `${String(Date.now()).padStart(13, "0")}-${crypto.randomUUID().slice(0, 8)}`;
       await env.KV.put(`bal:${id}`, JSON.stringify({ balance, checked_at, id }));
       await env.KV.put("balance_last", id);
+      // A changed balance means money moved: ask the app to record it (and send its Telegram)
+      // now, rather than wait for a scheduler. Forwards the caller's own token, which the app
+      // also holds (CLERK_WATCHDOG_TOKEN), so no extra secret is needed.
+      const pending = previous === null || Math.abs(balance - Number(previous)) >= 0.005
+        || (await env.KV.get("recon_synced")) !== "1";
+      if (pending && env.APP_URL) {
+        const sync = notifyAppOfBalance(env, req.headers.get("x-watchdog-token"));
+        if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(sync); else await sync;
+      }
       return json({ ok: true });
     }
 
@@ -235,6 +246,18 @@ export default {
     })());
   },
 };
+
+// Runs the app's bank reconciliation sweep (POST /api/internal/run-bank-recon). "recon_synced"
+// stays "0" until a sweep succeeds, so a failed call is retried on the next balance report.
+async function notifyAppOfBalance(env, token) {
+  await env.KV.put("recon_synced", "0");
+  try {
+    const r = await fetch(`${String(env.APP_URL).replace(/\/+$/, "")}/api/internal/run-bank-recon`, {
+      method: "POST", headers: { "x-watchdog-token": token || "", "content-type": "application/json" }, body: "{}",
+    });
+    if (r.ok) await env.KV.put("recon_synced", "1");
+  } catch { /* app unreachable: retried on the next balance report */ }
+}
 
 // How long the box may be silent before the daily check wakes Church Clerk: Automations > Box connection
 // (automations.supervisor.alert_after_hours), else MAX_SILENCE_MS.

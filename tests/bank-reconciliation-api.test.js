@@ -1129,3 +1129,29 @@ test('POST /api/bank-recon/statement: overlapping scrolled screenshots with no b
   const rows = DB.sqlite.prepare(`SELECT amount, direction FROM bank_recon_entries ORDER BY date`).all();
   assert.deepEqual(rows.map(r => [r.amount, r.direction]), [[2000, 'in'], [5000, 'out'], [4, 'out']]);
 });
+
+test('run-bank-recon: the clerk-watchdog Worker can trigger it with the watchdog token; a wrong token is refused', async () => {
+  const DB = await freshDB();
+  const history = [
+    { id: 'bal1', balance: 1061.73, checked_at: '2026-10-02T18:16:05Z' },
+    { id: 'bal2', balance: 27101.73, checked_at: '2026-10-02T18:31:06Z' }, // +26040
+  ];
+  const restore = stubWatchdogForSweep(history);
+  let ok, bad;
+  try {
+    ok = await onRequest({
+      request: req('internal/run-bank-recon', { method: 'POST', headers: { 'x-watchdog-token': WATCHDOG_TOKEN } }),
+      env: baseEnv(DB),
+    });
+    bad = await onRequest({
+      request: req('internal/run-bank-recon', { method: 'POST', headers: { 'x-watchdog-token': 'wrong' } }),
+      env: baseEnv(DB),
+    });
+  } finally { restore(); }
+  assert.equal(ok.status, 200);
+  const body = await readJson(ok);
+  assert.equal(body.processed, 1);
+  const row = DB.sqlite.prepare(`SELECT amount, direction FROM bank_recon_entries WHERE balance_history_id='bal2'`).get();
+  assert.deepEqual({ ...row }, { amount: 26040, direction: 'in' });
+  assert.equal(bad.status, 401);
+});
