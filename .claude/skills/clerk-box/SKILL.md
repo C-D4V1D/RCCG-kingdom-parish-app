@@ -92,7 +92,9 @@ notice). Re-run by hand with the GitHub MCP `actions_run_trigger` (workflow `dep
 schedule now lives in wrangler.toml `[triggers]` ("30 6 * * *" daily AI wake only if the direct alert failed, "17 * * * *"
 hourly box-down check). The Worker secret `TELEGRAM_BOT_TOKEN` (set in the Cloudflare dashboard) sends the direct
 box-down alerts to the people ticked for `watchdog_down`; `POST /test-alert` (watchdog token) sends a test message.
-Verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages secret
+A changed bank balance (`POST /bank-balance`) makes the Worker call the app's
+`/api/internal/run-bank-recon` with the box's token (wrangler.toml var `APP_URL`), so reconciliation and its Telegram
+alerts don't wait for the GitHub cron (whose `CRON_SECRET` repo secret was missing as of 2026-10-02). Verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages secret
 `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog-token` (only the owner can copy it).
 
 ## Month-end (remittance) — who runs it
