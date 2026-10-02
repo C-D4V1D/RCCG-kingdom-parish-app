@@ -13447,6 +13447,8 @@ function renderBankReconRow(e, isAdmin){
   } else if(e.status === 'unrecorded' && isAdmin){
     actions = `<button class="btn btn-sm btn-primary" onclick="App.recordBankReconEntry('${eid}')">Record this</button>
       <button class="btn btn-sm" onclick="App.ignoreBankReconEntry('${eid}')">Ignore</button>`;
+  } else if(e.status === 'ignored' && isAdmin){
+    actions = `<button class="btn btn-sm" onclick="App.undoIgnoreBankReconEntry('${eid}',this)">Undo ignore</button>`;
   } else if(tappable){
     actions = `<span style="font-size:11px;color:var(--text3)">Tap to see match</span>`;
   }
@@ -13606,6 +13608,20 @@ async function unmatchBankReconEntry(id, btn){
   } catch(err) {
     restore();
     showAlert(`Failed to undo the match: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+async function undoIgnoreBankReconEntry(id, btn){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can do this.','danger'); return; }
+  if(!confirm('Bring this bank movement back? It will be matched against your records again, or show as Unrecorded.')) return;
+  const restore = setBtnLoading(btn, 'Restoring…');
+  try {
+    await DB.unmatchBankReconEntry(id);
+    state._pendingAlert = { msg: 'Bank movement restored.', type: 'success' };
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to restore this movement: ${err.message||'Unknown error'}. Please try again.`,'danger');
   }
 }
 
@@ -20826,7 +20842,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, toggleBankLedgerAll, showMoreBankLedger, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, undoIgnoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,

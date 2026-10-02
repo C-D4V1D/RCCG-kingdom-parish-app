@@ -17,6 +17,9 @@ name: Cron — Follow-ups & Pre-briefs
 #   POST /api/internal/run-premeeting-sms            — pre-meeting member SMS
 #   POST /api/internal/run-actionitem-sms            — action item deadline SMS
 #   POST /api/internal/run-scheduled-sms             — scheduled SMS blasts
+#   POST /api/internal/run-bank-recon                — collects the Clerk box's bank
+#                                                       balance checks, records each
+#                                                       movement and sends its Telegram
 #
 # There is also POST /api/internal/run-all, which runs every one of the jobs
 # above in a single request. This workflow deliberately keeps calling them
@@ -112,6 +115,7 @@ jobs:
           run-newmonth-draft-fallback
           run-followups
           run-prebriefs
+          run-bank-recon
           "
           PER_ENDPOINT_CAP=110   # hard wall-clock ceiling per endpoint, retries included
           DEADLINE=$(( SECONDS + 900 ))   # stop starting new endpoints after 15 min
