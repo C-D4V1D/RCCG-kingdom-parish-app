@@ -3915,7 +3915,8 @@ async function handleInit(DB) {
       narration           TEXT DEFAULT '',
       resolved_by         TEXT DEFAULT '',
       resolved_at         TEXT DEFAULT '',
-      created_at          TEXT DEFAULT (datetime('now'))
+      created_at          TEXT DEFAULT (datetime('now')),
+      rejected_refs_json  TEXT DEFAULT '[]'
     )`,
   ];
 
@@ -3980,6 +3981,8 @@ async function handleInit(DB) {
     // submitRemittance/createRemittance and deleteRemittance's reversal of it.
     `ALTER TABLE remittances ADD COLUMN satellite_fund_ref TEXT DEFAULT ''`,
     `ALTER TABLE cash_transactions ADD COLUMN photo_data TEXT DEFAULT ''`,
+    // Bank reconciliation: records the user unmatched from a line (see ensureBankReconColumns).
+    `ALTER TABLE bank_recon_entries ADD COLUMN rejected_refs_json TEXT DEFAULT '[]'`,
     // Soft-delete for AI secretary meeting drafts.
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_at TEXT DEFAULT ''`,
     `ALTER TABLE ai_secretary_meetings ADD COLUMN deleted_by TEXT DEFAULT ''`,
@@ -8523,6 +8526,202 @@ function bankReconFilterCandidates(pool, direction, date, windowDays) {
   return pool.filter(c => c.direction === direction && dateDistanceInDays(c.date, date) <= windowDays);
 }
 
+const BANK_RECON_DAY_MS = 24 * 60 * 60 * 1000;
+const RECON_GROUP_OPTIONS_MAX = 5;      // "several bank lines = one record" options kept per record / per line
+const BANK_RECON_REMATCH_MAX_PASSES = 10;
+
+/**
+ * Indexes `items` (each with .date and .direction) for "same direction, within ±windowDays of a
+ * date" lookups — the same test as bankReconFilterCandidates, but sorted once and binary-searched
+ * per lookup instead of re-parsing every date every time. Results come back in date order (ties
+ * by sourceTable/sourceId/id), so callers always see them in one fixed order.
+ */
+function bankReconWindowIndex(items, windowDays) {
+  const span = windowDays * BANK_RECON_DAY_MS;
+  const byDir = new Map();
+  for (const it of items || []) {
+    const t = Date.parse(String(it?.date || ''));
+    if (!it || !Number.isFinite(t)) continue;
+    if (!byDir.has(it.direction)) byDir.set(it.direction, []);
+    byDir.get(it.direction).push({ t, it, tie: `${it.sourceTable || ''}:${it.sourceId ?? ''}:${it.id ?? ''}` });
+  }
+  for (const arr of byDir.values()) arr.sort((a, b) => a.t - b.t || (a.tie < b.tie ? -1 : a.tie > b.tie ? 1 : 0));
+  return (direction, date) => {
+    const arr = byDir.get(direction);
+    const t = Date.parse(String(date || ''));
+    if (!arr || !Number.isFinite(t)) return [];
+    let lo = 0, hi = arr.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid].t < t - span) lo = mid + 1; else hi = mid; }
+    const out = [];
+    for (let i = lo; i < arr.length && arr[i].t <= t + span; i++) out.push(arr[i].it);
+    return out;
+  };
+}
+
+/**
+ * Many-to-one matching: several bank lines that together are ONE app record (e.g. a ₦50,000
+ * income that arrived as two transfers, ₦30,000 + ₦20,000). Pure and deterministic.
+ *
+ * `openLines`: bank lines still open (unrecorded / needs_attention), each { id, date, amount,
+ * direction, source?, rejectedKeys? } — `source` keeps lines from different feeds (statement
+ * photos vs balance pings, which can describe the same movement twice) out of one group;
+ * `rejectedKeys` ('table:id') are records the user already unmatched from that line.
+ * `candidates`: UNUSED app records { sourceTable, sourceId, date, amount, direction }.
+ *
+ * For each record, every combination of 2..RECON_MAX_COMBO_SIZE open lines of its direction,
+ * each within ±windowDays of the record, whose amounts sum to the record's (RECON_AMOUNT_EPSILON)
+ * — searched over the RECON_MAX_CANDIDATES lines closest in date, via findMatchingCombinations.
+ * A group is accepted automatically only when it is unambiguous:
+ *   - the record has exactly one valid line-combination, and
+ *   - none of its lines is part of a valid combination for any other record, and
+ *   - none of its lines has its own one-to-one / one-to-many match among `candidates`, and
+ *   - the record itself isn't part of any open line's own one-to-many match.
+ * Everything else that adds up comes back as review options, attached to each line involved.
+ *
+ * Returns { groups: [{ record, lineIds, total }], options: { [lineId]: [{ type: 'group',
+ * record: { sourceTable, sourceId, amount, date }, lineIds, total }] } } (≤ RECON_GROUP_OPTIONS_MAX per line).
+ */
+function findManyToOneMatches(openLines, candidates, windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS) {
+  const keyOf = bankReconRefKey;
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const lines = (Array.isArray(openLines) ? openLines : [])
+    .filter(l => l && l.id != null && (l.direction === 'in' || l.direction === 'out')
+      && Number.isFinite(Number(l.amount)) && Number(l.amount) > RECON_AMOUNT_EPSILON)
+    .map(l => ({
+      id: String(l.id), date: String(l.date || '').slice(0, 10), amount: Number(l.amount), direction: l.direction,
+      source: l.source ?? '', rejected: new Set(l.rejectedKeys || []),
+    }))
+    .sort((a, b) => cmp(a.date, b.date) || cmp(a.id, b.id));
+  const records = (Array.isArray(candidates) ? candidates : [])
+    .filter(c => c && c.sourceTable && c.sourceId != null && c.sourceId !== '' && (c.direction === 'in' || c.direction === 'out')
+      && Number.isFinite(Number(c.amount)) && Number(c.amount) > RECON_AMOUNT_EPSILON)
+    .map(c => ({ sourceTable: c.sourceTable, sourceId: c.sourceId, date: String(c.date || '').slice(0, 10), amount: Number(c.amount), direction: c.direction }))
+    .sort((a, b) => cmp(a.date, b.date) || cmp(keyOf(a), keyOf(b)));
+  const recordsNear = bankReconWindowIndex(records, windowDays);
+  const linesNear = bankReconWindowIndex(lines, windowDays);
+
+  // The one-to-many view: which lines a record (or records) could explain on their own, and which
+  // records take part in any such explanation.
+  const linesWithOwnMatch = new Set(), recordsInLineMatch = new Set();
+  for (const l of lines) {
+    const pool = recordsNear(l.direction, l.date).filter(c => !l.rejected.has(keyOf(c)));
+    for (const combo of findMatchingCombinations(l.amount, pool, l.date)) {
+      linesWithOwnMatch.add(l.id);
+      for (const c of combo.items) recordsInLineMatch.add(keyOf(c));
+    }
+  }
+
+  const perRecord = [];
+  const recordsOfLine = new Map(); // line id -> Set of record keys it can help make up
+  for (const r of records) {
+    const rk = keyOf(r);
+    const near = linesNear(r.direction, r.date).filter(l => !l.rejected.has(rk));
+    if (near.length < 2) continue;
+    const bySource = new Map();
+    for (const l of near) {
+      if (!bySource.has(l.source)) bySource.set(l.source, []);
+      bySource.get(l.source).push(l);
+    }
+    const combos = [];
+    for (const group of bySource.values()) {
+      if (group.length < 2) continue;
+      for (const c of findMatchingCombinations(r.amount, group, r.date)) if (c.items.length >= 2) combos.push(c);
+    }
+    if (!combos.length) continue;
+    combos.sort((a, b) => a.totalDateDistance - b.totalDateDistance || a.items.length - b.items.length);
+    for (const c of combos) {
+      for (const l of c.items) {
+        if (!recordsOfLine.has(l.id)) recordsOfLine.set(l.id, new Set());
+        recordsOfLine.get(l.id).add(rk);
+      }
+    }
+    perRecord.push({ record: r, rk, combos });
+  }
+
+  const lineOrder = new Map(lines.map((l, i) => [l.id, i]));
+  const describe = (r, c) => ({
+    type: 'group',
+    record: { sourceTable: r.sourceTable, sourceId: r.sourceId, amount: r.amount, date: r.date },
+    lineIds: c.items.map(l => l.id).sort((a, b) => lineOrder.get(a) - lineOrder.get(b)),
+    total: Math.round(c.items.reduce((s, l) => s + Math.round(l.amount * 100), 0)) / 100,
+  });
+  const groups = [];
+  const optionsByLine = new Map();
+  for (const { record, rk, combos } of perRecord) {
+    const only = combos.length === 1 ? combos[0] : null;
+    const unambiguous = only && !recordsInLineMatch.has(rk)
+      && only.items.every(l => !linesWithOwnMatch.has(l.id) && recordsOfLine.get(l.id).size === 1);
+    if (unambiguous) {
+      const { record: rec, lineIds, total } = describe(record, only);
+      groups.push({ record: rec, lineIds, total });
+      continue;
+    }
+    for (const c of combos.slice(0, RECON_GROUP_OPTIONS_MAX)) {
+      const opt = describe(record, c);
+      for (const id of opt.lineIds) {
+        if (!optionsByLine.has(id)) optionsByLine.set(id, []);
+        optionsByLine.get(id).push({ opt, d: c.totalDateDistance, n: c.items.length });
+      }
+    }
+  }
+  const options = {};
+  for (const [id, list] of optionsByLine) {
+    options[id] = list.sort((a, b) => a.d - b.d || a.n - b.n).slice(0, RECON_GROUP_OPTIONS_MAX).map(x => x.opt);
+  }
+  return { groups, options };
+}
+
+// Access Bank alert emails and app screenshots ("Recent Transactions": Date, Narrative, a red
+// arrow for Type, Amount) don't reliably show which way money moved. The owner's rule: debits are
+// transfers out, cheque / Remita payments and bank charges; everything else is a credit.
+// Word-boundary, case-insensitive. `generic` words can also turn up in a sender's own remark on an
+// incoming transfer ("TRF FROM JOHN/school fees", "pastor in charge"), so they don't count on a
+// transfer FROM someone — the charge-only terms (VAT, stamp duty, commission, SMS alert) still do.
+const NARRATION_DEBIT_RULES = [
+  // transfers out — but not a transfer TO the parish itself (someone paying the church)
+  { re: /\b(?:TRF|TRANSFER)[\s\-/]*TO\b(?![\s\-/]*RCCG[\s\-/]*KINGDOM)/i },
+  // cheque payments — a cheque paid IN (deposit / lodgement) is a credit
+  { re: /^(?!.*\b(?:DEP(?:OSIT)?|LODG(?:E|EMENT)?)\b).*\bCHQ\b/i },
+  { re: /\bREMITA\b/i },                                      // Remita payments
+  { re: /\bCOMMISSION\b/i },                                  // bank charges ↓
+  { re: /\bVAT\b/i },
+  { re: /\bSTAMP[\s\-]*DUTY\b/i },
+  { re: /\bSMS[\s\-]*ALERTS?\b/i },
+  { re: /\bEMTL\b/i },                                        // electronic money transfer levy
+  { re: /\b(?:ACCOUNT|ACCT|A\/C)\.?[\s\-]*MAINT(?:ENANCE)?\b/i },
+  { re: /\bDUTY\b/i, generic: true },
+  { re: /\bCHARGES?\b/i, generic: true },
+  { re: /\bCHGS?\b/i, generic: true },
+  { re: /\bFEES?\b/i, generic: true },
+];
+const NARRATION_INCOMING_TRANSFER_RE = /\b(?:TRF|TRANSFER)[\s\-/]*FROM\b/i;
+
+/** 'out' or 'in' for a statement line, from its narration alone (see NARRATION_DEBIT_RULES). */
+function inferDirectionFromNarration(narration) {
+  const n = String(narration || '');
+  const incomingTransfer = NARRATION_INCOMING_TRANSFER_RE.test(n);
+  return NARRATION_DEBIT_RULES.some(rule => (!rule.generic || !incomingTransfer) && rule.re.test(n)) ? 'out' : 'in';
+}
+
+/**
+ * For a page whose direction is only shown by icons/colours (or not at all): moves each row's
+ * amount to the debit or credit side inferDirectionFromNarration says. Rows with an unreadable
+ * amount, no amount, or an amount on both sides are left exactly as read, so verification still
+ * rejects them.
+ */
+function applyNarrationDirections(page) {
+  for (const row of page?.rows || []) {
+    const d = row.debit, c = row.credit;
+    if (!Number.isFinite(d) || !Number.isFinite(c) || (d > 0 && c > 0)) continue;
+    const amount = d > 0 ? d : c;
+    if (!(amount > 0)) continue;
+    const out = inferDirectionFromNarration(row.narration) === 'out';
+    row.debit = out ? amount : 0;
+    row.credit = out ? 0 : amount;
+  }
+  return page;
+}
+
 async function insertBankReconEntry(DB, { balanceHistoryId, date, amount, direction, status, matchedRefs, candidates, narration }) {
   const id = newId('brc');
   await DB.prepare(
@@ -8555,21 +8754,209 @@ const bankReconRefKey = (r) => `${r.sourceTable}:${r.sourceId}`;
  * i.e. referenced in matched_refs_json of an 'auto' or 'resolved' entry. One app record can
  * only ever explain one bank line, so these are removed from the candidate pool before
  * matching. Refs that only appear in a needs_attention entry's candidates_json are NOT
- * counted (nothing has been decided for them yet). `excludeId` skips one entry (used by
- * resolve, so an entry never conflicts with itself).
+ * counted (nothing has been decided for them yet). `exclude` (an entry id, or a Set/array of
+ * them) skips entries — used by resolve, so an entry (or the group it is leaving) never
+ * conflicts with itself.
+ *
+ * Grouped lines ("several bank lines = one record") all reference their record with the same
+ * groupId: that is ONE use of the record, legitimately shared by every member of the group, and
+ * the record is still excluded from all other matching. The map holds each key once, pointing
+ * at the first entry that uses it.
  */
-async function bankReconUsedRefKeys(DB, excludeId = null) {
+async function bankReconUsedRefKeys(DB, exclude = null) {
+  const skip = new Set(exclude == null ? [] : typeof exclude === 'string' ? [exclude] : [...exclude]);
   const { results } = await DB.prepare(
-    `SELECT id, matched_refs_json FROM bank_recon_entries WHERE status IN ('auto','resolved')`
+    `SELECT id, matched_refs_json FROM bank_recon_entries WHERE status IN ('auto','resolved') ORDER BY date, id`
   ).all();
   const used = new Map(); // key -> entry id that uses it
   for (const row of results || []) {
-    if (excludeId && row.id === excludeId) continue;
+    if (skip.has(row.id)) continue;
     for (const r of safeJsonParse(row.matched_refs_json, []) || []) {
-      if (r && r.sourceTable && r.sourceId) used.set(bankReconRefKey(r), row.id);
+      if (r && r.sourceTable && r.sourceId && !used.has(bankReconRefKey(r))) used.set(bankReconRefKey(r), row.id);
     }
   }
   return used;
+}
+
+/** The groupId a set of matched refs belongs to ('' when the line isn't part of a group). */
+function bankReconGroupIdOf(refs) {
+  return (Array.isArray(refs) ? refs : []).map(r => r?.groupId).find(g => typeof g === 'string' && g) || '';
+}
+
+/** Ids of every entry whose matched refs carry `groupId`, sorted. */
+async function bankReconGroupMemberIds(DB, groupId) {
+  if (!groupId) return [];
+  const { results } = await DB.prepare(`SELECT id, matched_refs_json FROM bank_recon_entries WHERE matched_refs_json LIKE ?`)
+    .bind(`%${groupId}%`).all();
+  return (results || []).filter(r => bankReconGroupIdOf(safeJsonParse(r.matched_refs_json, [])) === groupId).map(r => r.id).sort();
+}
+
+// rejected_refs_json: records the user unmatched from a line, so re-matching never pairs them
+// again (otherwise "unmatch" would be undone by the very next re-matching pass). Added lazily
+// so a database created before this column existed keeps working without a re-init.
+const _bankReconColumnsReady = new WeakSet(); // per database binding
+async function ensureBankReconColumns(DB) {
+  if (_bankReconColumnsReady.has(DB)) return;
+  const { results } = await DB.prepare(`PRAGMA table_info(bank_recon_entries)`).all();
+  if (!(results || []).some(r => r.name === 'rejected_refs_json')) {
+    try {
+      await DB.prepare(`ALTER TABLE bank_recon_entries ADD COLUMN rejected_refs_json TEXT DEFAULT '[]'`).run();
+    } catch { /* added by a concurrent request */ }
+  }
+  _bankReconColumnsReady.add(DB);
+}
+
+/**
+ * Puts entries back to 'unrecorded' with no refs or review options (one transaction). With
+ * `rejectRefs`, the records each one was matched to are remembered on it (rejected_refs_json),
+ * so automatic re-matching never pairs that line with them again.
+ */
+async function bankReconReleaseEntries(DB, ids, rejectRefs = false) {
+  if (!ids || !ids.length) return;
+  await ensureBankReconColumns(DB);
+  const stmts = [];
+  for (const id of ids) {
+    const row = await DB.prepare(`SELECT matched_refs_json, rejected_refs_json FROM bank_recon_entries WHERE id=?`).bind(id).first();
+    if (!row) continue;
+    const rejected = (safeJsonParse(row.rejected_refs_json, []) || []).filter(r => r && r.sourceTable && r.sourceId);
+    if (rejectRefs) {
+      const have = new Set(rejected.map(bankReconRefKey));
+      for (const r of safeJsonParse(row.matched_refs_json, []) || []) {
+        if (r && r.sourceTable && r.sourceId && !have.has(bankReconRefKey(r))) {
+          rejected.push({ sourceTable: r.sourceTable, sourceId: r.sourceId });
+          have.add(bankReconRefKey(r));
+        }
+      }
+    }
+    stmts.push(DB.prepare(
+      `UPDATE bank_recon_entries SET status='unrecorded', matched_refs_json='[]', candidates_json='[]', resolved_by='', resolved_at=NULL, rejected_refs_json=? WHERE id=?`
+    ).bind(JSON.stringify(rejected), id));
+  }
+  if (stmts.length) await DB.batch(stmts);
+}
+
+/**
+ * Re-matches every open bank line (unrecorded / needs_attention — never ignored, auto or
+ * resolved) against the CURRENT candidate pool minus records already used, so a record typed in
+ * after the bank line arrived gets matched, and review options that point at a record used
+ * elsewhere disappear. Deterministic: lines are processed by date, then id.
+ *   (a) one-to-many per line (matchBalanceMovement): auto when confident, needs_attention with
+ *       fresh options, unrecorded when nothing adds up. Each auto match's records are taken out of
+ *       the pool straight away, and the pass repeats until no new auto match appears — so every
+ *       remaining line's options are computed against the final pool (none can be stale).
+ *   (b) many-to-one over the lines still open (findManyToOneMatches): unambiguous groups become
+ *       'auto' with a shared groupId; other groups that add up are attached as review options
+ *       (an unrecorded line with such an option becomes needs_attention).
+ * Writes are conditional on the line still being open, and a group is written all-or-nothing.
+ * Returns { autoMatched, groupsMatched, stillOpen }.
+ */
+async function rematchOpenBankReconEntries(DB, windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS) {
+  const counts = { autoMatched: 0, groupsMatched: 0, stillOpen: 0 };
+  await ensureBankReconColumns(DB);
+  const { results: openRows } = await DB.prepare(
+    `SELECT id, balance_history_id, date, amount, direction, status, matched_refs_json, candidates_json, rejected_refs_json
+       FROM bank_recon_entries WHERE status IN ('unrecorded','needs_attention') ORDER BY date, id`
+  ).all();
+  if (!openRows || !openRows.length) return counts; // keeps GET cheap when everything is settled
+
+  const pool = await fetchReconciliationCandidatePool(DB);
+  const used = await bankReconUsedRefKeys(DB);
+  const near = bankReconWindowIndex(pool, windowDays);
+  const lines = openRows.map(r => ({
+    id: r.id, date: String(r.date || '').slice(0, 10), amount: Number(r.amount || 0), direction: r.direction,
+    source: String(r.balance_history_id || '').startsWith('stmt:') ? 'statement' : 'balance',
+    rejectedKeys: new Set((safeJsonParse(r.rejected_refs_json, []) || []).filter(x => x && x.sourceTable && x.sourceId).map(bankReconRefKey)),
+    old: r, status: 'unrecorded', matchedRefs: [], candidates: [], groupId: '',
+  }));
+  const freeFor = (l) => near(l.direction, l.date)
+    .filter(c => !used.has(bankReconRefKey(c)) && !l.rejectedKeys.has(bankReconRefKey(c)));
+  const toOption = (combo) => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date }));
+
+  // (a) one-to-many, repeated until stable.
+  let pending = lines;
+  for (let pass = 0; pass < BANK_RECON_REMATCH_MAX_PASSES && pending.length; pass++) {
+    let newAuto = false;
+    for (const l of pending) {
+      const result = l.amount > RECON_AMOUNT_EPSILON ? matchBalanceMovement(l, freeFor(l)) : { status: 'unrecorded', matches: [] };
+      if (result.status === 'auto') {
+        l.status = 'auto';
+        l.matchedRefs = result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId }));
+        l.candidates = [];
+        for (const r of l.matchedRefs) used.set(bankReconRefKey(r), l.id);
+        newAuto = true;
+      } else {
+        l.status = result.status;
+        l.candidates = result.status === 'needs_attention' ? result.matches.slice(0, 5).map(toOption) : [];
+      }
+    }
+    pending = pending.filter(l => l.status !== 'auto');
+    if (!newAuto) break;
+  }
+  // Only reachable if the pass cap was hit: never leave an option naming a record used elsewhere.
+  for (const l of pending) {
+    if (l.status !== 'needs_attention') continue;
+    l.candidates = l.candidates.filter(combo => combo.every(m => !used.has(bankReconRefKey(m))));
+    if (!l.candidates.length) l.status = 'unrecorded';
+  }
+
+  // (b) many-to-one over the lines still open.
+  const byId = new Map(lines.map(l => [l.id, l]));
+  const m2o = findManyToOneMatches(pending, pool.filter(c => !used.has(bankReconRefKey(c))), windowDays);
+  for (const g of m2o.groups) {
+    const groupId = 'grp_' + [...g.lineIds].sort()[0]; // deterministic: a line is in at most one group
+    for (const id of g.lineIds) {
+      const l = byId.get(id);
+      l.status = 'auto';
+      l.matchedRefs = [{ sourceTable: g.record.sourceTable, sourceId: g.record.sourceId, groupId }];
+      l.candidates = [];
+      l.groupId = groupId;
+    }
+    used.set(bankReconRefKey(g.record), g.lineIds[0]);
+  }
+  for (const [id, opts] of Object.entries(m2o.options)) {
+    const l = byId.get(id);
+    if (!l || l.status === 'auto') continue;
+    l.candidates = [...l.candidates, ...opts];
+    l.status = 'needs_attention';
+  }
+
+  // Write back only what changed; never overwrite a line someone resolved/ignored meanwhile.
+  const updateSql = `UPDATE bank_recon_entries SET status=?, matched_refs_json=?, candidates_json=? WHERE id=? AND status IN ('unrecorded','needs_attention')`;
+  const changed = l => !(l.status === l.old.status && JSON.stringify(l.matchedRefs) === (l.old.matched_refs_json || '[]')
+    && JSON.stringify(l.candidates) === (l.old.candidates_json || '[]'));
+  const writeAll = async (ls) => {
+    if (!ls.length) return [];
+    const res = await DB.batch(ls.map(l => DB.prepare(updateSql).bind(l.status, JSON.stringify(l.matchedRefs), JSON.stringify(l.candidates), l.id)));
+    return (res || []).map(r => r?.meta?.changes ?? 1);
+  };
+  const singles = lines.filter(l => !l.groupId && changed(l));
+  const singleChanges = await writeAll(singles);
+  singles.forEach((l, i) => { if (l.status === 'auto' && singleChanges[i] > 0) counts.autoMatched++; });
+  for (const g of m2o.groups) {
+    const members = g.lineIds.map(id => byId.get(id));
+    const memberChanges = await writeAll(members);
+    if (memberChanges.every(n => n > 0)) { counts.groupsMatched++; continue; }
+    // A member was settled by someone else meanwhile: undo the half-written group.
+    const written = members.filter((_, i) => memberChanges[i] > 0);
+    if (written.length) {
+      await DB.batch(written.map(l => DB.prepare(
+        `UPDATE bank_recon_entries SET status='unrecorded', matched_refs_json='[]', candidates_json='[]' WHERE id=? AND status='auto'`
+      ).bind(l.id)));
+    }
+  }
+  counts.stillOpen = lines.filter(l => l.status !== 'auto').length;
+  return counts;
+}
+
+/** rematchOpenBankReconEntries for the after-the-fact callers: a failure is logged, never
+ * allowed to fail the request that already did its real work. Null on failure. */
+async function bankReconRematchQuietly(DB, windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS) {
+  try {
+    return await rematchOpenBankReconEntries(DB, windowDays);
+  } catch (e) {
+    console.error('[bank-recon] re-matching open lines failed:', e?.message || e);
+    return null;
+  }
 }
 
 // Per-table lookup for matchedDetails: the columns to read and how to turn a row into the
@@ -8605,8 +8992,19 @@ const BANK_RECON_DETAIL_LOOKUPS = {
 };
 
 async function getBankReconEntries(DB) {
+  // Keep the review current: a record typed in after its bank line arrived is matched now, and
+  // options naming a record used elsewhere disappear. No-op (one cheap query) when nothing is open.
+  await bankReconRematchQuietly(DB);
   const { results } = await DB.prepare(`SELECT * FROM bank_recon_entries ORDER BY date DESC, created_at DESC`).all();
   const entries = (results || []).map(bankReconEntryFromRow);
+  const groupSizes = new Map();
+  for (const e of entries) {
+    const g = bankReconGroupIdOf(e.matchedRefs);
+    if (!g) continue;
+    e.groupId = g;
+    groupSizes.set(g, (groupSizes.get(g) || 0) + 1);
+  }
+  for (const e of entries) if (e.groupId) e.groupSize = groupSizes.get(e.groupId);
 
   // One IN (...) query per source table (chunked under D1's 100-bound-parameter limit),
   // never one query per ref.
@@ -8638,47 +9036,128 @@ async function getBankReconEntries(DB) {
 }
 
 async function resolveBankReconEntry(DB, authz, id, body) {
-  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  const row = await DB.prepare(`SELECT id, matched_refs_json FROM bank_recon_entries WHERE id=?`).bind(id).first();
   if (!row) return err('Bank reconciliation entry not found', 404);
+  if (body?.groupOption) return await resolveBankReconGroupOption(DB, authz, row, body.groupOption);
   const addNew = !!body?.addNew;
   const chosenRefs = Array.isArray(body?.chosenRefs)
     ? body.chosenRefs.filter(r => r && r.sourceTable && r.sourceId).map(r => ({ sourceTable: String(r.sourceTable), sourceId: String(r.sourceId) }))
     : [];
-  if (!addNew && chosenRefs.length === 0) return err('chosenRefs is required (or set addNew:true)', 400);
+  if (!addNew && chosenRefs.length === 0) return err('chosenRefs is required (or set addNew:true, or groupOption)', 400);
+  // A line that was part of a group leaves it: the rest of that group goes back to 'unrecorded'
+  // (and is re-matched below), so its record no longer counts as used by that group.
+  const groupMembers = await bankReconGroupMemberIds(DB, bankReconGroupIdOf(safeJsonParse(row.matched_refs_json, [])));
   if (!addNew) {
-    // One app record can only explain one bank line.
-    const used = await bankReconUsedRefKeys(DB, id);
+    // One app record can only explain one bank line (or one group of lines).
+    const used = await bankReconUsedRefKeys(DB, new Set([id, ...groupMembers]));
     const clash = chosenRefs.find(r => used.has(bankReconRefKey(r)));
     if (clash) {
       return err(`That record (${clash.sourceTable} ${clash.sourceId}) is already matched to another bank line `
         + `(entry ${used.get(bankReconRefKey(clash))}). Unmatch that line first if this is the right one.`, 409);
     }
   }
+  await bankReconReleaseEntries(DB, groupMembers.filter(m => m !== id));
   const now = new Date().toISOString();
   await DB.prepare(`UPDATE bank_recon_entries SET status='resolved', matched_refs_json=?, resolved_by=?, resolved_at=? WHERE id=?`)
     .bind(JSON.stringify(addNew ? [] : chosenRefs), authz?.finance?.name || authz?.finance?.id || '', now, id).run();
+  await bankReconRematchQuietly(DB);
   const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
   return ok(bankReconEntryFromRow(updated));
 }
 
-/** "This bank line needs nothing from the app" (e.g. an internal transfer) — set aside. */
+const BANK_RECON_GROUP_RESOLVE_MAX_LINES = 20;
+
+/**
+ * Resolves "these bank lines together are that one record" (body.groupOption = { sourceTable,
+ * sourceId, lineIds }). Everything is re-checked on the server, never trusted from the client:
+ * the lines (which must include this one) exist, are all still open and all the same direction;
+ * the record is a real bank-touching record of that direction that no other line already uses;
+ * and the lines add up to the record's bank amount (in kobo, within RECON_AMOUNT_EPSILON).
+ * Then every line becomes 'resolved' with one shared groupId, in a single UPDATE.
+ */
+async function resolveBankReconGroupOption(DB, authz, row, opt) {
+  const sourceTable = String(opt?.sourceTable || '').trim();
+  const sourceId = String(opt?.sourceId ?? '').trim();
+  const lineIds = [...new Set((Array.isArray(opt?.lineIds) ? opt.lineIds : []).map(x => String(x ?? '').trim()).filter(Boolean))];
+  if (!sourceTable || !sourceId) return err('groupOption needs the record\'s sourceTable and sourceId', 400);
+  if (lineIds.length < 2) return err('groupOption.lineIds needs at least two bank lines', 400);
+  if (lineIds.length > BANK_RECON_GROUP_RESOLVE_MAX_LINES) return err(`groupOption.lineIds can have at most ${BANK_RECON_GROUP_RESOLVE_MAX_LINES} bank lines`, 400);
+  if (!lineIds.includes(row.id)) return err('groupOption.lineIds must include this bank line', 400);
+
+  const marks = lineIds.map(() => '?').join(',');
+  const { results: lineRows } = await DB.prepare(`SELECT id, amount, direction, status FROM bank_recon_entries WHERE id IN (${marks})`)
+    .bind(...lineIds).all();
+  if ((lineRows || []).length !== lineIds.length) return err('One or more of those bank lines no longer exist', 404);
+  const settled = lineRows.find(r => r.status !== 'unrecorded' && r.status !== 'needs_attention');
+  if (settled) return err(`Bank line ${settled.id} is already ${settled.status} — only open bank lines can be grouped. Refresh and try again.`, 409);
+  const direction = lineRows[0].direction;
+  if (lineRows.some(r => r.direction !== direction)) return err('Those bank lines are not all money in (or all money out)', 400);
+
+  const pool = await fetchReconciliationCandidatePool(DB);
+  const record = pool.find(c => c.sourceTable === sourceTable && String(c.sourceId) === sourceId);
+  if (!record) return err(`That record (${sourceTable} ${sourceId}) was not found among the records that touch the bank`, 404);
+  if (record.direction !== direction) {
+    return err(`That record is money ${record.direction}, but those bank lines are money ${direction}`, 400);
+  }
+  const totalKobo = lineRows.reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+  const recordKobo = Math.round(Number(record.amount || 0) * 100);
+  if (Math.abs(totalKobo - recordKobo) > Math.round(RECON_AMOUNT_EPSILON * 100)) {
+    return err(`Those bank lines add up to ₦${(totalKobo / 100).toLocaleString('en-NG')}, but the record is `
+      + `₦${(recordKobo / 100).toLocaleString('en-NG')} — they don't match.`, 400);
+  }
+  const used = await bankReconUsedRefKeys(DB);
+  const key = bankReconRefKey(record);
+  if (used.has(key)) {
+    return err(`That record (${sourceTable} ${sourceId}) is already matched to another bank line `
+      + `(entry ${used.get(key)}). Unmatch that line first if this is the right one.`, 409);
+  }
+
+  const groupId = 'grp_' + [...lineIds].sort()[0];
+  const refsJson = JSON.stringify([{ sourceTable: record.sourceTable, sourceId: record.sourceId, groupId }]);
+  const res = await DB.prepare(
+    `UPDATE bank_recon_entries SET status='resolved', matched_refs_json=?, candidates_json='[]', resolved_by=?, resolved_at=?
+      WHERE id IN (${marks}) AND status IN ('unrecorded','needs_attention')`
+  ).bind(refsJson, authz?.finance?.name || authz?.finance?.id || '', new Date().toISOString(), ...lineIds).run();
+  const changes = res?.meta?.changes ?? lineIds.length;
+  if (changes !== lineIds.length) {
+    // A line was settled by someone else between the checks and the write: undo, never half-group.
+    await bankReconReleaseEntries(DB, await bankReconGroupMemberIds(DB, groupId));
+    return err('Those bank lines changed while saving — refresh and try again.', 409);
+  }
+  await bankReconRematchQuietly(DB);
+  const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(row.id).first();
+  return ok({ ...bankReconEntryFromRow(updated), groupId, groupSize: lineIds.length });
+}
+
+/** "This bank line needs nothing from the app" (e.g. an internal transfer) — set aside. A line
+ * that was part of a group leaves it; the rest of that group goes back to 'unrecorded'. */
 async function ignoreBankReconEntry(DB, authz, id) {
-  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  const row = await DB.prepare(`SELECT id, matched_refs_json FROM bank_recon_entries WHERE id=?`).bind(id).first();
   if (!row) return err('Bank reconciliation entry not found', 404);
+  const groupMembers = await bankReconGroupMemberIds(DB, bankReconGroupIdOf(safeJsonParse(row.matched_refs_json, [])));
+  await bankReconReleaseEntries(DB, groupMembers.filter(m => m !== id));
   await DB.prepare(`UPDATE bank_recon_entries SET status='ignored', matched_refs_json='[]', resolved_by=?, resolved_at=? WHERE id=?`)
     .bind(authz?.finance?.name || authz?.finance?.id || '', new Date().toISOString(), id).run();
+  await bankReconRematchQuietly(DB);
   const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
   return ok(bankReconEntryFromRow(updated));
 }
 
-/** Undo a (wrong) match: back to 'unrecorded' with no refs, so those records are free again. */
+/**
+ * Undo a (wrong) match: back to 'unrecorded' with no refs, so those records are free again.
+ * Unmatching any member of a group unmatches the whole group. The records are remembered as
+ * rejected on each line, so the re-matching that follows never pairs them again (they can still
+ * be chosen by hand). Returns the entry plus `unmatchedIds` (every line released).
+ */
 async function unmatchBankReconEntry(DB, id) {
-  const row = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  const row = await DB.prepare(`SELECT id, matched_refs_json FROM bank_recon_entries WHERE id=?`).bind(id).first();
   if (!row) return err('Bank reconciliation entry not found', 404);
-  await DB.prepare(`UPDATE bank_recon_entries SET status='unrecorded', matched_refs_json='[]', candidates_json='[]', resolved_by='', resolved_at=NULL WHERE id=?`)
-    .bind(id).run();
+  const groupMembers = await bankReconGroupMemberIds(DB, bankReconGroupIdOf(safeJsonParse(row.matched_refs_json, [])));
+  const unmatchedIds = [...new Set([id, ...groupMembers])].sort();
+  await bankReconReleaseEntries(DB, unmatchedIds, true);
+  await bankReconRematchQuietly(DB);
   const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
-  return ok(bankReconEntryFromRow(updated));
+  return ok({ ...bankReconEntryFromRow(updated), unmatchedIds });
 }
 
 // Deterministic keyword match — not another AI call: cheap, and the statement lines already
@@ -8706,10 +9185,13 @@ function classifyBankChargeNarration(narration, amount) {
 const STATEMENT_READ_PROMPT = [
   'You are reading a photo of a bank statement for a church\'s accounts. Every figure must be copied exactly as printed.',
   'Return ONLY a JSON object with exactly this shape:',
-  '{"period_start": "YYYY-MM-DD" or null, "period_end": "YYYY-MM-DD" or null, "opening_balance": number or null, "closing_balance": number or null,',
+  '{"direction_basis": "columns" or "icons_or_unclear", "period_start": "YYYY-MM-DD" or null, "period_end": "YYYY-MM-DD" or null, "opening_balance": number or null, "closing_balance": number or null,',
   ' "rows": [{"date": "YYYY-MM-DD" or null, "date_as_printed": "...", "narration": "...", "reference": "...", "debit": number, "credit": number, "balance": number or null}]}',
   'Rules:',
   '- Copy exactly what is printed. Never invent, merge, split or reorder rows: one entry in "rows" per transaction line, in the order printed (top to bottom).',
+  '- Rows come ONLY from the transactions table or list. An alert email\'s headline or summary (for example "Your account has been Credited with NGN 11,000", Value Date, Available Balance) is NOT a row, and its balance is not an opening or closing balance.',
+  '- Never output the same printed line twice. A row cut off at the top or bottom edge of the photo whose amount is not fully visible must be left out.',
+  '- direction_basis: "columns" when the statement itself shows which way money moved in print — separate debit and credit (withdrawal / deposit, money out / money in) columns, + or - signs on the amounts, or DR / CR markers. "icons_or_unclear" when the direction is shown only by arrows, colours or icons (such as a banking app\'s or alert email\'s "Recent Transactions" list) or not at all; then still put each amount under debit or credit as best you can.',
   '- Skip lines that are not transactions: column headers, page headers and footers, sub-totals and totals. A "balance brought forward" / "opening balance" line is not a row — put its figure in opening_balance.',
   '- Amounts are plain numbers with no commas, currency symbols or CR/DR letters (for example 1250000.5).',
   '- debit = money OUT of the account (withdrawals, transfers out, charges); credit = money IN (deposits, transfers in). Use 0 for the empty side. Never put an amount in both.',
@@ -8827,7 +9309,8 @@ const STMT_REASON_DIRECTION = 'couldn\'t tell whether the statement lists the ol
  * A misread balance fails that row and the one after it (both links touch it) — strict on
  * purpose: an unproven row is never filed. Rows with both or neither of debit/credit are
  * rejected outright. Rows repeated at the end of one photo and the start of the next (two
- * overlapping halves of a page; same date, amounts and balance) are marked 'overlap' and left
+ * overlapping halves of a page; same date, amounts and balance — or, when neither row has a
+ * balance, same date and amounts) are marked 'overlap' and left
  * out of the chain, so they're never filed twice. With fewer than two balance figures there is
  * nothing to check: verification 'unavailable', rows 'unchecked' (structural checks still apply).
  *
@@ -8855,8 +9338,12 @@ export function verifyStatementRows(pages) {
   }));
 
   // Overlapping photos: the longest run at the end of photo p-1 repeated at the start of photo p.
-  const sameRow = (a, b) => !a.problem && !b.problem && a.bal !== null && a.bal === b.bal
-    && a.d === b.d && a.c === b.c && (!a.date || !b.date || a.date === b.date);
+  // A row matches on the same amount and direction plus either the same running balance, or —
+  // for lists with no balance at all (scrolled app screenshots) — neither row has a balance and
+  // both have the same date.
+  const sameRow = (a, b) => !a.problem && !b.problem && a.d === b.d && a.c === b.c && (
+    (a.bal !== null && a.bal === b.bal && (!a.date || !b.date || a.date === b.date))
+    || (a.bal === null && b.bal === null && !!a.date && a.date === b.date));
   for (let p = 1; p < byPage.length; p++) {
     const prev = byPage[p - 1], cur = byPage[p];
     for (let k = Math.min(prev.length, cur.length); k >= 1; k--) {
@@ -8946,7 +9433,11 @@ function normaliseStatementPage(raw) {
   if (!obj || typeof obj !== 'object' || !Array.isArray(obj.rows)) return null;
   const balanceOrNull = v => { const n = parseStatementNumber(v); return Number.isFinite(n) ? n : null; };
   const amount = v => { const n = parseStatementNumber(v); return n === null ? 0 : Number.isFinite(n) ? Math.abs(n) : NaN; };
+  const basis = String(obj.direction_basis ?? '').trim().toLowerCase();
   return {
+    // Anything but an explicit "columns" (including a missing field) means the direction is
+    // worked out from the narration — see applyNarrationDirections.
+    direction_basis: basis === 'columns' || basis === 'icons_or_unclear' ? basis : null,
     period_start: isValidYmd(obj.period_start) ? obj.period_start : null,
     period_end: isValidYmd(obj.period_end) ? obj.period_end : null,
     opening_balance: balanceOrNull(obj.opening_balance),
@@ -9099,6 +9590,16 @@ async function handleBankReconStatement(DB, env, authz, body) {
   const today = new Date().toISOString().slice(0, 10);
   for (const pg of pages) for (const row of pg.rows) row.date = resolveStatementRowDate(row, period, today);
 
+  // Direction shown only by icons/colours (Access Bank alert emails / app screenshots), or not
+  // stated: every row's side comes from its narration — before verification, so overlap
+  // detection and the running-balance check (where there is one) see the corrected sides.
+  let directionInferred = false;
+  for (const pg of pages) {
+    if (pg.direction_basis === 'columns') continue;
+    applyNarrationDirections(pg);
+    directionInferred = true;
+  }
+
   const check = verifyStatementRows(pages);
   const items = [], unverifiedRows = [];
   let overlapCount = 0;
@@ -9125,7 +9626,7 @@ async function handleBankReconStatement(DB, env, authz, body) {
     return new Response(JSON.stringify({
       error: `None of the ${unverifiedRows.length} line${unverifiedRows.length === 1 ? '' : 's'} read could be double-checked, `
         + `so nothing was added. ${sample}${unverifiedRows.length > 3 ? '; …' : ''}. Retake clearer photo(s) of the statement and try again.`,
-      unverifiedCount: unverifiedRows.length, unverifiedRows, verification,
+      unverifiedCount: unverifiedRows.length, unverifiedRows, verification, directionInferred,
     }), { status: 422, headers: CORS_HEADERS });
   }
 
@@ -9160,6 +9661,7 @@ async function handleBankReconStatement(DB, env, authz, body) {
 
 
   let autoCount = 0, chargeCount = 0, needsAttentionCount = 0, unrecordedCount = 0, duplicateCount = 0;
+  const insertedIds = [];
   for (const item of items) {
     const { date, amount, direction } = item;
     const narration = cleanStatementNarration(item.narration);
@@ -9189,10 +9691,10 @@ async function handleBankReconStatement(DB, env, authz, body) {
       }
       chargeCount++; autoCount++;
       usedRefs.set(bankReconRefKey({ sourceTable: 'expenses', sourceId: expenseId }), 'this upload');
-      await insertBankReconEntry(DB, {
+      insertedIds.push(await insertBankReconEntry(DB, {
         balanceHistoryId: `stmt:${newId()}`, date, amount, direction, status: 'auto',
         matchedRefs: [{ sourceTable: 'expenses', sourceId: expenseId }], candidates: [], narration,
-      });
+      }));
       continue; // charges never go through the subset-sum matcher
     }
 
@@ -9204,19 +9706,39 @@ async function handleBankReconStatement(DB, env, authz, body) {
     const candidatesOut = result.status === 'needs_attention'
       ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
       : [];
-    await insertBankReconEntry(DB, {
+    insertedIds.push(await insertBankReconEntry(DB, {
       balanceHistoryId: `stmt:${newId()}`, date, amount, direction, status: result.status,
       matchedRefs, candidates: candidatesOut, narration,
-    });
+    }));
     if (result.status === 'auto') autoCount++;
     else if (result.status === 'needs_attention') needsAttentionCount++;
     else unrecordedCount++;
+  }
+
+  // Re-match everything still open (this upload's lines and older ones) — e.g. two transfers on
+  // this statement that together are one record become a group — then report this upload's
+  // lines as they now stand.
+  const rematch = await bankReconRematchQuietly(DB, windowDays);
+  if (rematch && insertedIds.length) {
+    autoCount = 0; needsAttentionCount = 0; unrecordedCount = 0;
+    for (let i = 0; i < insertedIds.length; i += 90) {
+      const chunk = insertedIds.slice(i, i + 90);
+      const { results: now } = await DB.prepare(
+        `SELECT status FROM bank_recon_entries WHERE id IN (${chunk.map(() => '?').join(',')})`
+      ).bind(...chunk).all();
+      for (const r of now || []) {
+        if (r.status === 'auto' || r.status === 'resolved') autoCount++;
+        else if (r.status === 'needs_attention') needsAttentionCount++;
+        else if (r.status === 'unrecorded') unrecordedCount++;
+      }
+    }
   }
 
   // Rows repeated where two photos overlap count as found-but-already-seen, like a re-upload.
   return ok({
     itemCount: items.length + overlapCount, autoCount, chargeCount, needsAttentionCount, unrecordedCount,
     duplicateCount: duplicateCount + overlapCount, unverifiedCount: unverifiedRows.length, unverifiedRows, verification,
+    directionInferred, groupsMatched: rematch?.groupsMatched || 0,
   });
 }
 
@@ -9297,7 +9819,7 @@ async function runBankReconciliationSweep(DB, env, request) {
   const histRes = await callClerkWatchdog(env, '/balance-history?after=' + encodeURIComponent(cursor.afterId));
   if (histRes.errorResponse) return histRes.errorResponse;
   const history = Array.isArray(histRes.data?.history) ? histRes.data.history : [];
-  if (!history.length) return ok({ ok: true, processed: 0, autoCount: 0, needsAttentionCount: 0, unrecordedCount: 0 });
+  if (!history.length) return ok({ ok: true, processed: 0, autoCount: 0, needsAttentionCount: 0, unrecordedCount: 0, groupsMatched: 0 });
 
   const windowDays = await bankReconMatchWindowDays(env);
   const pool = await fetchReconciliationCandidatePool(DB);
@@ -9368,7 +9890,9 @@ async function runBankReconciliationSweep(DB, env, request) {
   }
 
   await putBankReconCursor(DB, lastId, lastBalance);
-  return ok({ ok: true, processed, autoCount, needsAttentionCount, unrecordedCount });
+  // Re-match everything still open against the current records (see rematchOpenBankReconEntries).
+  const rematch = await bankReconRematchQuietly(DB, windowDays);
+  return ok({ ok: true, processed, autoCount, needsAttentionCount, unrecordedCount, groupsMatched: rematch?.groupsMatched || 0 });
 }
 
 async function runKpscReconciliation(DB, data) {
@@ -15768,4 +16292,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool };
+export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, inferDirectionFromNarration, applyNarrationDirections };

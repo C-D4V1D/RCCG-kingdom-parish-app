@@ -148,7 +148,7 @@ test('POST /api/bank-recon/entries/:id/resolve: it_admin only; chosenRefs and ad
 function itemsToPage(items, opening = 1000000) {
   let bal = opening;
   return {
-    period_start: null, period_end: null, opening_balance: opening, closing_balance: null,
+    direction_basis: 'columns', period_start: null, period_end: null, opening_balance: opening, closing_balance: null,
     rows: items.map(it => {
       const out = it.type === 'expense';
       bal = Math.round((bal + (out ? -it.amount : it.amount)) * 100) / 100;
@@ -381,7 +381,7 @@ test('POST /api/bank-recon/statement: a clean single-candidate match lands as au
 
   assert.equal(res.status, 200);
   assert.deepEqual(body, { itemCount: 2, autoCount: 2, chargeCount: 1, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 0,
-    unverifiedCount: 0, unverifiedRows: [], verification: 'passed' });
+    unverifiedCount: 0, unverifiedRows: [], verification: 'passed', directionInferred: false, groupsMatched: 0 });
 
   const expenseRows = DB.sqlite.prepare(`SELECT * FROM expenses WHERE category='bank'`).all();
   assert.equal(expenseRows.length, 1, 'the SMS-alert charge was filed once');
@@ -543,7 +543,7 @@ test('POST /api/bank-recon/statement: re-uploading the same statement files noth
   const second = await uploadStatement(DB, admin, again);
   assert.equal(second.status, 200);
   assert.deepEqual(second.body, { itemCount: 3, autoCount: 0, chargeCount: 0, needsAttentionCount: 0, unrecordedCount: 0, duplicateCount: 3,
-    unverifiedCount: 0, unverifiedRows: [], verification: 'passed' });
+    unverifiedCount: 0, unverifiedRows: [], verification: 'passed', directionInferred: false, groupsMatched: 0 });
   assert.equal(reconCount(DB), 3, 'no new rows on re-upload');
   assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE category='bank'`).get().n, 1, 'charge not re-filed');
 });
@@ -838,4 +838,294 @@ test('kpsc-parse-statement (parseStatementWithAI): a reply cut off for length is
   } finally { restore(); }
   assert.ok(res.status >= 400);
   assert.match(body.error, /too many lines/);
+});
+
+// ── Re-matching, many-to-one groups, direction from narration ─────────────
+function addLine(DB, id, date, amount, direction, { status = 'unrecorded', refs = [], candidates = [], source = 'stmt' } = {}) {
+  DB.sqlite.prepare(
+    `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json) VALUES (?,?,?,?,?,?,?,?)`
+  ).run(id, source === 'stmt' ? `stmt:${id}` : `bal:${id}`, date, amount, direction, status, JSON.stringify(refs), JSON.stringify(candidates));
+}
+const entryRow = (DB, id) => {
+  const r = DB.sqlite.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).get(id);
+  return { ...r, refs: JSON.parse(r.matched_refs_json), candidates: JSON.parse(r.candidates_json) };
+};
+async function getEntries(DB) {
+  const res = await onRequest({ request: req('bank-recon/entries', { headers: bearer(await tokenFor(DB, 'u3')) }), env: baseEnv(DB) });
+  assert.equal(res.status, 200);
+  const list = await readJson(res);
+  return Object.fromEntries(list.map(e => [e.id, e]));
+}
+async function postAs(DB, path, body) {
+  const res = await onRequest({ request: req(path, { method: 'POST', headers: bearer(await namedToken(DB, 'u1')), body }), env: baseEnv(DB) });
+  return { status: res.status, body: await readJson(res) };
+}
+
+test('many-to-one: two transfers (₦30,000 + ₦20,000) and one ₦50,000 income are grouped on GET; unmatching one member unmatches both, for good', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount,source,donor_name) VALUES ('i1','2026-10-05',50000,'donation','Bro. Ade')`).run();
+  addLine(DB, 'L1', '2026-10-05', 30000, 'in');
+  addLine(DB, 'L2', '2026-10-06', 20000, 'in');
+  addLine(DB, 'L3', '2026-10-06', 20000, 'in', { status: 'ignored' }); // ignored lines never take part
+
+  const byId = await getEntries(DB);
+  for (const id of ['L1', 'L2']) {
+    assert.equal(byId[id].status, 'auto', id);
+    assert.ok(byId[id].groupId.startsWith('grp_'));
+    assert.equal(byId[id].groupSize, 2);
+    assert.deepEqual(byId[id].matchedRefs, [{ sourceTable: 'income', sourceId: 'i1', groupId: byId[id].groupId }]);
+    assert.deepEqual(byId[id].matchedDetails, [{ sourceTable: 'income', sourceId: 'i1', date: '2026-10-05', amount: 50000, description: 'donation: Bro. Ade' }]);
+  }
+  assert.equal(byId.L1.groupId, byId.L2.groupId);
+  assert.equal(byId.L3.status, 'ignored');
+  assert.equal(byId.L3.groupId, undefined);
+
+  // The record is used ONCE by the group: no other line can take it.
+  addLine(DB, 'L4', '2026-10-05', 50000, 'in');
+  const clash = await postAs(DB, 'bank-recon/entries/L4/resolve', { chosenRefs: [{ sourceTable: 'income', sourceId: 'i1' }] });
+  assert.equal(clash.status, 409);
+  assert.equal(entryRow(DB, 'L4').status, 'unrecorded', 'the group\'s record is not offered to another line');
+
+  const un = await postAs(DB, 'bank-recon/entries/L2/unmatch');
+  assert.equal(un.status, 200);
+  assert.equal(un.body.id, 'L2');
+  assert.deepEqual(un.body.unmatchedIds, ['L1', 'L2']);
+  // i1 is free again — and L4 (₦50,000 on its own) now matches it; L1/L2 stay unmatched
+  // instead of being regrouped straight back.
+  const after = await getEntries(DB);
+  assert.equal(after.L1.status, 'unrecorded');
+  assert.equal(after.L2.status, 'unrecorded');
+  assert.deepEqual(after.L1.matchedRefs, []);
+  assert.equal(after.L1.groupId, undefined);
+  assert.equal(after.L4.status, 'auto');
+  assert.deepEqual(after.L4.matchedRefs, [{ sourceTable: 'income', sourceId: 'i1' }]);
+  // Unmatch L4 too: i1 is free, but none of the three lines that rejected it gets it again.
+  await postAs(DB, 'bank-recon/entries/L4/unmatch');
+  const again = await getEntries(DB);
+  assert.deepEqual(['L1', 'L2', 'L4'].map(id => again[id].status), ['unrecorded', 'unrecorded', 'unrecorded']);
+});
+
+test('many-to-one: ignoring or re-resolving one member of a group releases the rest of the group', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  addLine(DB, 'L1', '2026-10-05', 30000, 'in');
+  addLine(DB, 'L2', '2026-10-06', 20000, 'in');
+  await getEntries(DB);
+  assert.equal(entryRow(DB, 'L1').status, 'auto');
+
+  const ig = await postAs(DB, 'bank-recon/entries/L1/ignore');
+  assert.equal(ig.status, 200);
+  assert.equal(ig.body.status, 'ignored');
+  const l2 = entryRow(DB, 'L2');
+  assert.equal(l2.status, 'unrecorded', 'a group is never left half-matched');
+  assert.deepEqual(l2.refs, []);
+
+  // Re-form the group by hand, then resolve one member to something else.
+  DB.sqlite.prepare(`UPDATE bank_recon_entries SET status='unrecorded' WHERE id='L1'`).run();
+  await getEntries(DB);
+  assert.equal(entryRow(DB, 'L1').status, 'auto');
+  const res = await postAs(DB, 'bank-recon/entries/L2/resolve', { addNew: true });
+  assert.equal(res.status, 200);
+  assert.equal(entryRow(DB, 'L1').status, 'unrecorded');
+  assert.deepEqual(entryRow(DB, 'L1').refs, []);
+});
+
+test('re-matching: a needs_attention option whose record gets used by another line\'s resolve disappears', async () => {
+  const DB = await freshDB();
+  for (const id of ['e1', 'e2', 'e3']) {
+    DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,status) VALUES (?, '2026-10-05', 5000, 'bank_transfer', 'approved')`).run(id);
+  }
+  const opt = (id) => [{ sourceTable: 'expenses', sourceId: id, amount: 5000, date: '2026-10-05' }];
+  addLine(DB, 'X', '2026-10-05', 5000, 'out', { status: 'needs_attention', candidates: [opt('e1'), opt('e2'), opt('e3')] });
+  addLine(DB, 'Y', '2026-10-06', 5000, 'out', { status: 'needs_attention', candidates: [opt('e1'), opt('e2'), opt('e3')] });
+
+  const res = await postAs(DB, 'bank-recon/entries/Y/resolve', { chosenRefs: [{ sourceTable: 'expenses', sourceId: 'e1' }] });
+  assert.equal(res.status, 200);
+  const x = entryRow(DB, 'X');
+  assert.equal(x.status, 'needs_attention');
+  assert.deepEqual(x.candidates.map(c => c.map(m => m.sourceId)), [['e2'], ['e3']], 'e1 is used by Y now — no longer offered');
+
+  // Use e2 elsewhere as well: X is left with exactly one possibility and is matched to it.
+  addLine(DB, 'Z', '2026-10-05', 5000, 'out');
+  const z = await postAs(DB, 'bank-recon/entries/Z/resolve', { chosenRefs: [{ sourceTable: 'expenses', sourceId: 'e2' }] });
+  assert.equal(z.status, 200);
+  const x2 = entryRow(DB, 'X');
+  assert.equal(x2.status, 'auto');
+  assert.deepEqual(x2.refs, [{ sourceTable: 'expenses', sourceId: 'e3' }]);
+});
+
+test('re-matching: a database created before rejected_refs_json existed gets the column on first use', async () => {
+  const DB = await freshDB();
+  DB.sqlite.exec(`ALTER TABLE bank_recon_entries DROP COLUMN rejected_refs_json`);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  addLine(DB, 'L1', '2026-10-05', 30000, 'in');
+  addLine(DB, 'L2', '2026-10-06', 20000, 'in');
+  assert.equal((await getEntries(DB)).L1.status, 'auto');
+  assert.ok(DB.sqlite.prepare(`PRAGMA table_info(bank_recon_entries)`).all().some(c => c.name === 'rejected_refs_json'));
+  const un = await postAs(DB, 'bank-recon/entries/L1/unmatch');
+  assert.equal(un.status, 200);
+  assert.deepEqual(JSON.parse(entryRow(DB, 'L1').rejected_refs_json), [{ sourceTable: 'income', sourceId: 'i1' }]);
+});
+
+test('run-bank-recon: the sweep re-matches older open lines too (a record typed in since then)', async () => {
+  const DB = await freshDB();
+  addLine(DB, 'OLD', '2026-10-01', 4200, 'out', { source: 'bal' });
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,status) VALUES ('e7','2026-10-02',4200,'bank_transfer','approved')`).run();
+  const restore = stubWatchdogForSweep([
+    { id: 'bal1', balance: 500000, checked_at: '2026-10-04T08:00:00Z' },
+    { id: 'bal2', balance: 499000, checked_at: '2026-10-05T08:00:00Z' },
+  ]);
+  let body;
+  try {
+    const res = await onRequest({ request: req('internal/run-bank-recon', { method: 'POST', headers: bearer(CRON_SECRET) }), env: baseEnv(DB) });
+    body = await readJson(res);
+  } finally { restore(); }
+  assert.equal(body.groupsMatched, 0);
+  assert.equal(entryRow(DB, 'OLD').status, 'auto');
+  assert.deepEqual(entryRow(DB, 'OLD').refs, [{ sourceTable: 'expenses', sourceId: 'e7' }]);
+});
+
+test('re-matching: an income typed in after its bank line arrived is matched automatically on the next GET', async () => {
+  const DB = await freshDB();
+  addLine(DB, 'L1', '2026-10-05', 7500, 'in', { source: 'bal' });
+  assert.equal((await getEntries(DB)).L1.status, 'unrecorded');
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i9','2026-10-07',7500)`).run();
+  const after = await getEntries(DB);
+  assert.equal(after.L1.status, 'auto');
+  assert.deepEqual(after.L1.matchedRefs, [{ sourceTable: 'income', sourceId: 'i9' }]);
+  assert.equal(after.L1.groupId, undefined);
+});
+
+test('many-to-one: an ambiguous group is offered for review and can be resolved with groupOption (checked on the server)', async () => {
+  const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,status) VALUES ('e1','2026-10-05',50000,'bank_transfer','approved')`).run();
+  addLine(DB, 'L1', '2026-10-05', 30000, 'in');
+  addLine(DB, 'L2', '2026-10-06', 20000, 'in');
+  addLine(DB, 'L3', '2026-10-06', 20000, 'in');
+  addLine(DB, 'O1', '2026-10-06', 20000, 'out');
+
+  const byId = await getEntries(DB);
+  assert.equal(byId.L1.status, 'needs_attention', 'two ways to make ₦50,000: never guessed');
+  const rec = { sourceTable: 'income', sourceId: 'i1', amount: 50000, date: '2026-10-05' };
+  assert.deepEqual(byId.L1.candidates, [
+    { type: 'group', record: rec, lineIds: ['L1', 'L2'], total: 50000 },
+    { type: 'group', record: rec, lineIds: ['L1', 'L3'], total: 50000 },
+  ]);
+  assert.deepEqual(byId.L2.candidates, [{ type: 'group', record: rec, lineIds: ['L1', 'L2'], total: 50000 }]);
+  assert.equal(byId.L2.status, 'needs_attention');
+
+  const bad = async (body, status, re) => {
+    const r = await postAs(DB, 'bank-recon/entries/L1/resolve', { groupOption: body });
+    assert.equal(r.status, status, JSON.stringify(r.body));
+    if (re) assert.match(r.body.error, re);
+  };
+  await bad({ sourceTable: 'income', sourceId: 'i1', lineIds: ['L1'] }, 400, /at least two/);
+  await bad({ sourceTable: 'income', sourceId: 'i1', lineIds: ['L2', 'L3'] }, 400, /must include this bank line/);
+  await bad({ sourceTable: 'income', sourceId: 'i1', lineIds: ['L1', 'L2', 'L3'] }, 400, /add up to ₦70,000.*₦50,000/);
+  await bad({ sourceTable: 'income', sourceId: 'i1', lineIds: ['L1', 'O1'] }, 400, /not all money in/);
+  await bad({ sourceTable: 'expenses', sourceId: 'e1', lineIds: ['L1', 'L2'] }, 400, /money out/);
+  await bad({ sourceTable: 'income', sourceId: 'nope', lineIds: ['L1', 'L2'] }, 404);
+  await bad({ sourceTable: 'income', sourceId: 'i1', lineIds: ['L1', 'gone'] }, 404);
+
+  const ok = await postAs(DB, 'bank-recon/entries/L1/resolve', { groupOption: { sourceTable: 'income', sourceId: 'i1', lineIds: ['L1', 'L2'] } });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.status, 'resolved');
+  assert.equal(ok.body.resolvedBy, 'IT Administrator');
+  assert.equal(ok.body.groupSize, 2);
+  assert.deepEqual(ok.body.matchedRefs, [{ sourceTable: 'income', sourceId: 'i1', groupId: ok.body.groupId }]);
+
+  const after = await getEntries(DB);
+  assert.equal(after.L2.status, 'resolved');
+  assert.equal(after.L2.groupId, ok.body.groupId);
+  assert.equal(after.L2.groupSize, 2);
+  assert.equal(after.L3.status, 'unrecorded', 'i1 is used now, so L3\'s option is gone');
+  assert.deepEqual(after.L3.candidates, []);
+
+  // The record can't be grouped twice, and settled lines can't be regrouped.
+  const twice = await postAs(DB, 'bank-recon/entries/L3/resolve', { groupOption: { sourceTable: 'income', sourceId: 'i1', lineIds: ['L3', 'L2'] } });
+  assert.equal(twice.status, 409);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i2','2026-10-05',99999)`).run();
+  addLine(DB, 'L5', '2026-10-06', 79999, 'in');
+  const unused = await postAs(DB, 'bank-recon/entries/L3/resolve', { groupOption: { sourceTable: 'income', sourceId: 'i2', lineIds: ['L3', 'L5'] } });
+  assert.equal(unused.status, 200, 'any open lines that add up exactly may be grouped by hand');
+
+  // Unmatching a hand-resolved group releases every member too.
+  const un = await postAs(DB, 'bank-recon/entries/L1/unmatch');
+  assert.deepEqual(un.body.unmatchedIds, ['L1', 'L2']);
+});
+
+test('POST /api/bank-recon/statement: two transfers on one statement that together are one income are grouped (groupsMatched)', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount) VALUES ('i1','2026-10-05',50000)`).run();
+  const res = await uploadStatement(DB, await tokenFor(DB, 'u1'), [
+    { date: '2026-10-05', amount: 30000, type: 'income', narration: 'Transfer from Sis. B part 1' },
+    { date: '2026-10-06', amount: 20000, type: 'income', narration: 'Transfer from Sis. B part 2' },
+  ]);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.groupsMatched, 1);
+  assert.equal(res.body.autoCount, 2);
+  assert.equal(res.body.unrecordedCount, 0);
+  assert.equal(res.body.directionInferred, false);
+  const rows = DB.sqlite.prepare(`SELECT status, matched_refs_json FROM bank_recon_entries`).all();
+  assert.deepEqual(rows.map(r => r.status), ['auto', 'auto']);
+  assert.equal(new Set(rows.map(r => JSON.parse(r.matched_refs_json)[0].groupId)).size, 1);
+});
+
+test('POST /api/bank-recon/statement: an "icons_or_unclear" page (Access alert / app screenshot) gets each line\'s direction from its narration', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const page = {
+    direction_basis: 'icons_or_unclear', period_start: null, period_end: null, opening_balance: null, closing_balance: null,
+    rows: [
+      // The model put both under "debit" because both rows show a red arrow.
+      { date: '2026-10-05', date_as_printed: '05-Oct-2026', narration: 'MOBILE TRF FROM ACCESS /HrH Lords offering', reference: '', debit: 11000, credit: 0, balance: null },
+      { date: '2026-10-05', date_as_printed: '05-Oct-2026', narration: 'TRF TO ABC LTD', reference: '', debit: 0, credit: 4000, balance: null },
+    ],
+  };
+  const restore = stubFetch((url, init) => {
+    const prompt = JSON.parse(init.body).messages[0].content.find(b => b.type === 'text').text;
+    assert.match(prompt, /"direction_basis": "columns" or "icons_or_unclear"/);
+    assert.match(prompt, /Credited with NGN 11,000/);
+    assert.match(prompt, /Never output the same printed line twice/);
+    return visionReply(page);
+  });
+  let res;
+  try { res = await postStatement(DB, await tokenFor(DB, 'u1'), { imageBase64: 'x', mimeType: 'image/png' }); } finally { restore(); }
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.directionInferred, true);
+  assert.equal(res.body.verification, 'unavailable');
+  const rows = DB.sqlite.prepare(`SELECT amount, direction, narration FROM bank_recon_entries ORDER BY amount`).all();
+  assert.deepEqual(rows.map(r => [r.amount, r.direction]), [[4000, 'out'], [11000, 'in']]);
+
+  // A page that doesn't say how it shows direction is treated the same way.
+  const DB2 = await freshDB();
+  setDeepseekKey(DB2);
+  const { direction_basis, ...noBasis } = page;
+  const restore2 = stubFetch(() => visionReply(noBasis));
+  try { res = await postStatement(DB2, await tokenFor(DB2, 'u1'), { imageBase64: 'x', mimeType: 'image/png' }); } finally { restore2(); }
+  assert.equal(res.body.directionInferred, true);
+  assert.deepEqual(DB2.sqlite.prepare(`SELECT amount, direction FROM bank_recon_entries ORDER BY amount`).all().map(r => [r.amount, r.direction]), [[4000, 'out'], [11000, 'in']]);
+});
+
+test('POST /api/bank-recon/statement: overlapping scrolled screenshots with no balances file each line once', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const row = (date, narration, amount) => ({ date, date_as_printed: date, narration, reference: '', debit: amount, credit: 0, balance: null });
+  const top = { direction_basis: 'icons_or_unclear', rows: [row('2026-10-01', 'for my TITHE', 2000), row('2026-10-02', 'TRF TO ABC LTD', 5000)] };
+  const bottom = { direction_basis: 'icons_or_unclear', rows: [row('2026-10-02', 'TRF TO ABC LTD', 5000), row('2026-10-03', 'SMS ALERT CHARGES', 4)] };
+  const restore = stubFetch((url, init) => {
+    const isTop = JSON.parse(init.body).messages[0].content.some(b => b.image_url?.url.endsWith('top'));
+    return visionReply(isTop ? top : bottom);
+  });
+  let res;
+  try {
+    res = await postStatement(DB, await tokenFor(DB, 'u1'), { images: [{ imageBase64: 'top' }, { imageBase64: 'bottom' }] });
+  } finally { restore(); }
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.duplicateCount, 1);
+  assert.equal(res.body.chargeCount, 1);
+  const rows = DB.sqlite.prepare(`SELECT amount, direction FROM bank_recon_entries ORDER BY date`).all();
+  assert.deepEqual(rows.map(r => [r.amount, r.direction]), [[2000, 'in'], [5000, 'out'], [4, 'out']]);
 });
