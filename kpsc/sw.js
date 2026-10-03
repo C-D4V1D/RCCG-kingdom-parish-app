@@ -1,4 +1,4 @@
-const CACHE = 'kpsc-v4';
+const CACHE = 'kpsc-v5';
 const SHELL = [
   '/kpsc/index.html',
   '/kpsc/manifest.json',

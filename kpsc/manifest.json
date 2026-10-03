@@ -1,15 +1,33 @@
 {
+  "id": "/kpsc/",
   "name": "KPSC Meeting Portal",
   "short_name": "KPSC",
   "description": "Kingdom Parish Stewardship Committee — secure workspace for recording, processing, and archiving committee meetings.",
+  "lang": "en-NG",
+  "dir": "ltr",
   "start_url": "/kpsc/",
   "scope": "/kpsc/",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "theme_color": "#1e3a5f",
   "background_color": "#1e3a5f",
-  "categories": ["productivity", "business"],
+  "categories": [
+    "productivity",
+    "business"
+  ],
   "icons": [
+    {
+      "src": "/kpsc/icons/icon-96.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/kpsc/icons/icon-144.png",
+      "sizes": "144x144",
+      "type": "image/png",
+      "purpose": "any"
+    },
     {
       "src": "/kpsc/icons/icon-192.png",
       "sizes": "192x192",
@@ -23,7 +41,13 @@
       "purpose": "any"
     },
     {
-      "src": "/kpsc/icons/icon-512.png",
+      "src": "/kpsc/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/kpsc/icons/icon-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
@@ -34,5 +58,6 @@
       "type": "image/svg+xml",
       "purpose": "any"
     }
-  ]
+  ],
+  "prefer_related_applications": false
 }
