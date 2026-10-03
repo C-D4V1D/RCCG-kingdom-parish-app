@@ -193,6 +193,10 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
   the code; `satinfo.use()` swaps in the parish's names and wording (`MI.AUDIENCE = "satellite"`).
 - The poller/satbot/monthinfo/clerkinfo changes are *later definitions that replace earlier ones* in the same file.
   Tests: tests/box-botmenu.test.js (synthetic fixtures in tests/fixtures/box/botmenu/).
+- `/month` for another parish (month-parishes-20261003): People → "Can view other parishes' month"
+  (`people[].month_all_parishes`, true/false; the box also accepts a list of parish codes; unset = admin only) adds an
+  "Other parishes »" button; `tools/monthpick.py` decides who and which parishes (Automations → Parishes) and is asked on
+  every press. A satellite screen is built in its own process (`satinfo.py month CODE`). Kingdom people only.
 
 ## Known open items
 

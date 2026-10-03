@@ -19916,10 +19916,10 @@ const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
 };
 // Titles used in messages ("Bro. Fabian (Admin Officer)") and who pays the RRR, for people saved before these existed.
 const AUTOMATION_PEOPLE_DEFAULTS = {
-  david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true },
-  divine: { title: 'Accountant', called: 'Bro. Divine', pays_rrr: false },
-  fabian: { title: 'Admin Officer', called: 'Bro. Fabian', pays_rrr: true },
-  pastor: { title: 'Pastor in Charge', called: 'Pastor', pays_rrr: false },
+  david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true, month_all_parishes: true },
+  divine: { title: 'Accountant', called: 'Bro. Divine', pays_rrr: false, month_all_parishes: false },
+  fabian: { title: 'Admin Officer', called: 'Bro. Fabian', pays_rrr: true, month_all_parishes: false },
+  pastor: { title: 'Pastor in Charge', called: 'Pastor', pays_rrr: false, month_all_parishes: false },
 };
 function automationsPersonField(p, f){
   return p?.[f] !== undefined ? p[f] : AUTOMATION_PEOPLE_DEFAULTS[p?.key]?.[f];
@@ -20547,6 +20547,7 @@ function renderAutomationsSettings(config, isDefault, health){
       <div class="form-row" style="margin:6px 0 10px">
         <label class="at-inline-check"><input type="checkbox" class="at-p-pays" ${automationsPersonField(p,'pays_rrr')?'checked':''}> Pays the RRR ("I've paid" button, /paid)</label>
         <label class="at-inline-check"><input type="checkbox" class="at-p-bot" ${p.can_upload?'checked':''}> Can use the Telegram bot</label>
+        <label class="at-inline-check" title="Adds an &quot;Other parishes&quot; button under /month in the Telegram bot"><input type="checkbox" class="at-p-mallp" ${automationsPersonField(p,'month_all_parishes')?'checked':''}> Can view other parishes' month (/month)</label>
       </div>
       ${automationsRoutingTableHtml(routingOf(p), !!p.telegram_chat_id, true)}
       <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>
@@ -20827,6 +20828,7 @@ function addAutomationPerson(){
     <div class="form-row" style="margin:6px 0 10px">
       <label class="at-inline-check"><input type="checkbox" class="at-p-pays"> Pays the RRR ("I've paid" button, /paid)</label>
       <label class="at-inline-check"><input type="checkbox" class="at-p-bot"> Can use the Telegram bot</label>
+      <label class="at-inline-check"><input type="checkbox" class="at-p-mallp"> Can view other parishes' month (/month)</label>
     </div>
     <div class="table-wrap"><table class="at-routing-table">
       <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
@@ -21109,7 +21111,7 @@ function collectAutomationsConfig(){
     keyMap[existingKey] = key;
     const tg = row.querySelector('.at-p-tg')?.value.trim() || '';
     const email = row.querySelector('.at-p-email')?.value.trim() || '';
-    const botBox = row.querySelector('.at-p-bot'), paysBox = row.querySelector('.at-p-pays');
+    const botBox = row.querySelector('.at-p-bot'), paysBox = row.querySelector('.at-p-pays'), mallBox = row.querySelector('.at-p-mallp');
     const person = {
       ...(existing || {}),   // keep any field this page doesn't show
       key,
@@ -21123,6 +21125,8 @@ function collectAutomationsConfig(){
       title: row.querySelector('.at-p-title')?.value.trim() || '',
       called: row.querySelector('.at-p-called')?.value.trim() || '',
       pays_rrr: paysBox ? paysBox.checked : !!automationsPersonField(existing || { key }, 'pays_rrr'),
+      // Telegram /month: an "Other parishes" button (Kingdom Parish + every parish in Parishes). Parish people don't get it.
+      month_all_parishes: mallBox ? mallBox.checked : !!automationsPersonField(existing || { key }, 'month_all_parishes'),
     };
     // Parish people: which parish, who approves, and the login / Telegram invite made on this page.
     if(parishCode) person.parish = parishCode;
