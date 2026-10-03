@@ -8968,6 +8968,61 @@ async function bankReconRematchQuietly(DB, windowDays = BANK_RECON_DEFAULT_MATCH
 // { date, amount, description } shown next to a matched bank line. Amounts mirror
 // buildReconciliationCandidatePool (the bank-side part of a split payment), so the figure
 // shown is the one that was actually matched.
+// recordedBy on the bank-charge expenses a statement upload files by itself (handleBankReconStatement).
+const BANK_RECON_AUTO_CHARGE_RECORDER = 'AI Statement Upload';
+
+/**
+ * A matched line whose app record was deleted (e.g. the owner removed a wrongly auto-filed
+ * charge on the Expenses page) no longer explains anything: put it back to 'unrecorded' so it
+ * shows up again and can be matched or recorded afresh.
+ */
+async function bankReconReleaseOrphans(DB) {
+  const { results } = await DB.prepare(
+    `SELECT id, matched_refs_json FROM bank_recon_entries WHERE status IN ('auto','resolved')`
+  ).all();
+  const rows = (results || []).map(r => ({ id: r.id, refs: (safeJsonParse(r.matched_refs_json, []) || []).filter(x => x && x.sourceTable && x.sourceId) }));
+  const idsByTable = new Map();
+  for (const r of rows) for (const ref of r.refs) {
+    if (!BANK_RECON_DETAIL_LOOKUPS[ref.sourceTable]) continue;
+    if (!idsByTable.has(ref.sourceTable)) idsByTable.set(ref.sourceTable, new Set());
+    idsByTable.get(ref.sourceTable).add(String(ref.sourceId));
+  }
+  const existing = new Set();
+  for (const [table, idSet] of idsByTable) {
+    const ids = [...idSet];
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      const { results: found } = await DB.prepare(`SELECT id FROM ${table} WHERE id IN (${chunk.map(() => '?').join(',')})`).bind(...chunk).all();
+      for (const f of found || []) existing.add(`${table}:${f.id}`);
+    }
+  }
+  const orphans = rows.filter(r => r.refs.some(ref => BANK_RECON_DETAIL_LOOKUPS[ref.sourceTable] && !existing.has(bankReconRefKey(ref))))
+    .map(r => r.id);
+  if (orphans.length) await bankReconReleaseEntries(DB, orphans, false);
+  return orphans.length;
+}
+
+/** Removes the bank-charge expense a statement upload recorded by itself, and reopens the line. */
+async function unrecordBankReconCharge(DB, id) {
+  const row = await DB.prepare(`SELECT id, matched_refs_json FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  if (!row) return err('Bank reconciliation entry not found', 404);
+  const expenseIds = (safeJsonParse(row.matched_refs_json, []) || [])
+    .filter(r => r && r.sourceTable === 'expenses' && r.sourceId).map(r => String(r.sourceId));
+  const deletedExpenseIds = [];
+  for (const eid of expenseIds) {
+    const exp = await DB.prepare(`SELECT id FROM expenses WHERE id=? AND recorded_by=? AND category='bank'`)
+      .bind(eid, BANK_RECON_AUTO_CHARGE_RECORDER).first();
+    if (!exp) continue;
+    await deleteExpense(DB, eid);
+    deletedExpenseIds.push(eid);
+  }
+  if (!deletedExpenseIds.length) return err('This bank line has no automatically recorded charge to remove.', 400);
+  await bankReconReleaseEntries(DB, [id], false);
+  await bankReconRematchQuietly(DB);
+  const updated = await DB.prepare(`SELECT * FROM bank_recon_entries WHERE id=?`).bind(id).first();
+  return ok({ ...bankReconEntryFromRow(updated), deletedExpenseIds });
+}
+
 const BANK_RECON_DETAIL_LOOKUPS = {
   income: {
     cols: 'id, date, bank_transfer_amount, source, donor_name, notes',
@@ -8975,9 +9030,10 @@ const BANK_RECON_DETAIL_LOOKUPS = {
       description: r.donor_name ? `${r.source || 'income'}: ${r.donor_name}` : (r.notes || r.source || '') }),
   },
   expenses: {
-    cols: 'id, date, amount, payment_method, bank_amount, description',
+    cols: 'id, date, amount, payment_method, bank_amount, description, recorded_by',
     map: r => ({ date: (r.date || '').slice(0, 10),
-      amount: Number((r.payment_method === 'split' ? r.bank_amount : r.amount) || 0), description: r.description || '' }),
+      amount: Number((r.payment_method === 'split' ? r.bank_amount : r.amount) || 0), description: r.description || '',
+      autoRecorded: r.recorded_by === BANK_RECON_AUTO_CHARGE_RECORDER }),
   },
   remittances: {
     cols: 'id, paid_date, created_at, amount, payment_method, bank_amount, cash_amount, label, notes',
@@ -8999,6 +9055,7 @@ const BANK_RECON_DETAIL_LOOKUPS = {
 async function getBankReconEntries(DB) {
   // Keep the review current: a record typed in after its bank line arrived is matched now, and
   // options naming a record used elsewhere disappear. No-op (one cheap query) when nothing is open.
+  try { await bankReconReleaseOrphans(DB); } catch (e) { console.error('[bank-recon] orphan release failed:', e?.message || e); }
   await bankReconRematchQuietly(DB);
   const { results } = await DB.prepare(`SELECT * FROM bank_recon_entries ORDER BY date DESC, created_at DESC`).all();
   const entries = (results || []).map(bankReconEntryFromRow);
@@ -9036,6 +9093,7 @@ async function getBankReconEntries(DB) {
   for (const e of entries) {
     e.matchedDetails = (Array.isArray(e.matchedRefs) ? e.matchedRefs : []).map(r =>
       details.get(bankReconRefKey(r)) || { sourceTable: r?.sourceTable, sourceId: r?.sourceId, missing: true });
+    e.autoRecordedCharge = e.matchedDetails.some(d => d && d.autoRecorded);
   }
   return ok(entries);
 }
@@ -9691,7 +9749,7 @@ async function handleBankReconStatement(DB, env, authz, body) {
           id: expenseId, date, category: 'bank', subCategory: chargeSubCategory,
           description: narration || chargeSubCategory, amount, paymentMethod: 'bank_transfer',
           status: 'approved', bankAmount: amount, cashAmount: 0, pettyAmount: 0,
-          recordedBy: 'AI Statement Upload', receiptNo: String(item.reference || ''),
+          recordedBy: BANK_RECON_AUTO_CHARGE_RECORDER, receiptNo: String(item.reference || ''),
         });
       }
       chargeCount++; autoCount++;
@@ -9767,6 +9825,10 @@ async function handleBankRecon(DB, env, authz, method, parts, body) {
     if (method === 'POST' && id && action === 'ignore') {
       if (role !== 'it_admin') return err('Only the IT administrator can ignore bank reconciliation entries.', 403);
       return await ignoreBankReconEntry(DB, authz, id);
+    }
+    if (method === 'POST' && id && action === 'unrecord-charge') {
+      if (role !== 'it_admin') return err('Only the IT administrator can remove an automatically recorded charge.', 403);
+      return await unrecordBankReconCharge(DB, id);
     }
     if (method === 'POST' && id && action === 'unmatch') {
       if (role !== 'it_admin') return err('Only the IT administrator can unmatch bank reconciliation entries.', 403);
