@@ -17246,13 +17246,16 @@ async function resetRolePermissions(){
 }
 
 function renderAdminBackup(){
+  setTimeout(()=>loadTimeTravelCard().catch(()=>{}), 0);
   return `<div class="card">
     <div class="card-header"><span class="card-title">Data Backup & Restore</span></div>
-    <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">Export all church financial data as a JSON backup file. Store it securely.</p>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:1rem">The backup file holds <strong>everything</strong>: finance, attendance, bank reconciliation, KPSC (partners, payments, minutes, projects) and every satellite parish. PIN codes are never included. Keep the file somewhere safe, away from Cloudflare (for example Google Drive).</p>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" onclick="App.exportData(this)">⬇ Export Backup</button>
-      <button class="btn" onclick="App.importData()">⬆ Import / Restore</button>
+      <button class="btn btn-primary" onclick="App.exportData(this)">⬇ Download full backup</button>
+      <button class="btn" onclick="App.importData()">⬆ Restore from backup file</button>
     </div>
+    <hr class="divider">
+    <div id="ttCard"><div style="font-size:13px;color:var(--text2)">Loading Cloudflare restore…</div></div>
     <hr class="divider">
     <div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">
       <div style="font-size:13px;font-weight:600;margin-bottom:6px">🚀 Launch / Reset for Production</div>
@@ -17723,32 +17726,175 @@ async function deleteUser(id, btn=null){
 
 async function exportData(btn=null){
   if(!requireAdmin()) return;
-  const restore = setBtnLoading(btn, 'Exporting…');
+  const restore = setBtnLoading(btn, 'Preparing backup…');
   try {
-    // Pass full=true so the backup includes receipt/deposit-slip images, which the
-    // normal list endpoints now omit for speed.
-    const [usersRaw,income,remittances,expenses,petty,auditLog,settings,cashTransactions,satelliteFunds] = await Promise.all([DB.getUsers(),DB.getIncome(),DB.getRemittances(),DB.getExpenses(true),DB.getPetty(),DB.getAudit(),DB.getSettings(),DB.getCashTransactions(true),DB.getSatelliteFunds()]);
-    // Strip sensitive auth data (PIN hashes) — they must never leave the database in any export
-    const users = usersRaw.map(({pin:_pin, pinHash:_hash, ...u})=>u);
-    const data={ users,income,remittances,expenses,petty,audit:auditLog,settings,cashTransactions,satelliteFunds, exportedAt:new Date().toISOString(), exportedBy:state.user?.name };
-    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const res = await authFetch('/api/admin/backup');
+    if(!res.ok){ const d = await res.json().catch(()=>null); throw new Error(d?.error || `Server answered ${res.status}`); }
+    const blob = await res.blob();
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-    a.download=`rccg-backup-${new Date().toISOString().split('T')[0]}.json`;
-    a.click(); URL.revokeObjectURL(a.href);
-    DB.addAudit('data_exported','Full data export performed',state.user?.name);
-    showAlert('Backup exported successfully!','success');
+    a.download=`rccg-full-backup-${ymdLocal(new Date())}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    // Revoking straight after click() can cancel the download in some browsers.
+    setTimeout(()=>URL.revokeObjectURL(a.href), 60000);
+    DB.addAudit('data_exported','Full backup downloaded',state.user?.name);
+    showAlert('Backup downloaded. Keep the file somewhere safe.','success');
     restore();
   } catch(err) {
     restore();
-    showAlert(`Failed to export data: ${err.message||'Unknown error'}. Please try again.`,'danger');
+    showAlert(`Failed to download the backup: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
+}
+
+// ── Cloudflare Time Travel: put a database back to an earlier moment (IT Admin → Backup & Restore) ──
+async function loadTimeTravelCard(){
+  const box=document.getElementById('ttCard'); if(!box) return;
+  let tt;
+  try { tt = await apiFetch('admin/time-travel'); }
+  catch(e){ box.innerHTML=`<div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Could not load the Cloudflare restore: ${esc(e.message||'')}</span></div>`; return; }
+  const title = '<div style="font-size:13px;font-weight:600;margin-bottom:6px">⏪ Go back in time (Cloudflare)</div>';
+  if(!tt.configured){
+    box.innerHTML=`<div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">${title}
+      <p style="font-size:12px;color:var(--text2);margin-bottom:8px">Cloudflare keeps a minute-by-minute history of the database (7 days on the free plan, 30 days on Workers Paid). Once set up, this button can put everything back to how it was at any moment in that time. It needs a one-time setup:</p>
+      <ol style="font-size:12px;color:var(--text2);padding-left:18px;margin:0 0 6px">
+        <li>Cloudflare dashboard → <strong>My Profile → API Tokens → Create Token → Create Custom Token</strong>.</li>
+        <li>Name it <em>Parish app restore</em>. Permissions: <strong>Account · D1 · Edit</strong>. Create it and copy the token.</li>
+        <li><strong>Workers & Pages → rccgkp-admin → Settings → Variables and Secrets → Add</strong>: type <em>Secret</em>, name <code>CF_D1_API_TOKEN</code>, paste the token, Save (Production).</li>
+        <li>Make any new deployment (or ask Claude to), then come back here.</li>
+      </ol></div>`;
+    return;
+  }
+  const now=new Date(); const pad=n=>String(n).padStart(2,'0');
+  const nowLocal=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const undo = tt.undo && Object.keys(tt.undo.bookmarks||{}).length ? tt.undo : null;
+  const undoAt = undo ? new Date(undo.at).toLocaleString('en-NG',{timeZone:NIGERIA_TIMEZONE}) : '';
+  box.innerHTML=`<div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">${title}
+    <p style="font-size:12px;color:var(--text2);margin-bottom:10px">Puts a database back exactly as it was at the time you choose. Everything recorded after that time in that database is undone. ${tt.production?'':'<strong>(This is a test copy of the app: it changes the test database only.)</strong>'}</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div class="form-group" style="margin:0"><label class="form-label">Database</label>
+        <select id="ttDb" class="form-input">${(tt.databases||[]).map(d=>`<option value="${esc(d.key)}">${esc(d.label)}</option>`).join('')}</select></div>
+      <div class="form-group" style="margin:0"><label class="form-label">Go back to (date &amp; time)</label>
+        <input type="datetime-local" id="ttAt" class="form-input" max="${nowLocal}" /></div>
+      <button class="btn btn-amber" onclick="App.timeTravelGoBack(this)">⏪ Go back to this time</button>
+    </div>
+    ${undo?`<div class="alert alert-info" style="margin-top:12px"><span class="alert-icon">↩</span><span>Last restore: ${esc(undo.what||'')} — by ${esc(undo.by||'')} on ${esc(undoAt)}. <button class="btn btn-sm" style="margin-left:6px" onclick="App.timeTravelUndo(this)">Undo last restore</button></span></div>`:''}
+  </div>`;
+}
+
+async function timeTravelGoBack(btn){
+  if(!requireAdmin()) return;
+  const db=document.getElementById('ttDb')?.value||'main';
+  const label=document.getElementById('ttDb')?.selectedOptions?.[0]?.textContent||db;
+  const val=document.getElementById('ttAt')?.value||'';
+  if(!val){ showAlert('Choose the date and time to go back to.','danger'); return; }
+  const at=new Date(val);   // the phone's own (Nigerian) time
+  if(isNaN(at.getTime()) || at>new Date()){ showAlert('Choose a time in the past.','danger'); return; }
+  const shown=at.toLocaleString('en-NG',{timeZone:NIGERIA_TIMEZONE});
+  if(!confirm(`Put ${label} back to how it was on ${shown}?\n\nEverything recorded in it after that time will be undone. You can undo this afterwards with “Undo last restore”.`)) return;
+  const word=prompt('Type GO BACK to confirm:');
+  if(word!=='GO BACK'){ if(word!==null) showAlert('Cancelled — you must type GO BACK exactly.','danger'); return; }
+  const restore=setBtnLoading(btn,'Restoring…');
+  try {
+    await apiFetch('admin/time-travel/restore','POST',{ db, at: at.toISOString() }, 120000);
+    DB.addAudit('time_travel_restore',`${label} put back to ${shown}`,state.user?.name);
+    alert(`Done: ${label} is back to how it was on ${shown}. The page will now reload.`);
+    window.location.reload();
+  } catch(e){ restore(); showAlert(`Restore failed: ${e.message||'Unknown error'}`,'danger'); }
+}
+
+async function timeTravelUndo(btn){
+  if(!requireAdmin()) return;
+  if(!confirm('Undo the last restore and put the data back as it was just before it?')) return;
+  const restore=setBtnLoading(btn,'Undoing…');
+  try {
+    await apiFetch('admin/time-travel/undo','POST',{}, 120000);
+    DB.addAudit('time_travel_undo','Last restore undone',state.user?.name);
+    alert('Done: the last restore has been undone. The page will now reload.');
+    window.location.reload();
+  } catch(e){ restore(); showAlert(`Undo failed: ${e.message||'Unknown error'}`,'danger'); }
+}
+
+// Reads a .json or .json.gz backup file into an object.
+async function readBackupFile(file){
+  if(/\.gz$/i.test(file.name)){
+    if(typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open .gz files. Unzip it first, or use Chrome.');
+    const text = await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    return JSON.parse(text);
+  }
+  return JSON.parse(await file.text());
+}
+
+// Splits a table's rows into requests small enough for one server call (row count and size).
+function backupChunks(rows, maxRows=300, maxChars=1500000){
+  const out=[]; let cur=[], size=0;
+  for(const r of rows){
+    const n = JSON.stringify(r).length;
+    if(cur.length && (cur.length>=maxRows || size+n>maxChars)){ out.push(cur); cur=[]; size=0; }
+    cur.push(r); size+=n;
+  }
+  out.push(cur);   // always at least one chunk, so an empty table is still emptied
+  return out;
+}
+
+async function restoreFullBackup(data){
+  const tt = await apiFetch('admin/time-travel');
+  const here = new Map((tt.databases||[]).map(d=>[d.key,d.label]));
+  const keys = Object.keys(data.databases||{}).filter(k=>here.has(k));
+  const missing = Object.keys(data.databases||{}).filter(k=>!here.has(k));
+  if(!keys.length){ alert('None of the databases in this file belong to this app.'); return; }
+  const lines = keys.map(k=>{
+    const n = Object.values(data.databases[k].tables||{}).reduce((t,r)=>t+(Array.isArray(r)?r.length:0),0);
+    return `• ${here.get(k)}: ${n} records`;
+  });
+  const when = data.exportedAt ? new Date(data.exportedAt).toLocaleString('en-NG',{timeZone:NIGERIA_TIMEZONE}) : 'unknown date';
+  if(!confirm(`Backup made ${when}${data.exportedBy?` by ${data.exportedBy}`:''}.\n\n${lines.join('\n')}${missing.length?`\n\n(Skipped, not in this app: ${missing.join(', ')})`:''}\n\nEverything recorded since then in these databases will be replaced by the backup. Sign-in accounts and PINs stay as they are now.\n\nContinue?`)) return;
+  const word = prompt('Type RESTORE to replace the data with the backup:');
+  if(word!=='RESTORE'){ if(word!==null) showAlert('Cancelled — you must type RESTORE exactly.','danger'); return; }
+
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML='<div class="card" style="max-width:420px;width:100%;text-align:center"><div style="font-weight:600;margin-bottom:8px">Restoring backup…</div><div id="restoreProgress" style="font-size:13px;color:var(--text2)">Starting</div><div style="font-size:12px;color:var(--text3);margin-top:8px">Keep this page open.</div></div>';
+  document.body.appendChild(overlay);
+  const progress = t => { const el=document.getElementById('restoreProgress'); if(el) el.textContent=t; };
+  let begin = { bookmarks:{} };
+  try {
+    begin = await apiFetch('admin/restore-begin','POST',{ databases: keys });
+    const jobs = [];
+    for(const k of keys) for(const [table, rows] of Object.entries(data.databases[k].tables||{})) jobs.push([k, table, Array.isArray(rows)?rows:[]]);
+    let done=0;
+    for(const [k, table, rows] of jobs){
+      const chunks = backupChunks(rows);
+      for(let i=0;i<chunks.length;i++){
+        progress(`${here.get(k)} — ${table} (${done+1} of ${jobs.length})`);
+        await apiFetch('admin/restore-table','POST',{ db:k, table, rows:chunks[i], first:i===0 }, 120000);
+      }
+      done++;
+    }
+    const fin = await apiFetch('admin/restore-finish','POST',{ bookmarks: begin.bookmarks||{} });
+    DB.addAudit('data_imported',`Full backup restored (made ${when})`,state.user?.name);
+    overlay.remove();
+    alert(`Backup restored.${fin.undoAvailable?' If anything looks wrong, use “Undo last restore” under Backup & Restore.':''}`);
+    window.location.reload();
+  } catch(e){
+    overlay.remove();
+    const canUndo = Object.keys(begin.bookmarks||{}).length>0;
+    if(canUndo) await apiFetch('admin/restore-finish','POST',{ bookmarks: begin.bookmarks }).catch(()=>{});
+    alert(`The restore stopped part-way: ${e.message||'unknown error'}.\n\n${canUndo?'Use “Undo last restore” under Backup & Restore to put the data back as it was, then try again.':'Try again: each try starts the affected tables afresh.'}`);
+    renderAdmin();
   }
 }
 
 function importData(){
   if(!requireAdmin()) return;
-  const input=document.createElement('input'); input.type='file'; input.accept='.json';
+  const input=document.createElement('input'); input.type='file'; input.accept='.json,.gz,application/json,application/gzip';
   input.onchange=async e=>{
     const file=e.target.files[0]; if(!file) return;
+    let full=null;
+    try { full = await readBackupFile(file); } catch(err){ showAlert(`Could not read that file: ${err.message||'not a backup file'}`,'danger'); return; }
+    if(full && full.format==='rccg-full-backup'){
+      try { await restoreFullBackup(full); } catch(err){ showAlert(`Restore failed: ${err.message||'Unknown error'}`,'danger'); }
+      return;
+    }
+    // Older backup files (finance records only).
     const reader=new FileReader();
     reader.onload=async ev=>{
       try{
@@ -21015,7 +21161,7 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, resetBudgetRules, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData,
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData, timeTravelGoBack, timeTravelUndo,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
   renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, openAutomationGuide, onRemHandlerBoxClick,

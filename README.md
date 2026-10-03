@@ -488,9 +488,12 @@ Cloudflare Pages Functions  →  functions/api/[[route]].js
    └── Make.com                   — bank alert email ingestion
    │
    ▼
+Cloudflare Worker rccgkp-admin-cron (workers/admin-cron)
+   └── Scheduler — calls every internal job endpoint once an hour
+
 GitHub Actions
    ├── CI — full test suite with coverage on every push and pull request
-   └── Cron — polls nine internal job endpoints every 30 minutes
+   └── Deploys the two Workers (scheduler, clerk-watchdog) when they change
 ```
 
 Design decisions worth calling out:
@@ -499,8 +502,8 @@ Design decisions worth calling out:
   mid-range Android phone over Nigerian mobile data, which is what the users actually have.
 - **One edge worker.** A single Pages Function handles all API routes, so there is no
   cold-start fan-out and no service mesh to operate.
-- **Idempotent, self-healing scheduled jobs.** GitHub's cron is throttled and unreliable, so
-  every job decides for itself whether it is due, records its own run, and catches up on a
+- **Idempotent, self-healing scheduled jobs.** An hourly Cloudflare Worker drives them (GitHub's
+  own cron was throttled, unreliable and in the end silently failing), and every job decides for itself whether it is due, records its own run, and catches up on a
   later tick. A `run-all` endpoint exists so an external scheduler that knows about only
   some jobs cannot silently skip the rest — a failure mode that had already cost two months
   of payment reminders before it was designed out.
@@ -695,6 +698,7 @@ rccg-kingdom-parish-app/
 ├── dist/                          # Minified assets actually served (committed)
 ├── functions/
 │   ├── api/[[route]].js           # The entire REST API (edge worker)
+│   ├── _lib/backup.js             # Full backup, restore from file, Cloudflare Time Travel
 │   ├── partnership/index.js       # Public partnership page renderer
 │   └── report.html.js             # Shared report renderer with rich previews
 ├── kpsc/                          # Committee PWA shell, byelaw, welfare policy, minutes
@@ -703,7 +707,8 @@ rccg-kingdom-parish-app/
 ├── tests/                         # 25 suites, 481 tests
 ├── scripts/                       # Build and icon generation
 ├── docs/                          # Automation guides, specs, screenshots
-└── .github/workflows/             # CI and the scheduled-job cron
+├── workers/                       # admin-cron (hourly scheduler) and clerk-watchdog Workers
+└── .github/workflows/             # CI, Worker deploys, manual run of every scheduled job
 ```
 
 ---

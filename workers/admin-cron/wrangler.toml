@@ -1,0 +1,14 @@
+# rccgkp-admin-cron Worker (deployed separately from the Pages app). Deployed automatically by
+# .github/workflows/deploy-admin-cron.yml when a change to this folder reaches main (or by hand: `npx wrangler deploy`).
+# Secret (set in the Cloudflare dashboard, never in this file, kept across deploys): CRON_SECRET.
+name = "rccgkp-admin-cron"
+main = "worker.js"
+account_id = "63d7bbd4f912ddc7b6272dbda2881a82"
+compatibility_date = "2026-05-24"
+
+[vars]
+PAGES_BASE_URL = "https://rccg-kingdom-parish-app.pages.dev"
+
+# Every hour at :07 (UTC). The jobs themselves decide whether anything is due.
+[triggers]
+crons = ["7 * * * *"]

@@ -17,6 +17,10 @@ import {
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople } from '../_lib/month-end-events.js';
+import {
+  backupDatabases, buildFullBackup, restoreTableChunk,
+  timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
+} from '../_lib/backup.js';
 
 // ================================================================
 // RCCG Kingdom Parish — Cloudflare Pages Functions API
@@ -2785,6 +2789,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
+      return await adminBackupRoutes(context, DB, url, method, parts, body, authz);
     }
 
     // ── B5: /api/kpsc-followups ────────────────────────────────
@@ -12682,6 +12687,86 @@ async function adminImport(DB, data) {
     await updatePettyConfig(DB, data.pettyConfig);
   }
   return ok({ imported: true, errors: errs.length > 0 ? errs : undefined });
+}
+
+// ── FULL BACKUP, RESTORE FROM FILE, CLOUDFLARE TIME TRAVEL (/api/admin/...) ──
+// See functions/_lib/backup.js. Every route here is IT-admin only (checked by the caller).
+const TIME_TRAVEL_UNDO_KEY = 'time_travel_undo';
+
+async function satParishNames(DB) {
+  const names = {};
+  try {
+    const list = safeJsonParse((await DB.prepare(`SELECT value FROM settings WHERE key='satParishes'`).first())?.value, []) || [];
+    for (const p of list) if (p?.code) names[String(p.code)] = String(p.name || '').trim();
+  } catch { /* no parish names: codes are shown */ }
+  return names;
+}
+
+async function adminBackupRoutes(context, DB, url, method, parts, body, authz) {
+  const { env, request } = context;
+  const sub = parts[1] || '';
+  const action = parts[2] || '';
+  const who = authz?.finance?.name || 'IT Admin';
+  if (method === 'GET' && sub === 'backup') {
+    const backup = await buildFullBackup(env, { exportedBy: who, satNames: await satParishNames(DB) });
+    return new Response(JSON.stringify(backup), { status: 200, headers: { ...CORS_HEADERS,
+      'Content-Disposition': `attachment; filename="rccg-full-backup-${todayWat()}.json"` } });
+  }
+  if (method === 'POST' && sub === 'restore-table') {
+    const res = await restoreTableChunk(env, body);
+    return new Response(res.body, { status: res.status, headers: CORS_HEADERS });
+  }
+  // Before a file restore: note where each database is now, so the restore can be undone with Time Travel.
+  if (method === 'POST' && sub === 'restore-begin') {
+    const keys = (Array.isArray(body?.databases) ? body.databases : []).map(String);
+    const bookmarks = {};
+    for (const k of keys) { const b = await timeTravelBookmark(env, request.url, k); if (b) bookmarks[k] = b; }
+    return ok({ bookmarks });
+  }
+  if (method === 'POST' && sub === 'restore-finish') {
+    const bookmarks = body?.bookmarks && typeof body.bookmarks === 'object' ? body.bookmarks : {};
+    if (Object.keys(bookmarks).length) {
+      await putSettingValue(DB, TIME_TRAVEL_UNDO_KEY, JSON.stringify({ at: new Date().toISOString(), by: who, what: 'Restore from a backup file', bookmarks }));
+    }
+    return ok({ saved: true, undoAvailable: Object.keys(bookmarks).length > 0 });
+  }
+  if (method === 'GET' && sub === 'time-travel') {
+    const names = await satParishNames(DB);
+    const ids = timeTravelDatabaseIds(request.url);
+    return ok({
+      configured: timeTravelConfigured(env),
+      production: new URL(request.url).hostname === PRODUCTION_HOST,
+      databases: backupDatabases(env, names).filter(d => ids[d.key]).map(({ key, label }) => ({ key, label })),
+      undo: safeJsonParse(await getSettingValue(DB, TIME_TRAVEL_UNDO_KEY), null),
+    });
+  }
+  if (method === 'POST' && sub === 'time-travel' && action === 'restore') {
+    const dbKey = String(body?.db || 'main');
+    const at = new Date(String(body?.at || ''));
+    if (isNaN(at.getTime())) return err('Choose the date and time to go back to.', 400);
+    if (at.getTime() > Date.now()) return err('That time is in the future.', 400);
+    const r = await timeTravelRestore(env, request.url, dbKey, { timestamp: at.toISOString() });
+    if (r.error) return err(r.error, r.status);
+    // Written after the restore, so it survives in the restored database.
+    await putSettingValue(DB, TIME_TRAVEL_UNDO_KEY, JSON.stringify({ at: new Date().toISOString(), by: who,
+      what: `Went back to ${at.toISOString()}`, bookmarks: r.previousBookmark ? { [dbKey]: r.previousBookmark } : {} }));
+    return ok({ restored: true, db: dbKey, to: at.toISOString(), undoAvailable: !!r.previousBookmark });
+  }
+  if (method === 'POST' && sub === 'time-travel' && action === 'undo') {
+    const undo = safeJsonParse(await getSettingValue(DB, TIME_TRAVEL_UNDO_KEY), null);
+    const entries = Object.entries(undo?.bookmarks || {});
+    if (!entries.length) return err('There is no restore to undo.', 409);
+    const redo = {};
+    for (const [dbKey, bookmark] of entries) {
+      const r = await timeTravelRestore(env, request.url, dbKey, { bookmark });
+      if (r.error) return err(r.error, r.status);
+      if (r.previousBookmark) redo[dbKey] = r.previousBookmark;
+    }
+    await putSettingValue(DB, TIME_TRAVEL_UNDO_KEY, JSON.stringify({ at: new Date().toISOString(), by: who,
+      what: `Undid: ${undo.what || 'the last restore'}`, bookmarks: redo }));
+    return ok({ undone: true });
+  }
+  return err('Not found', 404);
 }
 
 async function markAllRead(DB) {
