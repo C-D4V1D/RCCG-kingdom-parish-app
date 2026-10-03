@@ -550,6 +550,44 @@ test('validateConfig stays backward compatible with a config saved before the ba
   assert.deepEqual(validateConfig(legacy), []);
 });
 
+test('validateConfig: automations.telegram_bot (default passes, bad values rejected, partial block and missing block OK)', () => {
+  assert.deepEqual(validateConfig(structuredClone(DEFAULT_CONFIG)), []);
+  assert.equal(DEFAULT_CONFIG.automations.telegram_bot.menu.help, 'everyone');
+  const withTb = (tb) => { const c = structuredClone(DEFAULT_CONFIG); c.automations.telegram_bot = tb; return validateConfig(c); };
+  const bad = (tb, part) => assert.ok(withTb(tb).some(e => e.includes(part)), `${JSON.stringify(tb)} should mention ${part}`);
+
+  // Partial and missing blocks are fine; unknown keys are ignored.
+  assert.deepEqual(withTb({}), []);
+  assert.deepEqual(withTb({ menu: { month: 'admin' } }), []);
+  assert.deepEqual(withTb({ menu: { nope: 'whatever' }, extra: 1 }), []);
+  const legacy = structuredClone(DEFAULT_CONFIG); delete legacy.automations.telegram_bot;
+  assert.deepEqual(validateConfig(legacy), []);
+
+  // Menu values.
+  for (const k of ['month', 'upload', 'paid']) for (const v of ['everyone', 'kingdom', 'payers', 'admin', 'off']) assert.deepEqual(withTb({ menu: { [k]: v } }), []);
+  for (const k of ['statement', 'balance', 'refresh', 'system']) {
+    for (const v of ['kingdom', 'payers', 'admin', 'off', 'everyone']) assert.deepEqual(withTb({ menu: { [k]: v } }), []);
+    bad({ menu: { [k]: 'nobody' } }, `automations.telegram_bot.menu.${k} must be one of kingdom, payers, admin, off`);
+  }
+  assert.ok(withTb({ menu: { balance: 'x' } }).includes('automations.telegram_bot.menu.balance must be one of kingdom, payers, admin, off'));
+  bad({ menu: { month: 'nobody' } }, 'menu.month must be one of');
+  bad({ menu: { help: 'off' } }, 'menu.help must be one of');
+  bad({ menu: { month: 5 } }, 'menu.month');
+  bad({ menu: 'x' }, 'telegram_bot.menu must be an object');
+  bad('x', 'telegram_bot must be an object');
+
+  // Other fields.
+  for (const v of [3, 12]) assert.deepEqual(withTb({ previous_months: v }), []);
+  for (const v of [2, 13, 6.5, '6', null]) bad({ previous_months: v }, 'previous_months');
+  for (const v of ['button', 'always', 'off']) assert.deepEqual(withTb({ month_portal_check: v }), []);
+  bad({ month_portal_check: 'sometimes' }, 'month_portal_check');
+  bad({ reply_unknown: 'yes' }, 'reply_unknown');
+  assert.deepEqual(withTb({ reply_unknown: false, unknown_contact: 'x'.repeat(80) }), []);
+  bad({ unknown_contact: 'x'.repeat(81) }, 'unknown_contact');
+  bad({ unknown_contact: '  ' }, 'unknown_contact');
+  bad({ unknown_contact: 7 }, 'unknown_contact');
+});
+
 test('POST /bank-balance asks the app to reconcile when the balance changes, retrying until it succeeds', async () => {
   const env = { ...createEnv(), APP_URL: 'https://app.example/' };
   const calls = [];

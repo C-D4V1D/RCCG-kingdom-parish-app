@@ -179,6 +179,21 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
 - Not done yet: using a parish's own portal login (the password is stored sealed; portal-api `login()` still uses the Area
   account).
 
+## Telegram bot menus and screens (botmenu-20261003)
+
+- `tools/botmenu.py` (new) decides who sees which command: people with a Telegram chat id (satellite pastors linked by
+  invite included) and `automations.telegram_bot` (`clerkcfg.bot_settings()`: `menu` audiences everyone · kingdom ·
+  payers · admin · off, `previous_months`, `month_portal_check` button · always · off, `reply_unknown`,
+  `unknown_contact`). statement/balance/refresh/system are always Kingdom-only; upload also needs `can_upload`.
+- Each linked person gets their own (/) menu (setMyCommands, chat scope); the default scope is month + help. The poller
+  stats `config.json` and `state/satlinks.json` each poll and re-sends only when the menus' hash changes
+  (`state/botmenu.json`; hourly retry on failure). `botmenu.py show | apply [--force] | reset | selftest`.
+- One `/month` screen in both bots (`monthinfo.month_text(f, parish, srcdoc)`; `/status` is an alias); `/system` (admin)
+  holds the old /status's behind-the-scenes part. Next-step names come from `monthinfo.who_for(role)` (People), never
+  the code; `satinfo.use()` swaps in the parish's names and wording (`MI.AUDIENCE = "satellite"`).
+- The poller/satbot/monthinfo/clerkinfo changes are *later definitions that replace earlier ones* in the same file.
+  Tests: tests/box-botmenu.test.js (synthetic fixtures in tests/fixtures/box/botmenu/).
+
 ## Known open items
 
 - The repo is public and `workers/clerk-watchdog/config.js` contains people's emails and Telegram chat ids. The owner

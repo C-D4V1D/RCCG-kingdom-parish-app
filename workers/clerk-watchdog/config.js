@@ -111,6 +111,12 @@ export const DEFAULT_CONFIG = {
     supervisor: { interval_seconds: 300, ping_every_cycles: 2, // ping every 10 min so the dashboard stays green
       balance_check_interval_minutes: 15, balance_check_active_from: "06:00", balance_check_active_until: "22:00",
       balance_match_window_days: 7 },
+    // Telegram bot menu: who sees each command (everyone | kingdom | payers | admin | off). Help is always on.
+    telegram_bot: {
+      menu: { month: "everyone", upload: "everyone", paid: "payers", statement: "kingdom", balance: "kingdom",
+        refresh: "admin", system: "admin", help: "everyone" },
+      previous_months: 6, month_portal_check: "button", reply_unknown: true,
+      unknown_contact: "the parish IT administrator" },
   },
   // Month-end filing (remittance + attendance on the RCCG portal, check email, Generate RRR).
   // handler: who runs it — "clerk_ai" (the Clerk AI routine, as before) or "box" (the Clerk box scripts).
@@ -143,6 +149,18 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 const isBool = (v) => typeof v === "boolean";
+// Telegram bot menu: allowed values per command (help can never be off).
+const TG_MENU_ALLOWED = {
+  month: ["everyone", "kingdom", "payers", "admin", "off"],
+  upload: ["everyone", "kingdom", "payers", "admin", "off"],
+  paid: ["everyone", "kingdom", "payers", "admin", "off"],
+  statement: ["kingdom", "payers", "admin", "off"],
+  balance: ["kingdom", "payers", "admin", "off"],
+  refresh: ["kingdom", "payers", "admin", "off"],
+  system: ["kingdom", "payers", "admin", "off"],
+  help: ["everyone", "kingdom", "payers", "admin"],
+};
+const TG_MENU_RESTRICTED = new Set(["statement", "balance", "refresh", "system"]);
 const isNonNegFinite = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const isTime = (v) => typeof v === "string" && TIME_RE.test(v);
 const isWeekday = (v) => typeof v === "string" && WEEKDAYS.includes(v);
@@ -352,6 +370,42 @@ export function validateConfig(cfg) {
                                  ["bot_hung_restart_minutes", 0, 240]]) {
         if (sup[k] !== undefined && !(isNonNegFinite(sup[k]) && sup[k] >= lo && sup[k] <= hi)) {
           errors.push(`automations.supervisor.${k} must be a number from ${lo} to ${hi}`);
+        }
+      }
+    }
+
+    // Optional (configs saved before the Telegram bot menu existed don't have it); every field inside is optional too,
+    // unknown menu keys are ignored. "everyone" is accepted for the restricted commands (the box treats it as "kingdom").
+    const tb = a.telegram_bot;
+    if (tb !== undefined) {
+      if (!tb || typeof tb !== "object" || Array.isArray(tb)) errors.push("automations.telegram_bot must be an object");
+      else {
+        const menu = tb.menu;
+        if (menu !== undefined) {
+          if (!menu || typeof menu !== "object" || Array.isArray(menu)) errors.push("automations.telegram_bot.menu must be an object");
+          else {
+            for (const k of Object.keys(TG_MENU_ALLOWED)) {
+              const v = menu[k];
+              if (v === undefined) continue;
+              const allowed = TG_MENU_ALLOWED[k];
+              const ok = typeof v === "string" && (allowed.includes(v) || (v === "everyone" && TG_MENU_RESTRICTED.has(k)));
+              if (!ok) errors.push(`automations.telegram_bot.menu.${k} must be one of ${allowed.join(", ")}`);
+            }
+          }
+        }
+        if (tb.previous_months !== undefined
+            && !(Number.isInteger(tb.previous_months) && tb.previous_months >= 3 && tb.previous_months <= 12)) {
+          errors.push("automations.telegram_bot.previous_months must be a whole number from 3 to 12");
+        }
+        if (tb.month_portal_check !== undefined && !["button", "always", "off"].includes(tb.month_portal_check)) {
+          errors.push("automations.telegram_bot.month_portal_check must be one of button, always, off");
+        }
+        if (tb.reply_unknown !== undefined && !isBool(tb.reply_unknown)) {
+          errors.push("automations.telegram_bot.reply_unknown must be true or false");
+        }
+        if (tb.unknown_contact !== undefined
+            && !(typeof tb.unknown_contact === "string" && tb.unknown_contact.trim() && tb.unknown_contact.length <= 80)) {
+          errors.push("automations.telegram_bot.unknown_contact must be short text (1 to 80 characters)");
         }
       }
     }
