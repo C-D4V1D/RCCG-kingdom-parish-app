@@ -9934,6 +9934,7 @@ async function runBankReconciliationSweep(DB, env, request) {
     lastBalance = balance;
     if (Math.abs(delta) < RECON_AMOUNT_EPSILON) continue; // nothing happened
 
+    // Cheap early skip; the real guard is the conditional insert below (two sweeps can run at once).
     const existing = await DB.prepare(`SELECT id FROM bank_recon_entries WHERE balance_history_id=?`).bind(entry.id).first();
     if (existing) continue; // already processed in an earlier, interrupted run
 
@@ -9944,14 +9945,18 @@ async function runBankReconciliationSweep(DB, env, request) {
       .filter(c => !usedRefs.has(bankReconRefKey(c)));
     const result = matchBalanceMovement({ amount, direction, date }, candidates);
     const matchedRefs = result.status === 'auto' ? result.matches.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId })) : [];
-    for (const r of matchedRefs) usedRefs.set(bankReconRefKey(r), 'this sweep');
     const candidatesOut = result.status === 'needs_attention'
       ? result.matches.slice(0, 5).map(combo => combo.map(m => ({ sourceTable: m.sourceTable, sourceId: m.sourceId, amount: m.amount, date: m.date })))
       : [];
-    await insertBankReconEntry(DB, {
-      balanceHistoryId: entry.id, date, amount, direction, status: result.status,
-      matchedRefs, candidates: candidatesOut, narration: '',
-    });
+    // Atomic "insert unless this balance reading already has a line": when the Worker's hand-off
+    // and another trigger run the sweep at the same moment, only one of them records (and
+    // announces) the movement.
+    const inserted = await DB.prepare(
+      `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json,narration)
+       SELECT ?,?,?,?,?,?,?,?,'' WHERE NOT EXISTS (SELECT 1 FROM bank_recon_entries WHERE balance_history_id=?)`
+    ).bind(newId('brc'), entry.id, date, amount, direction, result.status, JSON.stringify(matchedRefs), JSON.stringify(candidatesOut), entry.id).run();
+    if (!Number(inserted?.meta?.changes)) continue; // another sweep got there first
+    for (const r of matchedRefs) usedRefs.set(bankReconRefKey(r), 'this sweep');
     processed++;
 
     // A plain FYI for every real movement the box finds, separate from the actionable
