@@ -19991,6 +19991,75 @@ async function automationsSealPassword(publicKeyB64, password){
 /** The box's own health object (the health route wraps it as {last_ping, health}); tolerates the bare object too. */
 function automationsBoxHealth(h){ return (h && typeof h === 'object' ? (h.health && typeof h.health === 'object' ? h.health : h) : {}) || {}; }
 const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00', after_days: 5 };
+// Telegram bot menu (Automations -> Telegram bot). App-side default = the box's built-in menu, so an unsaved config
+// shows the right values and the next Save keeps them on. 'everyone' is accepted for statement/balance/refresh/system
+// and treated as 'kingdom'; help is always on.
+const AUTOMATION_TELEGRAM_BOT_DEFAULTS = {
+  menu: { month:'everyone', upload:'everyone', paid:'payers', statement:'kingdom', balance:'kingdom', refresh:'admin', system:'admin', help:'everyone' },
+  previous_months: 6, month_portal_check: 'button', reply_unknown: true, unknown_contact: 'the parish IT administrator',
+};
+const AUTOMATION_TG_WHO_ALL = [['everyone','Everyone'],['kingdom','Kingdom Parish only'],['payers','RRR payers only'],['admin','Admin only'],['off','Off']];
+const AUTOMATION_TG_WHO_RESTRICTED = [['kingdom','Kingdom Parish'],['payers','RRR payers'],['admin','Admin only'],['off','Off']];
+const AUTOMATION_TG_COMMANDS = [
+  { key:'month',     label:'📅 Month',               desc:'This month at a glance: Sundays, remittance, attendance, upload slots, next step', restricted:false },
+  { key:'upload',    label:'📎 Upload',              desc:'How to upload a source document', restricted:false },
+  { key:'paid',      label:"✅ I've paid",           desc:'Confirm an RRR payment', restricted:false },
+  { key:'statement', label:'📄 Statement',           desc:'Monthly financial statements', restricted:true },
+  { key:'balance',   label:'🏦 Bank balance',        desc:'Real balance from the RCCG portal', restricted:true },
+  { key:'refresh',   label:'🔄 Refresh attendance',  desc:'Re-check and re-file attendance', restricted:true },
+  { key:'system',    label:'🩺 System',              desc:'Box health, schedules and checks', restricted:true },
+];
+/** The saved Telegram bot settings with every missing or invalid value replaced by the default. */
+function automationsTelegramBot(saved){
+  const d = AUTOMATION_TELEGRAM_BOT_DEFAULTS, s = (saved && typeof saved === 'object') ? saved : {};
+  const menu = { ...d.menu };
+  AUTOMATION_TG_COMMANDS.forEach(c=>{
+    let v = s.menu?.[c.key];
+    if(c.restricted && v === 'everyone') v = 'kingdom';
+    if((c.restricted ? AUTOMATION_TG_WHO_RESTRICTED : AUTOMATION_TG_WHO_ALL).some(o=>o[0]===v)) menu[c.key] = v;
+  });
+  menu.help = 'everyone';
+  const pm = Math.round(Number(s.previous_months));
+  const contact = typeof s.unknown_contact === 'string' ? s.unknown_contact.trim().slice(0, 80) : '';
+  return {
+    menu,
+    previous_months: pm >= 3 && pm <= 12 ? pm : d.previous_months,
+    month_portal_check: ['button','always','off'].includes(s.month_portal_check) ? s.month_portal_check : d.month_portal_check,
+    reply_unknown: typeof s.reply_unknown === 'boolean' ? s.reply_unknown : d.reply_unknown,
+    unknown_contact: contact || d.unknown_contact,
+  };
+}
+function automationsTelegramBotSectionHtml(saved, saveBar){
+  const tb = automationsTelegramBot(saved);
+  const rows = AUTOMATION_TG_COMMANDS.map(c=>{
+    const opts = (c.restricted ? AUTOMATION_TG_WHO_RESTRICTED : AUTOMATION_TG_WHO_ALL)
+      .map(([v,l])=>`<option value="${v}" ${tb.menu[c.key]===v?'selected':''}>${esc(l)}</option>`).join('');
+    return `<div class="at-toggle-row at-menu-row">
+      <div><div class="at-toggle-label">${esc(c.label)}</div><div class="at-subtitle">${esc(c.desc)}</div></div>
+      <select class="form-select at-field at-menu-select" data-path="automations.telegram_bot.menu.${c.key}" data-kind="str" aria-label="${esc(c.label)}">${opts}</select>
+    </div>`;
+  }).join('');
+  const portalOpts = [['button','Only when the button is tapped (recommended, faster)'],['always','Always (slower)'],['off','Never']]
+    .map(([v,l])=>`<option value="${v}" ${tb.month_portal_check===v?'selected':''}>${esc(l)}</option>`).join('');
+  return `<details class="at-details" id="atTelegramBot">
+      <summary>Telegram bot</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">Who sees each command in their Telegram menu. People's roles come from Automations → People (Pays the RRR, Full status). Satellite parish pastors only ever see Month, Upload, I've paid (if they pay) and Help.</p>
+        ${rows}
+        <div class="at-toggle-row at-menu-row">
+          <div><div class="at-toggle-label">❓ Help</div><div class="at-subtitle">Always on for everyone</div></div>
+          <span class="at-menu-fixed">Everyone</span>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.telegram_bot.previous_months', tb.previous_months, 'Previous months shown as buttons (3–12)', 3, 12)}
+          <div class="form-group"><label class="form-label">Check portal upload slots on the Month screen</label><select class="form-select at-field" data-path="automations.telegram_bot.month_portal_check" data-kind="str">${portalOpts}</select></div>
+        </div>
+        ${automationsBoolField('automations.telegram_bot.reply_unknown', tb.reply_unknown, "Reply to people who aren't set up", 'When someone who is not linked to a person here messages the bot, it answers with who to contact. Turn off to stay silent.')}
+        <div class="form-group" style="margin-top:10px"><label class="form-label">Who they should contact (max 80 characters)</label><input class="form-input at-field" data-path="automations.telegram_bot.unknown_contact" data-kind="str" maxlength="80" value="${esc(tb.unknown_contact)}"></div>
+        ${saveBar}
+      </div>
+    </details>`;
+}
 const AUTOMATION_DASHBOARD_CARDS = [
   { key:'memo',                  icon:'📨', label:'Memo forwarding' },
   { key:'statement',              icon:'🧾', label:'Monthly statement' },
@@ -20658,6 +20727,8 @@ function renderAutomationsSettings(config, isDefault, health){
       </div>
     </details>
 
+    ${automationsTelegramBotSectionHtml(a.telegram_bot, saveBar)}
+
     <details class="at-details">
       <summary>Box connection</summary>
       <div class="at-details-body">
@@ -21159,6 +21230,8 @@ function collectAutomationsConfig(){
     }
     else{ obj[leaf] = el.value; }
   });
+  // Telegram bot menu: always saved complete and valid (a blank contact or out-of-range number can't reach the Worker).
+  config.automations.telegram_bot = automationsTelegramBot(config.automations.telegram_bot);
   return config;
 }
 function slugifyAutomationKey(name){
@@ -21290,7 +21363,7 @@ return {
   satQuotaCopyFirst, saveSatQuotas,
   _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
   _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
-  _automationsSealPassword: automationsSealPassword, _renderAutomationsSettings: renderAutomationsSettings, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
+  _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,

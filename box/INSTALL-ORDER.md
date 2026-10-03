@@ -50,6 +50,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 17 | `m2fix-20261003` | `bash install.sh` |
 | 18 | `sentlog-20261003` | `bash install.sh` |
 | 19 | `drive-sync-20261003` | `bash install.sh` |
+| 20 | `botmenu-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -71,6 +72,10 @@ byte-identical to the live `/workspace/tools`, `/workspace/telegram` and `/works
 `drive-sync-20261003` (step 19, `tools/drive-sync.sh` + the new `tools/drive-sync.filter`) went onto the box at 03:45
 BST, after that replay. Its `patch.py` was run on the backed-up `drive-sync.sh` and came out byte-identical to the box's
 file, so `INSTALL-ORDER.sha256` now lists 40 files.
+
+`botmenu-20261003` (step 20: the bot's per-person menus and screens) was tested on exact copies of the live
+`clerkcfg.py`, `monthinfo.py`, `clerkinfo.py`, `satinfo.py`, `satbot.py` and `srcdoc/poller.py`, whose checksums
+matched `INSTALL-ORDER.sha256`. Once it is installed on the box, update those six sums and add `tools/botmenu.py`.
 
 ## Making a box change
 
