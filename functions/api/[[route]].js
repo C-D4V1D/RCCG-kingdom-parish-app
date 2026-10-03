@@ -6165,6 +6165,7 @@ async function getSettings(DB) {
 const SENSITIVE_SETTING_KEYS = new Set([
   'kpsc_termii_api_key', 'ai_openai_key', 'ai_deepseek_key', 'kpsc_default_pin',
   'rolePermissions', 'kpsc_role_permissions', 'kpsc_write_permissions', 'kpsc_delete_permissions',
+  'googleDriveClientId',   // which Google app "Restore from Google Drive" signs in to
 ]);
 // Read-only flags computed by getSettings — never stored.
 const DERIVED_SETTING_KEYS = new Set(['kpsc_termii_api_key_set', 'ai_openai_key_set', 'ai_deepseek_key_set']);

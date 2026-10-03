@@ -129,3 +129,12 @@ test('Time Travel: not set up until CF_D1_API_TOKEN exists; restore and undo cal
     globalThis.fetch = realFetch;
   }
 });
+
+test('only the IT admin can set which Google app "Restore from Google Drive" signs in to', async () => {
+  const { DB, env } = await setup();
+  const accountant = { Authorization: `Bearer ${await financeToken({ role: 'accountant' })}` };
+  const bad = await call(env, 'settings', 'POST', { googleDriveClientId: 'evil.apps.googleusercontent.com' }, { headers: accountant });
+  assert.equal(bad.status, 403);
+  assert.equal((await call(env, 'settings', 'POST', { googleDriveClientId: '123-abc.apps.googleusercontent.com' })).status, 200);
+  assert.equal((await DB.prepare(`SELECT value FROM settings WHERE key='googleDriveClientId'`).first()).value, '123-abc.apps.googleusercontent.com');
+});
