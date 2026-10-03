@@ -940,6 +940,7 @@ const DB = {
   resolveBankReconEntry(id,d)  { return apiFetch(`bank-recon/entries/${id}/resolve`,'POST',d); },
   ignoreBankReconEntry(id)     { return apiFetch(`bank-recon/entries/${id}/ignore`,'POST',{}); },
   unmatchBankReconEntry(id)    { return apiFetch(`bank-recon/entries/${id}/unmatch`,'POST',{}); },
+  unrecordBankReconCharge(id)  { return apiFetch(`bank-recon/entries/${id}/unrecord-charge`,'POST',{}); },
   uploadBankStatement(d,timeoutMs) { return apiFetch('bank-recon/statement','POST',d,timeoutMs); },
 
   getNotifications()           { return apiFetch('notifications'); },
@@ -11345,7 +11346,7 @@ async function renderExpenses(){
             </td>
             <td class="td-right td-red td-bold">${fmt(e.amount)}</td>
             <td class="td-muted" style="font-size:12px">${methodLabel}${splitDetail}</td>
-            <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}</td>
+            <td class="td-muted" style="font-size:12px">${e.recordedBy||'—'}${autoRecTag(e)}</td>
             <td>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
                 ${(e.hasReceiptImage||e.receiptImage)?`<button class="btn btn-sm" onclick="App.viewExpenseReceipt('${e.id}')">🧾 View</button>`:e.receiptNo?`<span class="badge badge-gray">#${e.receiptNo}</span>`:'<span style="color:var(--text3);font-size:12px">—</span>'}
@@ -11368,7 +11369,7 @@ async function renderExpenses(){
             <td style="max-width:0;width:55%">
               <div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="badge badge-gray" style="font-size:11px">${c.icon} ${c.label}</span></div>
               <div class="td-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">${esc(e.subCategory||e.description||'—')}</div>
-              <div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap"><span class="td-muted" style="font-size:11px">${methodLabel}</span></div>
+              <div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap"><span class="td-muted" style="font-size:11px">${methodLabel}</span>${autoRecTag(e)}</div>
             </td>
             <td class="td-right td-red td-bold" style="white-space:nowrap">${fmt(e.amount)}</td>
           </tr>`;
@@ -11406,6 +11407,12 @@ function clearExpFilters(){
   state.expCatFilter=null; state.expSearch=''; state.expMethodFilter=null; state.expRecordedBy=null; renderExpenses();
 }
 
+// Tiny tag for expenses the app filed itself from a bank statement upload.
+function autoRecTag(e){
+  return e && e.recordedBy==='AI Statement Upload'
+    ? ` <span class="badge badge-warn" style="font-size:9px;vertical-align:middle;white-space:nowrap">🤖 Auto-recorded</span>` : '';
+}
+
 function showExpenseDetail(id){
   const all = state._expAll || [];
   const e = all.find(x=>x.id===id);
@@ -11428,7 +11435,7 @@ function showExpenseDetail(id){
     ...(e.description && e.description!==e.subCategory ? [['Description', esc(e.description)]] : []),
     ['Amount',          `<span class="td-red td-bold" style="font-size:16px">${fmt(e.amount)}</span>`],
     ['Payment Method',  `${methodLabel}${splitParts.length?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${splitParts.join(' · ')}</div>`:''}`],
-    ['Recorded By',     esc(e.recordedBy||'—')],
+    ['Recorded By',     `${esc(e.recordedBy||'—')}${autoRecTag(e)}`],
     ['Receipt / Ref',   e.receiptNo?`#${esc(e.receiptNo)}`:((e.hasReceiptImage||e.receiptImage)?'📎 Image attached':'—')],
   ];
   showModal(`
@@ -13380,11 +13387,14 @@ function viewBankReconEntry(id){
   let el = document.getElementById(`brc-${id}`);
   if(!el){
     const all = state._bankReconEntries||[];
-    const byNewest = (a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0);
-    const finished = all.filter(e=>!(e.status==='needs_attention'||e.status==='unrecorded')).sort(byNewest);
-    const idx = finished.findIndex(e=>e.id===id);
-    if(idx >= 0){
-      state.bankReconShown = Math.max(state.bankReconShown||20, Math.ceil((idx+1)/20)*20);
+    if(all.some(e=>e.id===id)){
+      // Filtered out or paged away: clear filters first, then page until the row is rendered.
+      state.bankReconFilter = bankReconFilterDefaults();
+      state.bankReconShown = 20;
+      const rows = bankReconVisibleRows(all, state.bankReconFilter);
+      const idx = rows.findIndex(e=>e.id===id);
+      const nAction = rows.filter(isBankReconAction).length;
+      if(idx >= nAction) state.bankReconShown = Math.max(20, Math.ceil((idx+1-nAction)/20)*20);
       const card = document.getElementById('bankReconCard');
       if(card) card.outerHTML = renderBankReconCard(all, state.user?.role);
       el = document.getElementById(`brc-${id}`);
@@ -13452,6 +13462,10 @@ function renderBankReconRow(e, isAdmin){
   } else if(tappable){
     actions = `<span style="font-size:11px;color:var(--text3)">Tap to see match</span>`;
   }
+  // it_admin can take back a charge the app filed by itself; stopPropagation keeps it out of the row's tap-to-see-match.
+  if(e.autoRecordedCharge && isAdmin){
+    actions += ` <button class="btn btn-sm" onclick="event.stopPropagation();App.unrecordBankReconCharge('${eid}',this)">Undo</button>`;
+  }
   // Two lines, not one packed row: line 1 is just date/narration (flexible) + amount
   // (fixed), which always fits; line 2 (badge + any buttons) wraps freely on its own,
   // so a badge plus buttons never gets squeezed off a narrow phone screen.
@@ -13470,23 +13484,137 @@ function renderBankReconRow(e, isAdmin){
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px">
         ${bankReconStatusBadge(e.status)}
+        ${e.autoRecordedCharge?`<span class="badge" style="background:#fff3cd;color:#8a5a00">🤖 Auto-recorded charge</span>`:''}
         ${actions}
       </div>
       ${groupNote}
     </div>`;
 }
 
+// ── Reconciliation list: filters, sort, search ──
+function bankReconFilterDefaults(){ return { status:'all', dir:'all', sort:'action', q:'' }; }
+function bankReconFilter(){
+  if(!state.bankReconFilter) state.bankReconFilter = bankReconFilterDefaults();
+  return state.bankReconFilter;
+}
+function isBankReconAction(e){ return e.status==='needs_attention' || e.status==='unrecorded'; }
+// One bucket per line, matching the status chips.
+function bankReconCategory(e){
+  if(isBankReconAction(e)) return 'action';
+  if(e.status==='ignored') return 'ignored';
+  if(e.autoRecordedCharge) return 'charge';
+  if(e.status==='auto') return 'auto';
+  if(e.status==='resolved') return 'resolved';
+  return 'other';
+}
+const BANK_RECON_STATUS_CHIPS = [
+  ['all','All'], ['action','Needs action'], ['auto','Auto-matched'],
+  ['charge','Auto-recorded charges'], ['resolved','Resolved'], ['ignored','Ignored']
+];
+// Filtered + sorted list, NOT paged. With sort 'action', action items come first (newest first), then the rest newest first.
+function bankReconVisibleRows(all, f){
+  const time = e => new Date(e.date||e.createdAt||0).getTime() || 0;
+  const byNewest = (a,b)=> time(b) - time(a);
+  const q = String(f.q||'').trim().toLowerCase();
+  const qDigits = q.replace(/[,₦\s]/g,'');
+  const amountQuery = /^\d+(\.\d*)?$/.test(qDigits) ? qDigits : '';
+  let rows = (all||[]).filter(e=>{
+    if(f.status!=='all' && bankReconCategory(e)!==f.status) return false;
+    if(f.dir!=='all' && e.direction!==f.dir) return false;
+    if(q){
+      const amt = Number(e.amount)||0;
+      const hitNarr = String(e.narration||'').toLowerCase().includes(q);
+      const hitAmt = amountQuery && (String(amt).includes(amountQuery) || amt.toFixed(2).includes(amountQuery));
+      if(!hitNarr && !hitAmt) return false;
+    }
+    return true;
+  });
+  switch(f.sort){
+    case 'newest':   rows.sort(byNewest); break;
+    case 'oldest':   rows.sort((a,b)=>time(a)-time(b)); break;
+    case 'largest':  rows.sort((a,b)=>(Number(b.amount)||0)-(Number(a.amount)||0)); break;
+    case 'smallest': rows.sort((a,b)=>(Number(a.amount)||0)-(Number(b.amount)||0)); break;
+    default: {
+      const act = rows.filter(isBankReconAction).sort(byNewest);
+      const rest = rows.filter(e=>!isBankReconAction(e)).sort(byNewest);
+      rows = [...act, ...rest];
+    }
+  }
+  return rows;
+}
+
+// Rows + "Show more" for the current filters (this is the part re-rendered while typing in the search box).
+function renderBankReconList(all, isAdmin){
+  const f = bankReconFilter();
+  const rows = bankReconVisibleRows(all, f);
+  const limit = state.bankReconShown || 20;
+  let shown;
+  if(f.sort==='action'){
+    // Action items are never paged away; only the finished ones are.
+    const act = rows.filter(isBankReconAction);
+    shown = [...act, ...rows.filter(e=>!isBankReconAction(e)).slice(0, limit)];
+  } else {
+    shown = rows.slice(0, limit);
+  }
+  const left = rows.length - shown.length;
+  const filtersOn = f.status!=='all' || f.dir!=='all' || f.sort!=='action' || String(f.q||'').trim()!=='';
+  const empty = (all||[]).length
+    ? `<div class="empty-table">No bank lines match these filters.${filtersOn?` <a href="#" onclick="event.preventDefault();App.clearBankReconFilters()" style="color:var(--primary)">Clear filters</a>`:''}</div>`
+    : `<div class="empty-table">No bank movements reported yet.</div>`;
+  return `${shown.map(e=>renderBankReconRow(e, isAdmin)).join('') || empty}
+    ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}`;
+}
+
+function renderBankReconFilters(all){
+  const f = bankReconFilter();
+  const cnt = {};
+  for(const e of all) cnt[bankReconCategory(e)] = (cnt[bankReconCategory(e)]||0) + 1;
+  const chips = BANK_RECON_STATUS_CHIPS.map(([key,label])=>{
+    const n = key==='all' ? all.length : (cnt[key]||0);
+    const on = f.status===key;
+    return `<button class="btn btn-sm${on?' btn-primary':''}" style="padding:4px 9px;font-size:12px;white-space:nowrap" aria-pressed="${on}" onclick="App.setBankReconFilter('status','${key}')">${esc(label)} (${n})</button>`;
+  }).join('');
+  const selStyle = 'padding:6px 8px;font-size:13px;min-width:0;flex:1 1 130px';
+  const opt = (v,l,cur)=>`<option value="${v}"${cur===v?' selected':''}>${l}</option>`;
+  return `<div style="margin-bottom:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${chips}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+        <select class="form-select" style="${selStyle}" aria-label="Direction" onchange="App.setBankReconFilter('dir',this.value)">
+          ${opt('all','All money',f.dir)}${opt('in','Money in',f.dir)}${opt('out','Money out',f.dir)}
+        </select>
+        <select class="form-select" style="${selStyle}" aria-label="Sort" onchange="App.setBankReconFilter('sort',this.value)">
+          ${opt('action','Needs action first',f.sort)}${opt('newest','Newest first',f.sort)}${opt('oldest','Oldest first',f.sort)}${opt('largest','Largest amount',f.sort)}${opt('smallest','Smallest amount',f.sort)}
+        </select>
+      </div>
+      <input id="bankReconSearch" class="form-input" type="search" inputmode="search" autocomplete="off" style="box-sizing:border-box;padding:8px 10px;font-size:13px" placeholder="Search narration or amount" aria-label="Search bank lines" value="${esc(f.q||'')}" oninput="App.setBankReconFilter('q',this.value)">
+    </div>`;
+}
+
+function setBankReconFilter(key, val){
+  const f = bankReconFilter();
+  f[key] = val;
+  state.bankReconShown = 20;
+  const all = state._bankReconEntries||[];
+  const isAdmin = state.user?.role === 'it_admin';
+  if(key==='q'){
+    // Typing: swap only the rows so the search box keeps focus and caret.
+    const list = document.getElementById('bankReconList');
+    if(list){ list.innerHTML = renderBankReconList(all, isAdmin); return; }
+  }
+  const el = document.getElementById('bankReconCard');
+  if(el) el.outerHTML = renderBankReconCard(all, state.user?.role);
+}
+function clearBankReconFilters(){
+  state.bankReconFilter = bankReconFilterDefaults();
+  state.bankReconShown = 20;
+  const el = document.getElementById('bankReconCard');
+  if(el) el.outerHTML = renderBankReconCard(state._bankReconEntries||[], state.user?.role);
+}
+
 function renderBankReconCard(entries, role){
   if(role !== 'it_admin' && role !== 'accountant') return '';
   const isAdmin = role === 'it_admin';
   const all = entries || [];
-  const byNewest = (a,b)=> new Date(b.date||b.createdAt||0) - new Date(a.date||a.createdAt||0);
-  // Action items always come first and are never paged away; finished items follow, newest first.
-  const action = all.filter(e=>e.status==='needs_attention'||e.status==='unrecorded').sort(byNewest);
-  const finished = all.filter(e=>!(e.status==='needs_attention'||e.status==='unrecorded')).sort(byNewest);
-  const limit = state.bankReconShown || 20;
-  const shownFinished = finished.slice(0, limit);
-  const left = finished.length - shownFinished.length;
   const count = st => all.filter(e=>e.status===st).length;
   const counts = [
     [count('auto')+count('resolved'), 'auto-matched'], [count('needs_attention'), 'need review'],
@@ -13495,7 +13623,6 @@ function renderBankReconCard(entries, role){
   const uploadBtn = isAdmin
     ? `<button class="btn btn-sm btn-primary" onclick="App.showBankStatementUploadForm()">📄 Upload a statement</button>`
     : `<button class="btn btn-sm" disabled title="Only the IT administrator can upload a statement">📄 Upload a statement</button>`;
-  const rowsHtml = [...action, ...shownFinished].map(e=>renderBankReconRow(e, isAdmin)).join('');
   // Date span of the uploaded statements (entries tagged balanceHistoryId 'stmt:…'). ISO date
   // strings sort lexicographically, and passing them straight to fmtDate avoids timezone drift.
   const stmtDates = all.filter(e=>typeof e.balanceHistoryId==='string' && e.balanceHistoryId.startsWith('stmt:') && e.date)
@@ -13510,8 +13637,8 @@ function renderBankReconCard(entries, role){
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
     ${stmtLine}
     ${counts?`<div style="font-size:12px;color:var(--text3);margin-bottom:8px">${counts}</div>`:''}
-    ${rowsHtml || `<div class="empty-table">No bank movements reported yet.</div>`}
-    ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}
+    ${all.length?renderBankReconFilters(all):''}
+    <div id="bankReconList">${renderBankReconList(all, isAdmin)}</div>
   </div>`;
 }
 
@@ -13573,6 +13700,7 @@ function showBankReconMatch(id){
     : `<div style="padding:6px 0;border-bottom:1px solid var(--border-light,#f0f0f0)">
         <div style="font-size:13px;font-weight:600">${esc(bankReconSourceLabel(d.sourceTable))} — ${fmt(d.amount)}</div>
         <div style="font-size:11.5px;color:var(--text3);word-break:break-word">${fmtDate(d.date)}${d.description?` · ${esc(d.description)}`:''}</div>
+        ${d.autoRecorded?`<div style="font-size:11.5px;color:#8a5a00;margin-top:2px">🤖 recorded automatically from a statement upload</div>`:''}
       </div>`).join('') : `<p style="font-size:13px;color:var(--text3)">No match details are available for this movement.</p>`;
   const grouped = entry.groupId && entry.groupSize > 1;
   const siblings = grouped ? (state._bankReconEntries||[]).filter(e=>e.groupId===entry.groupId && e.id!==entry.id) : [];
@@ -13585,13 +13713,33 @@ function showBankReconMatch(id){
     </div>` : '';
   const undo = state.user?.role === 'it_admin'
     ? `<button class="btn btn-danger" onclick="App.unmatchBankReconEntry('${esc(entry.id)}',this)">${grouped?`Undo match (all ${esc(entry.groupSize)} lines)`:'Undo match'}</button>` : '';
+  const hasAutoCharge = entry.autoRecordedCharge || details.some(d=>d.autoRecorded);
+  const undoCharge = state.user?.role === 'it_admin' && hasAutoCharge
+    ? `<button class="btn" onclick="App.unrecordBankReconCharge('${esc(entry.id)}',this)">Undo auto-recorded charge</button>` : '';
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">Matched to:</div>
     <div style="font-size:12px;color:var(--text2);margin-bottom:8px">Bank ${entry.direction==='in'?'credit':'debit'} of <strong>${fmt(entry.amount)}</strong> on ${fmtDate(entry.date)}</div>
     <div style="margin:8px 0">${items}</div>
     ${siblingHtml}
-    <div class="modal-footer" style="flex-wrap:wrap;gap:8px"><button class="btn" onclick="closeModal()">Close</button>${undo}</div>`);
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px"><button class="btn" onclick="closeModal()">Close</button>${undoCharge}${undo}</div>`);
+}
+
+async function unrecordBankReconCharge(id, btn){
+  if(state.user?.role !== 'it_admin'){ showAlert('Only the IT administrator can do this.','danger'); return; }
+  const ent = (state._bankReconEntries||[]).find(e=>e.id===id);
+  if(!confirm('Remove this automatically recorded bank charge from Expenses? The bank line will go back to Unrecorded so you can record it differently or ignore it.')) return;
+  const restore = setBtnLoading(btn, 'Removing…');
+  try {
+    await DB.unrecordBankReconCharge(id);
+    try { await DB.addAudit('bank_charge_unrecorded', `Removed auto-recorded bank charge ${fmt(ent?.amount)} (${ent?.narration||''})`, state.user?.name); } catch(_){ /* audit is best-effort */ }
+    closeModal();
+    state._pendingAlert = { msg: 'Auto-recorded charge removed. The bank line is back as Unrecorded.', type: 'success' };
+    navigate('bank');
+  } catch(err) {
+    restore();
+    showAlert(`Failed to remove the charge: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 async function unmatchBankReconEntry(id, btn){
@@ -20842,7 +20990,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, toggleBankLedgerAll, showMoreBankLedger, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, undoIgnoreBankReconEntry, unmatchBankReconEntry, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, undoIgnoreBankReconEntry, unmatchBankReconEntry, unrecordBankReconCharge, setBankReconFilter, clearBankReconFilters, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,

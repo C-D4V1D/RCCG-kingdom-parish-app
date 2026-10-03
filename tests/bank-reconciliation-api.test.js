@@ -79,6 +79,7 @@ function setOcrProvider(DB, provider) {
 // ── GET /api/bank-recon/entries ───────────────────────────────────────────
 test('GET /api/bank-recon/entries: it_admin and accountant can read; other roles are forbidden', async () => {
   const DB = await freshDB();
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,status) VALUES ('e1','2026-10-05',5000,'bank_transfer','approved')`).run();
   DB.sqlite.prepare(
     `INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json,narration)
      VALUES ('brc1','bal:1','2026-10-05',5000,'out','auto','[{"sourceTable":"expenses","sourceId":"e1"}]','[]','')`
@@ -664,7 +665,7 @@ test('POST /api/bank-recon/entries/:id/ignore and /unmatch: it_admin only, statu
   assert.ok(ig.resolvedAt);
 });
 
-test('GET /api/bank-recon/entries: matchedDetails describes each matched record, flags missing ones', async () => {
+test('GET /api/bank-recon/entries: matchedDetails describes each matched record; a line whose record was deleted reopens', async () => {
   const DB = await freshDB();
   DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,payment_method,bank_amount,description,status) VALUES ('e1','2026-10-05',8000,'split',5000,'Generator diesel','approved')`).run();
   DB.sqlite.prepare(`INSERT INTO income (id,date,bank_transfer_amount,source,donor_name) VALUES ('i1','2026-10-04',2000,'donation','Bro. Ade')`).run();
@@ -674,23 +675,25 @@ test('GET /api/bank-recon/entries: matchedDetails describes each matched record,
   const refs = [
     { sourceTable: 'expenses', sourceId: 'e1' }, { sourceTable: 'remittances', sourceId: 'r1' },
     { sourceTable: 'cash_transactions', sourceId: 'c1' }, { sourceTable: 'petty_cash', sourceId: 'p1' },
-    { sourceTable: 'expenses', sourceId: 'gone' },
   ];
   DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brc1','bal:1','2026-10-05',13000,'out','resolved',?)`).run(JSON.stringify(refs));
   DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brc2','bal:2','2026-10-04',2000,'in','auto','[{"sourceTable":"income","sourceId":"i1"}]')`).run();
   DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status) VALUES ('brc3','bal:3','2026-10-03',1,'in','unrecorded')`).run();
+  DB.sqlite.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json) VALUES ('brc4','bal:4','2026-10-06',777,'out','auto','[{"sourceTable":"expenses","sourceId":"gone"}]')`).run();
 
   const res = await onRequest({ request: req('bank-recon/entries', { headers: bearer(await tokenFor(DB, 'u3')) }), env: baseEnv(DB) });
   assert.equal(res.status, 200);
   const list = await readJson(res);
   const e1 = list.find(e => e.id === 'brc1');
   assert.deepEqual(e1.matchedDetails, [
-    { sourceTable: 'expenses', sourceId: 'e1', date: '2026-10-05', amount: 5000, description: 'Generator diesel' },
+    { sourceTable: 'expenses', sourceId: 'e1', date: '2026-10-05', amount: 5000, description: 'Generator diesel', autoRecorded: false },
     { sourceTable: 'remittances', sourceId: 'r1', date: '2026-10-03', amount: 3000, description: 'Area remittance' },
     { sourceTable: 'cash_transactions', sourceId: 'c1', date: '2026-10-02', amount: 1000, description: 'withdrawal' },
     { sourceTable: 'petty_cash', sourceId: 'p1', date: '2026-10-01', amount: 4000, description: 'Float top-up' },
-    { sourceTable: 'expenses', sourceId: 'gone', missing: true },
   ]);
+  const e4 = list.find(e => e.id === 'brc4');
+  assert.equal(e4.status, 'unrecorded', 'its record was deleted, so the line is open again');
+  assert.deepEqual(e4.matchedDetails, []);
   assert.deepEqual(list.find(e => e.id === 'brc2').matchedDetails,
     [{ sourceTable: 'income', sourceId: 'i1', date: '2026-10-04', amount: 2000, description: 'donation: Bro. Ade' }]);
   assert.deepEqual(list.find(e => e.id === 'brc3').matchedDetails, []);
@@ -1154,4 +1157,57 @@ test('run-bank-recon: the clerk-watchdog Worker can trigger it with the watchdog
   const row = DB.sqlite.prepare(`SELECT amount, direction FROM bank_recon_entries WHERE balance_history_id='bal2'`).get();
   assert.deepEqual({ ...row }, { amount: 26040, direction: 'in' });
   assert.equal(bad.status, 401);
+});
+
+test('auto-recorded bank charges are flagged, can be removed (accountant cannot), and the line reopens', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  const up = await uploadStatement(DB, admin, [{ date: '2026-10-06', amount: 500, type: 'expense', narration: 'SMS Alert Charge' }]);
+  assert.equal(up.status, 200);
+  assert.equal(up.body.chargeCount, 1);
+  let entries = Object.values(await getEntries(DB));
+  assert.equal(entries.length, 1);
+  const line = entries[0];
+  assert.equal(line.autoRecordedCharge, true);
+  assert.equal(line.matchedDetails[0].autoRecorded, true);
+  const expenseId = line.matchedRefs[0].sourceId;
+
+  const asAccountant = await onRequest({ request: req(`bank-recon/entries/${line.id}/unrecord-charge`, { method: 'POST', headers: bearer(await tokenFor(DB, 'u3')), body: {} }), env: baseEnv(DB) });
+  assert.equal(asAccountant.status, 403);
+
+  const res = await onRequest({ request: req(`bank-recon/entries/${line.id}/unrecord-charge`, { method: 'POST', headers: bearer(admin), body: {} }), env: baseEnv(DB) });
+  assert.equal(res.status, 200);
+  const body = await readJson(res);
+  assert.deepEqual(body.deletedExpenseIds, [expenseId]);
+  assert.equal(body.status, 'unrecorded');
+  assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE id=?`).get(expenseId).n, 0);
+
+  const again = await onRequest({ request: req(`bank-recon/entries/${line.id}/unrecord-charge`, { method: 'POST', headers: bearer(admin), body: {} }), env: baseEnv(DB) });
+  assert.equal(again.status, 400, 'nothing left to remove');
+});
+
+test('a hand-entered charge matched by an upload is not auto-recorded and cannot be removed this way', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  DB.sqlite.prepare(`INSERT INTO expenses (id,date,amount,category,payment_method,status,recorded_by,description) VALUES ('hand1','2026-10-06',500,'bank','bank_transfer','approved','David','SMS alert')`).run();
+  const admin = await tokenFor(DB, 'u1');
+  await uploadStatement(DB, admin, [{ date: '2026-10-06', amount: 500, type: 'expense', narration: 'SMS Alert Charge' }]);
+  const line = Object.values(await getEntries(DB))[0];
+  assert.equal(line.autoRecordedCharge, false);
+  const res = await onRequest({ request: req(`bank-recon/entries/${line.id}/unrecord-charge`, { method: 'POST', headers: bearer(admin), body: {} }), env: baseEnv(DB) });
+  assert.equal(res.status, 400);
+  assert.equal(DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM expenses WHERE id='hand1'`).get().n, 1);
+});
+
+test('a matched line whose record was deleted elsewhere goes back to unrecorded', async () => {
+  const DB = await freshDB();
+  setDeepseekKey(DB);
+  const admin = await tokenFor(DB, 'u1');
+  await uploadStatement(DB, admin, [{ date: '2026-10-06', amount: 500, type: 'expense', narration: 'SMS Alert Charge' }]);
+  const line = Object.values(await getEntries(DB))[0];
+  DB.sqlite.prepare(`DELETE FROM expenses WHERE id=?`).run(line.matchedRefs[0].sourceId);
+  const after = (await getEntries(DB))[line.id];
+  assert.equal(after.status, 'unrecorded');
+  assert.deepEqual(after.matchedRefs, []);
 });
