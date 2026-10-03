@@ -34,6 +34,7 @@ and run these, in this order (this one is step 3):
    16. box/checkpeople-20261003/  (bash install.sh)
    17. box/m2fix-20261003/  (bash install.sh)
    18. box/sentlog-20261003/  (bash install.sh)
+   19. box/drive-sync-20261003/  (bash install.sh)
 For a fresh build only: FORCE_OLD_INSTALLER=1 bash install.sh
 RETIRED
   exit 1
@@ -53,6 +54,7 @@ Afterwards re-run these newer installers, in this order (box/INSTALL-ORDER.md):
    - box/appbackup-20261003/
    - box/c2fix-20261003/
    - box/checkpeople-20261003/
+   - box/drive-sync-20261003/
 RETIRED
 }
 _retired_warn "will put back"; trap '_retired_warn "has put back"' EXIT

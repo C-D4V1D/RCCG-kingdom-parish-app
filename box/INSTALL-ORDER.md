@@ -13,7 +13,7 @@ only with `FORCE_OLD_INSTALLER=1`, and then it prints which newer installers mus
 |---|---|
 | `automations-20260928` | overwrites `tools/clerkcfg.py` (every later clerkcfg change) |
 | `monthend-20261001` | overwrites `tools/clerkcfg.py` and `tools/monthend.py` (parishes, c2fix, checkpeople, m2fix, sentlog) |
-| `cleanup-20260928` | overwrites `tools/clerkcfg.py` and `tools/supervisor.sh` (records … checkpeople; monthclose, parishes, restart, appbackup) |
+| `cleanup-20260928` | overwrites `tools/clerkcfg.py`, `tools/supervisor.sh` and `tools/drive-sync.sh` (records … checkpeople; monthclose, parishes, restart, appbackup; drive-sync) |
 | `reminders-20260929` | overwrites `tools/monthinfo.py` (monthclose, records, menu-refine) |
 | `monthclose-20260930` | overwrites `tools/monthinfo.py` and `tools/supervisor.sh` (records, menu-refine; parishes, restart, appbackup) |
 | `records-20260928` | overwrites `tools/clerkcfg.py` and `tools/monthinfo.py` (menu-refine, bankbalance…, parishes, c2fix, checkpeople) |
@@ -49,6 +49,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 16 | `checkpeople-20261003` | `bash install.sh` |
 | 17 | `m2fix-20261003` | `bash install.sh` |
 | 18 | `sentlog-20261003` | `bash install.sh` |
+| 19 | `drive-sync-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -67,9 +68,9 @@ byte-identical to the live `/workspace/tools`, `/workspace/telegram` and `/works
 [`INSTALL-ORDER.sha256`](INSTALL-ORDER.sha256). After a rebuild, run `cd /workspace && sha256sum -c
 <path>/INSTALL-ORDER.sha256` to check the box.
 
-Known difference: at 03:45 BST a separate change, `drive-sync-20261003` (`tools/drive-sync.sh` +
-`tools/drive-sync.filter`), went onto the box. It is not in the repo yet. When it lands, add it as step 19, update
-`tools/drive-sync.sh` in `INSTALL-ORDER.sha256`, and add it to `cleanup-20260928`'s re-run list.
+`drive-sync-20261003` (step 19, `tools/drive-sync.sh` + the new `tools/drive-sync.filter`) went onto the box at 03:45
+BST, after that replay. Its `patch.py` was run on the backed-up `drive-sync.sh` and came out byte-identical to the box's
+file, so `INSTALL-ORDER.sha256` now lists 40 files.
 
 ## Making a box change
 
