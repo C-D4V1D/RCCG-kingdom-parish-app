@@ -54,6 +54,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 21 | `greetings-20261003` | `bash install.sh` |
 | 22 | `month-parishes-20261003` | `bash install.sh` |
 | 23 | `remitinfo-20261003` | `bash install.sh` |
+| 24 | `srcdocinfo-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -98,6 +99,11 @@ lists 43 files.
 the app's Remittances, else the box's files) changes `tools/monthinfo.py` and `tools/satinfo.py` and adds
 `tools/remitinfo.py`. Its `patch.py` was run on copies of the live files (after step 22); `INSTALL-ORDER.sha256` lists the
 result, so it lists 44 files.
+
+`srcdocinfo-20261003` (step 24: `/month` gets SOURCE DOCUMENTS and attendance filing from the RCCG portal, else the upload
+bot's records) changes `tools/monthinfo.py`, `tools/satinfo.py`, `tools/satbot.py`, `tools/monthpick.py` and
+`telegram/srcdoc/poller.py`, and adds `tools/srcdocinfo.py` and `tools/portal-month.cjs`. Its `patch.py` was run on copies
+of the live files (after step 23); `INSTALL-ORDER.sha256` lists the result, so it lists 46 files.
 
 ## Making a box change
 
