@@ -360,6 +360,35 @@
     });
   }
 </script>
+<script>
+  // ── Old-browser check ─────────────────────────────────────────────
+  // The app needs Chrome 80+ (2020). On an older browser its code can't even be
+  // read, which used to leave a blank screen. Written in old-style JavaScript on
+  // purpose so it runs everywhere; shows "please update" instead.
+  (function () {
+    try { new Function('var a = {}; return a?.b ?? 1;')(); return; } catch (e) {}
+    var ua = navigator.userAgent || '';
+    var android = ua.match(/Android (\d+)(?:\.(\d+))?/);
+    var chrome = ua.match(/Chrome\/(\d+)/);
+    // Android below 4.4 can't get a new enough Chrome at all.
+    var tooOld = android && (+android[1] < 4 || (+android[1] === 4 && +(android[2] || 0) < 4));
+    var html = '<div style="max-width:420px;margin:0 auto;padding:48px 20px;font-family:sans-serif;text-align:center;color:#1a1a1a">'
+      + '<div style="width:72px;height:72px;margin:0 auto 20px;border-radius:50%;background:#0F6E56;color:#fff;font-size:40px;line-height:72px">&#10013;</div>'
+      + '<h1 style="font-size:22px;margin:0 0 12px">RCCG Kingdom Parish</h1>';
+    if (tooOld) {
+      html += '<p style="font-size:16px;line-height:1.5;margin:0 0 12px">This phone\'s Android version (' + android[1] + '.' + (android[2] || 0) + ') is too old to run the app.</p>'
+        + '<p style="font-size:16px;line-height:1.5;margin:0">Please use a newer phone or a computer.</p>';
+    } else {
+      html += '<p style="font-size:16px;line-height:1.5;margin:0 0 12px">Your browser is too old to run the app' + (chrome ? ' (Chrome ' + chrome[1] + ')' : '') + '.</p>'
+        + '<p style="font-size:16px;line-height:1.5;margin:0 0 24px">Please update <strong>Google Chrome</strong> from the Play Store, then open this page again in Chrome.</p>'
+        + '<a href="https://play.google.com/store/apps/details?id=com.android.chrome" style="display:inline-block;padding:14px 24px;border-radius:10px;background:#0F6E56;color:#fff;text-decoration:none;font-size:16px;font-weight:bold">Update Chrome</a>'
+        + '<p style="font-size:14px;line-height:1.5;color:#555;margin:24px 0 0">If Chrome won\'t update, also update <strong>Android System WebView</strong> in the Play Store, or use another phone or a computer.</p>';
+    }
+    document.body.innerHTML = html + '</div>';
+    document.body.style.background = '#fff';
+    window.__KP_OLD_BROWSER__ = true;
+  })();
+</script>
 <script src="dist/js/budget-engine.js?v=fcedb066c4"></script>
 <script src="dist/js/app.js?v=fcedb066c4"></script>
 </body>
