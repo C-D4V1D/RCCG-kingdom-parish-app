@@ -381,7 +381,9 @@ test('clerkcfg sync: collects new mailbox signals once and starts the runner; ol
     let out = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; });
     p.on('close', code => resolve({ code, out }));
   });
-  const waitFor = async (f) => { for (let i = 0; i < 50 && !fs.existsSync(f); i++) await new Promise(r => setTimeout(r, 100)); };
+  // Wait for the runner's line, not just the file: open(..., 'a') creates it empty before the write lands.
+  const hasLine = f => fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes('\n');
+  const waitFor = async (f) => { for (let i = 0; i < 50 && !hasLine(f); i++) await new Promise(r => setTimeout(r, 100)); };
   try {
     let r = await sync();
     assert.equal(r.code, 0, r.out);

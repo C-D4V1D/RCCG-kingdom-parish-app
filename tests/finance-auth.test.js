@@ -118,10 +118,10 @@ test('route groups: public allowlist, KPSC, shared and Finance', () => {
     assert.notEqual(c(r, p, m), 'public', `${m} ${r}/${p || ''} must not be public`);
   }
   for (const r of ['settings', 'church-bank-ingest-log', 'bank-balance-snapshot']) assert.equal(c(r, null, 'GET'), 'shared');
-  for (const r of ['kpsc-accounts', 'action-items', 'ai-secretary-meetings', 'voice-identify', 'admin', 'remit-webhook-test', 'partnership-pledges']) {
+  for (const r of ['kpsc-accounts', 'action-items', 'ai-secretary-meetings', 'voice-identify', 'remit-webhook-test', 'partnership-pledges']) {
     assert.equal(c(r, null, 'GET'), 'kpsc', r);
   }
-  for (const r of ['income', 'users', 'init', 'dashboard', 'change-pin', 'attendance', 'attendance-further', 'brand-new-route']) assert.equal(c(r, null, 'GET'), 'finance', r);
+  for (const r of ['income', 'users', 'init', 'dashboard', 'change-pin', 'attendance', 'attendance-further', 'admin', 'brand-new-route']) assert.equal(c(r, null, 'GET'), 'finance', r);
 });
 
 test('public routes still work with no sign-in (report-share POST+GET, login options, policy summary)', async () => {
