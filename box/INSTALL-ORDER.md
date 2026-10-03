@@ -53,6 +53,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 20 | `botmenu-20261003` | `bash install.sh` |
 | 21 | `greetings-20261003` | `bash install.sh` |
 | 22 | `month-parishes-20261003` | `bash install.sh` |
+| 23 | `remitinfo-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -92,6 +93,11 @@ sums, plus `tools/botmenu.py` and `tools/greet.py`.
 month" ticked in Automations → People) changes only `telegram/srcdoc/poller.py` and adds `tools/monthpick.py`. Its
 `patch.py` was run on a copy of the live `poller.py` (after step 21); `INSTALL-ORDER.sha256` lists the result, so it
 lists 43 files.
+
+`remitinfo-20261003` (step 23: `/month` shows the RRR, the amount remitted and the paid status from the RCCG portal, else
+the app's Remittances, else the box's files) changes `tools/monthinfo.py` and `tools/satinfo.py` and adds
+`tools/remitinfo.py`. Its `patch.py` was run on copies of the live files (after step 22); `INSTALL-ORDER.sha256` lists the
+result, so it lists 44 files.
 
 ## Making a box change
 

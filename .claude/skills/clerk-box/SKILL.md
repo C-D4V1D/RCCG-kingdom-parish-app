@@ -197,6 +197,9 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
   (`people[].month_all_parishes`, true/false; the box also accepts a list of parish codes; unset = admin only) adds an
   "Other parishes »" button; `tools/monthpick.py` decides who and which parishes (Automations → Parishes) and is asked on
   every press. A satellite screen is built in its own process (`satinfo.py month CODE`). Kingdom people only.
+- `/month` REMITTANCE (remitinfo-20261003): RRR, amount remitted/to remit and Paid come from the RCCG portal's invoices
+  (`api-fill.js invoices`, read-only, cached in `state/remitinfo-cache.json`: PAID 30 days, else 30 min, errors 10 min),
+  else the app's Remittances (Part A paid, same periodTo), else the box's rrr/monthclose files; each line names its source.
 
 ## Known open items
 

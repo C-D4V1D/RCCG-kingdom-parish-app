@@ -106,10 +106,10 @@ test('patch.py: a missing or doubled anchor -> NOT CHANGED, file untouched', { s
   }
 });
 
-test('bundle: valid shell, INSTALL-ORDER lists it last, no personal data', () => {
+test('bundle: valid shell, INSTALL-ORDER lists it (step 22), no personal data', () => {
   for (const f of ['install.sh', 'undo.sh']) assert.equal(spawnSync('bash', ['-n', path.join(BUNDLE, f)]).status, 0, f);
   const rows = fs.readFileSync(path.join(REPO, 'box/INSTALL-ORDER.md'), 'utf8').split('\n').filter(l => /^\| \d+ \|/.test(l));
-  assert.match(rows[rows.length - 1], /month-parishes-20261003/);
+  assert.ok(rows.some(r => /^\| 22 \| `month-parishes-20261003`/.test(r)), 'month-parishes-20261003 is step 22');
   const install = fs.readFileSync(path.join(BUNDLE, 'install.sh'), 'utf8');
   assert.match(install, /--check/);
   assert.match(install, /-ge 0725/);
