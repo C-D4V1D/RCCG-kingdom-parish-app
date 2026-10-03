@@ -147,6 +147,16 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
 - cleanup-20260928 removed the hourly attendance polling: `att-watch.py` is no longer started and the scheduler's
   sched_config.json always has `"attendance": false`. Attendance is filed only by the month-end run (and Refresh attendance).
 
+## Weekly app backup to Google Drive (appbackup-20261003)
+
+- `tools/appbackup.py tick` (supervisor, after satinfo) downloads the app's full backup once a week
+  (`GET /api/admin/backup` with the read-only automation key; skips 07:00–09:30; retries 6 h after a failure) to
+  `/workspace/app-backups/rccg-full-backup-YYYY-MM-DD.json.gz` (keeps 12), which drive-sync copies to Drive
+  `Clerk Box/workspace/app-backups`. State `state/appbackup.json`, log `tools/appbackup.log`, `appbackup.py now|status`.
+- The app records each box download (setting `box_backup_last_at`) and IT Admin → Backup & Restore shows the date,
+  warning after 8 days. Needs restart-20261003 installed first (install.sh restarts the supervisor via start-box.sh).
+  Tests: tests/box-appbackup.test.js (real files against tests/fixtures/box/supervisor-20261003.sh, the live file).
+
 ## Satellite parishes (parishes-20261003)
 
 - App: each satellite parish (659840, 597445, 761516) has its own D1 (`SAT_<code>` in wrangler.toml); `/api/sat/<route>`

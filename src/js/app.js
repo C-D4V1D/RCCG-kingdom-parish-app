@@ -17751,7 +17751,13 @@ async function loadTimeTravelCard(){
   let tt;
   try { tt = await apiFetch('admin/time-travel'); }
   catch(e){ box.innerHTML=`<div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Could not load the Cloudflare restore: ${esc(e.message||'')}</span></div>`; return; }
-  const title = '<div style="font-size:13px;font-weight:600;margin-bottom:6px">⏪ Go back in time (Cloudflare)</div>';
+  // The Clerk box's weekly copy to Google Drive (box/appbackup-20261003).
+  const lastBox = tt.lastBoxBackup ? new Date(tt.lastBoxBackup) : null;
+  const boxDays = lastBox ? (Date.now() - lastBox.getTime()) / 86400000 : null;
+  const boxLine = lastBox
+    ? `<div class="alert ${boxDays > 8 ? 'alert-warn' : 'alert-success'}" style="margin-bottom:12px"><span class="alert-icon">${boxDays > 8 ? '⚠' : '✓'}</span><span>Weekly backup to Google Drive (Clerk box): last copy ${esc(lastBox.toLocaleString('en-NG',{timeZone:NIGERIA_TIMEZONE}))}${boxDays > 8 ? ' — more than a week ago. Check that the Clerk box is running.' : '. Find it in Google Drive → Clerk Box → workspace → app-backups.'}</span></div>`
+    : `<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">ℹ</span><span>Weekly backup to Google Drive (Clerk box): not set up yet.</span></div>`;
+  const title = boxLine + '<div style="font-size:13px;font-weight:600;margin-bottom:6px">⏪ Go back in time (Cloudflare)</div>';
   if(!tt.configured){
     box.innerHTML=`<div class="card" style="background:var(--surface);border:1px solid var(--border);margin-bottom:12px">${title}
       <p style="font-size:12px;color:var(--text2);margin-bottom:8px">Cloudflare keeps a minute-by-minute history of the database (7 days on the free plan, 30 days on Workers Paid). Once set up, this button can put everything back to how it was at any moment in that time. It needs a one-time setup:</p>
