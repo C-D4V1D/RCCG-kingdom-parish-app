@@ -4,6 +4,11 @@
 // once a day while the box stays silent, and a "reporting again" message when the pings come back.
 // Once a day (cron 30 6 * * *): only if that Telegram alert couldn't be sent, it wakes Church Clerk via its webhook
 // (max once per 20h), as before.
+// Every 15 minutes (restart-20261003), only when Automations > Box connection "Wake the Clerk AI to restart a silent
+// box" is on (restart_wake, default off): once the box has been silent for restart_wake_minutes (default 40) it wakes
+// the Clerk AI through the box's own "Box scheduler wake" webhook (Worker secrets SCHED_WEBHOOK_URL + SCHED_WEBHOOK_KEY)
+// with event box_down, so the AI restarts the box (RESTART-RUN.md) before David is alerted; again every
+// restart_wake_repeat_hours (default 3) while still silent, at most restart_wake_max (default 3) times.
 // Also serves as the config + health API for the Automations tab: KV keys config, config_version, health.
 import { DEFAULT_CONFIG, validateConfig } from "./config.js";
 
@@ -14,6 +19,8 @@ const MAX_EVENT_BYTES = 16 * 1024;
 const EVENT_TTL_S = 60 * 24 * 60 * 60;
 const DAILY_CRON = "30 6 * * *";
 const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;
+const RESTART_DEFAULTS = { minutes: 40, repeat_hours: 3, max: 3 };   // used when a setting is absent or out of range
+const RESTART_RUNBOOK = "/workspace/telegram/srcdoc/RESTART-RUN.md";
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o, null, 2), { status, headers: { "content-type": "application/json" } });
@@ -224,10 +231,12 @@ export default {
     }
 
     if (req.method === "GET" && url.pathname === "/status") {
-      const [p, w, c, r] = await Promise.all(["last_ping", "last_wake", "wake_config", "last_result"].map(k => env.KV.get(k)));
+      const [p, w, c, r, rw] = await Promise.all(["last_ping", "last_wake", "wake_config", "last_result", "restart_wake"].map(k => env.KV.get(k)));
       const cfg = c ? JSON.parse(c) : null;
       return json({
         last_ping: p ? new Date(+p).toISOString() : null,
+        restart_wake: rw ? JSON.parse(rw) : null,
+        restart_wake_configured: !!(env.SCHED_WEBHOOK_URL && env.SCHED_WEBHOOK_KEY),
         last_wake: w ? new Date(+w).toISOString() : null,
         wake_registered: !!cfg,
         wake_host: cfg ? new URL(cfg.url).host : null,
@@ -240,6 +249,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
+      try { await restartWake(env); } catch { /* never blocks the alert */ }
       const alerted = await alertCheck(env);
       // the daily AI wake only when the direct Telegram alert couldn't be sent (saves AI compute)
       if ((!event || !event.cron || event.cron === DAILY_CRON) && !alerted) await check(env);
@@ -299,6 +309,54 @@ async function wake(env, reason, force) {
   await env.KV.put("last_wake", String(Date.now()));
   await env.KV.put("last_result", JSON.stringify({ at: new Date().toISOString(), reason, ...outcome }));
   return { ok: !!outcome.status && outcome.status < 300, reason, ...outcome };
+}
+
+// ---- box down: wake the Clerk AI to restart the box (restart-20261003) ----
+async function restartSettings(env) {
+  let sup = {};
+  try { sup = JSON.parse((await env.KV.get("config")) || "null")?.automations?.supervisor || {}; } catch { sup = {}; }
+  const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) && v !== null && v !== "" && Number(v) >= lo && Number(v) <= hi ? Number(v) : d);
+  return {
+    on: sup.restart_wake === true,
+    silenceMs: num(sup.restart_wake_minutes, 20, 240, RESTART_DEFAULTS.minutes) * 60 * 1000,
+    repeatMs: num(sup.restart_wake_repeat_hours, 1, 24, RESTART_DEFAULTS.repeat_hours) * 60 * 60 * 1000,
+    max: num(sup.restart_wake_max, 1, 10, RESTART_DEFAULTS.max),
+  };
+}
+
+// Returns the attempt made ({ok, status|error, attempt}) or null when nothing was due.
+async function restartWake(env, now = Date.now()) {
+  const set = await restartSettings(env);
+  if (!set.on) return null;                                          // Automations: off (the default)
+  const p = +((await env.KV.get("last_ping")) || 0);
+  if (!p || now - p < set.silenceMs) return null;                    // never pinged, or healthy
+  let st = null;
+  try { st = JSON.parse((await env.KV.get("restart_wake")) || "null"); } catch { st = null; }
+  const same = !!(st && st.since === p);
+  if (same && (st.count >= set.max || now - st.at < set.repeatMs)) return null;
+  const attempt = same ? st.count + 1 : 1;
+  const url = env.SCHED_WEBHOOK_URL, key = env.SCHED_WEBHOOK_KEY;
+  let result;
+  if (!url || !key) {
+    result = { ok: false, error: "SCHED_WEBHOOK_URL / SCHED_WEBHOOK_KEY not set on the Worker" };
+  } else {
+    const hname = env.SCHED_WEBHOOK_KEY_HEADER || "Authorization";
+    const headers = { "content-type": "application/json", "user-agent": "clerk-watchdog/1",
+      [hname]: hname.toLowerCase() === "authorization" ? `Bearer ${key}` : key };
+    const body = {
+      event: "box_down", key: `box_down:${p}:${attempt}`,
+      details: { last_ping: new Date(p).toISOString(), silent_minutes: Math.round((now - p) / 60000), attempt, max_attempts: set.max },
+      runbook: RESTART_RUNBOOK, source: "clerk-watchdog", sent_at: new Date(now).toISOString(),
+    };
+    try {
+      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+      result = { ok: r.status < 300, status: r.status };
+    } catch (e) {
+      result = { ok: false, error: String(e && e.name || "fetch failed") };   // never the URL or key
+    }
+  }
+  await env.KV.put("restart_wake", JSON.stringify({ since: p, at: now, count: attempt, result }));
+  return { ...result, attempt };
 }
 
 // ---- direct Telegram alerts (no AI) ----

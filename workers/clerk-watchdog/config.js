@@ -344,6 +344,16 @@ export function validateConfig(cfg) {
           && !(isNonNegFinite(sup.balance_match_window_days) && sup.balance_match_window_days >= 1)) {
         errors.push("automations.supervisor.balance_match_window_days must be a number >= 1");
       }
+      // restart-20261003: optional box-restart settings (absent = the defaults: wake off, 40 min, 3 h, 3 wakes, 30 min).
+      if (sup.restart_wake !== undefined && typeof sup.restart_wake !== "boolean") {
+        errors.push("automations.supervisor.restart_wake must be true or false");
+      }
+      for (const [k, lo, hi] of [["restart_wake_minutes", 20, 240], ["restart_wake_repeat_hours", 1, 24], ["restart_wake_max", 1, 10],
+                                 ["bot_hung_restart_minutes", 0, 240]]) {
+        if (sup[k] !== undefined && !(isNonNegFinite(sup[k]) && sup[k] >= lo && sup[k] <= hi)) {
+          errors.push(`automations.supervisor.${k} must be a number from ${lo} to ${hi}`);
+        }
+      }
     }
   }
 

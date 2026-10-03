@@ -20404,6 +20404,15 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.supervisor.alert_after_hours', sup.alert_after_hours ?? 3, 'Box-down Telegram alert when the box is silent for (hours, checked hourly)', 1, 48)}
           ${automationsNumField('automations.supervisor.ai_takeover_minutes', sup.ai_takeover_minutes ?? 30, 'Month-end goes to the Clerk AI when the box is silent for (minutes)', 10, 240)}
         </div>
+        ${automationsBoolField('automations.supervisor.restart_wake', sup.restart_wake === true, 'Wake the Clerk AI to restart a silent box', 'When turned on, the watchdog asks the Clerk AI (Box scheduler wake) to restart the box once it has been silent for the minutes below, usually before the Telegram alert is due. It stays silent when the restart works. Needs the Worker secrets SCHED_WEBHOOK_URL and SCHED_WEBHOOK_KEY.')}
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.supervisor.restart_wake_minutes', sup.restart_wake_minutes ?? 40, 'Wake the Clerk AI after the box is silent for (minutes, checked every 15)', 20, 240)}
+          ${automationsNumField('automations.supervisor.restart_wake_repeat_hours', sup.restart_wake_repeat_hours ?? 3, 'Try again every (hours) while still silent', 1, 24)}
+          ${automationsNumField('automations.supervisor.restart_wake_max', sup.restart_wake_max ?? 3, 'At most (wakes per silence)', 1, 10)}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsNumField('automations.supervisor.bot_hung_restart_minutes', sup.bot_hung_restart_minutes ?? 30, 'Restart the Telegram bot when it is running but stuck for (minutes; 0 = never)', 0, 240)}
+        </div>
         <p class="at-note">Now: a report about every ${esc(String(Math.round(automationsExpectedPingMinutes(config))))} minutes.</p>
         <button class="btn btn-secondary" onclick="App.sendTestAlert(this)" style="margin-top:4px">🧪 Send test alert</button>
         <p class="at-note">Sends the "Clerk box not reporting" message right now, to whoever is ticked for Box-down alert — so you can confirm it actually reaches Telegram, without waiting for a real outage.</p>
