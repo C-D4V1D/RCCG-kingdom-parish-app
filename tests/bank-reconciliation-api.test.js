@@ -1211,3 +1211,24 @@ test('a matched line whose record was deleted elsewhere goes back to unrecorded'
   assert.equal(after.status, 'unrecorded');
   assert.deepEqual(after.matchedRefs, []);
 });
+
+test('run-bank-recon: two sweeps at the same moment record (and announce) a movement only once', async () => {
+  const DB = await freshDB();
+  const history = [
+    { id: 'bal1', balance: 1061.73, checked_at: '2026-10-02T18:16:05Z' },
+    { id: 'bal2', balance: 27101.73, checked_at: '2026-10-02T18:31:06Z' },
+  ];
+  const restore = stubWatchdogForSweep(history);
+  try {
+    const run = () => onRequest({
+      request: req('internal/run-bank-recon', { method: 'POST', headers: { 'x-watchdog-token': WATCHDOG_TOKEN } }),
+      env: baseEnv(DB),
+    });
+    const [a, b, c] = await Promise.all([run(), run(), run()]);
+    assert.deepEqual([a.status, b.status, c.status], [200, 200, 200]);
+  } finally { restore(); }
+  const rows = DB.sqlite.prepare(`SELECT COUNT(*) AS n FROM bank_recon_entries WHERE balance_history_id='bal2'`).get().n;
+  assert.equal(rows, 1);
+  const detected = fetchCalls.filter(c => c.url === `${WATCHDOG_URL}/notify`).map(c => JSON.parse(c.init.body)).filter(n => n.type === 'bank_transaction_detected');
+  assert.equal(detected.length, 1, 'one Telegram message, not one per sweep');
+});
