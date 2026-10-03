@@ -106,3 +106,12 @@ test('Kingdom people get Admin (full status) and Generate RRR / Refresh buttons 
   assert.match(html, /Admin \(full status\)/);
   assert.match(html, /Generate RRR \/ Refresh buttons/);
 });
+
+test('every Save changes bar has an autosave status next to it', () => {
+  const html = App._renderAutomationsSettings(config(), false, { health: {} });
+  const bars = html.split('App.saveAutomationsConfig(this)').length - 1;
+  const statuses = html.split('class="at-save-status"').length - 1;
+  assert.ok(bars > 0);
+  assert.equal(statuses, bars);
+  assert.match(html, /Changes save automatically/);
+});
