@@ -55,6 +55,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 22 | `month-parishes-20261003` | `bash install.sh` |
 | 23 | `remitinfo-20261003` | `bash install.sh` |
 | 24 | `srcdocinfo-20261003` | `bash install.sh` |
+| 25 | `followticks-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -104,6 +105,11 @@ result, so it lists 44 files.
 bot's records) changes `tools/monthinfo.py`, `tools/satinfo.py`, `tools/satbot.py`, `tools/monthpick.py` and
 `telegram/srcdoc/poller.py`, and adds `tools/srcdocinfo.py` and `tools/portal-month.cjs`. Its `patch.py` was run on copies
 of the live files (after step 23); `INSTALL-ORDER.sha256` lists the result, so it lists 46 files.
+
+`followticks-20261003` (step 25: the weekly Sunday-records message follows its ticks once the app has saved them, and
+the scheduler's memo back-up follows the memo "Days to check") changes `tools/clerkcfg.py`, `tools/reminders.py` and
+`telegram/srcdoc/boxsched.py`. Its `patch.py` was run on copies of the live files (after step 24); `INSTALL-ORDER.sha256`
+lists the result, so it lists 46 files.
 
 ## Making a box change
 

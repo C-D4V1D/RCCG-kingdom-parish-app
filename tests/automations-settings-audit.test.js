@@ -58,3 +58,51 @@ test('relabelled controls', () => {
   assert.match(html, /Largest file for the Admin source document/);
   assert.ok(!html.includes('(Pays the RRR, Full status)'));
 });
+
+// Follow-ups (2026-10-03, followticks-20261003).
+const cfg2 = () => ({
+  people: [{ key: 'david', name: 'D', called: 'Called-D', telegram_chat_id: '1', email: null, full_status: true, buttons: true },
+           { key: 'divine', name: 'V', called: 'Called-V', app_role: 'accountant', telegram_chat_id: '2', email: null, full_status: false, buttons: true },
+           { key: 'p2', name: 'Parish Person', parish: '111111', telegram_chat_id: null, email: null }],
+  parishes: [{ code: '602757', name: 'Kingdom Parish', source_docs: true },
+             { code: '111111', name: 'Test Parish', source_docs: true, handler: 'box' }],
+  routing: { weekly_attendance_reminder: { david: { telegram: true, email: false }, divine: { telegram: true, email: false } },
+             attendance_filed: { p2: { telegram: true, email: true } } },
+  automations: {}, remittance: { handler: 'box', lines: {} },
+});
+
+test('parish portal login keeps its choice and says it is not used yet', () => {
+  const html = App._renderAutomationsSettings(cfg2(), false, { health: {} });
+  assert.match(html, /Not used yet: the box signs in with the Area account/);
+});
+
+test('parish people only see the message rows the box reads for them', () => {
+  const html = App._renderAutomationsSettings(cfg2(), false, { health: {} });
+  const sat = html.split('data-person-key="p2"')[1].split('</table>')[0];
+  for (const t of ['remittance_check', 'rrr_generated', 'month_close', 'collection_reminder']) assert.match(sat, new RegExp(`data-mt="${t}"`));
+  for (const t of ['attendance_filed', 'attendance_error', 'weekly_attendance_reminder', 'memo_forwarded']) assert.ok(!sat.includes(`data-mt="${t}"`), t);
+});
+
+test('weekly Sunday-records message shows what the box does today until saved with follow_ticks', () => {
+  const eff = App._automationsEffectiveConfig(cfg2());
+  assert.equal(eff.routing.weekly_attendance_reminder.david.telegram, false);
+  assert.equal(eff.routing.weekly_attendance_reminder.divine.telegram, true);
+  const saved = cfg2(); saved.automations = { weekly_attendance_reminder: { follow_ticks: true } };
+  assert.equal(App._automationsEffectiveConfig(saved).routing.weekly_attendance_reminder.david.telegram, true);
+});
+
+test('help text names come from People "Called in messages"', () => {
+  const c = cfg2();
+  assert.equal(App._automationsHelpText('{tg:weekly_attendance_reminder}', c), 'Called-D and Called-V');
+  assert.equal(App._automationsHelpText('{role:accountant} / {role:admin} / {person:divine}', c), 'Called-V / Called-D / Called-V');
+  const html = App._renderAutomationsSettings(c, false, { health: {} });
+  assert.ok(!/\{(tg|email|to|first|role|who|person):[a-z_]+\}/.test(html));
+  assert.ok(!/Bro\. (David|Divine|Fabian)/.test(html));
+});
+
+test('Kingdom people get Admin (full status) and Generate RRR / Refresh buttons ticks', () => {
+  const html = App._renderAutomationsSettings(cfg2(), false, { health: {} });
+  assert.match(html, /class="at-p-admin" checked/);
+  assert.match(html, /Admin \(full status\)/);
+  assert.match(html, /Generate RRR \/ Refresh buttons/);
+});
