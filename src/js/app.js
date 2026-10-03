@@ -2974,8 +2974,10 @@ function txModuleLabel(module){
 function txCurrentMonthDefaults(){
   const now = new Date();
   return {
-    from: new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0],
-    to:   new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().split('T')[0]
+    // ymdLocal, not toISOString: in Nigeria (UTC+1) local midnight on the 1st is still the
+    // previous day in UTC, so toISOString shifted the whole month back by one day.
+    from: ymdLocal(new Date(now.getFullYear(), now.getMonth(), 1)),
+    to:   ymdLocal(new Date(now.getFullYear(), now.getMonth()+1, 0))
   };
 }
 
@@ -9353,7 +9355,7 @@ async function showRemittancePaymentModal(part){
   _remShareAdjustOpen = false;   // a fresh form always starts from the calculated share
   const [allIncome, settings, allUsers] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const quotas=getQuotaList(settings);
-  const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const fromDate=state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
@@ -9762,7 +9764,7 @@ async function submitRemittance(btn=null){
   const receiptFile=document.getElementById('rem_receipt')?.files?.[0];
   const receiptFileName=receiptFile?.name||'';
 
-  const fromDate=state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const fromDate=state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
 
   const isSuperUser=['it_admin','pastor'].includes(state.user?.role);
@@ -10357,7 +10359,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const [allIncome, settings, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const quotas=getQuotaList(settings);
-  const fromDate=fromOverride||state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+  const fromDate=fromOverride||state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=toOverride||state.remToDate||new Date().toISOString().split('T')[0];
   const income=filterByDateRange(allIncome, fromDate, toDate);
   const rem=await calcRemittancesFromRecords(income);
@@ -10655,7 +10657,7 @@ async function shareRemittanceReport(fromOverride, toOverride){
   try {
     const [allIncome, settings, users] = await Promise.all([DB.getIncome(), DB.getSettings(), DB.getUsers()]);
     const quotas=getQuotaList(settings);
-    const fromDate=fromOverride||state.remFromDate||new Date(state.year,state.month,1).toISOString().split('T')[0];
+    const fromDate=fromOverride||state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
     const toDate=toOverride||state.remToDate||new Date().toISOString().split('T')[0];
     const income=filterByDateRange(allIncome, fromDate, toDate);
     const rem=await calcRemittancesFromRecords(income);
@@ -17766,11 +17768,16 @@ function importData(){
         }
         if(warnings.length && !confirm('Backup file info:\n\n'+warnings.join('\n')+'\n\nContinue?')) return;
         if(!confirm('This will overwrite all existing financial records (income, expenses, remittances, petty cash) with data from the backup.\n\nUser accounts and PINs will NOT be changed — any names or PINs you have updated will be preserved.\n\nAre you sure you want to proceed?')) return;
-        await DB.importBackup(data);
-        DB.addAudit('data_imported','Data restored from backup',state.user?.name);
+        const result = await DB.importBackup(data);
+        const skipped = (result?.errors||[]).filter(x=>!String(x).startsWith('user:')).length;
+        DB.addAudit('data_imported','Data restored from backup'+(skipped?` (${skipped} records could not be restored)`:''),state.user?.name);
+        if(skipped) alert(`Restore finished, but ${skipped} record(s) could not be restored. Please check the figures before carrying on.`);
         showAlert('Data restored successfully! Reloading…','success');
         setTimeout(()=>window.location.reload(), 600);
-      }catch(e){ showAlert('Invalid backup file. Please use a valid JSON backup.','danger') }
+      }catch(e){
+        // A file that isn't JSON fails at JSON.parse (SyntaxError); anything else is the server's answer.
+        showAlert(e instanceof SyntaxError ? 'Invalid backup file. Please use a valid JSON backup.' : `Restore failed: ${e.message||'Unknown error'}`,'danger');
+      }
     };
     reader.readAsText(file);
   };

@@ -326,7 +326,7 @@ async function checkAutomationKey(DB, key) {
 const SHARED_ROUTES = new Set(['settings', 'church-bank-ingest-log', 'bank-balance-snapshot']);
 const KPSC_NATIVE_ROUTES = new Set([
   'action-items', 'ai-secretary-meetings', 'realtime-transcription-token', 'deepgram-transcription-token',
-  'partnership-pledges', 'partnership-feedback', 'remit-webhook-test', 'admin',
+  'partnership-pledges', 'partnership-feedback', 'remit-webhook-test',
 ]);
 
 function classifyApiRoute(route, param, method) {
@@ -2778,9 +2778,10 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     }
 
     // ── /api/admin ─────────────────────────────────────────────
+    // Restore backup / Clear data / full reset are Finance-app IT-admin buttons, so this is a Finance route
+    // (it used to demand a KPSC session, which the Finance app never sends, so every one of them failed).
     if (route === 'admin') {
-      const auth = await requireKpscRole(DB, request, ['it_admin']);
-      if (auth instanceof Response) return auth;
+      if (authz?.finance?.role !== 'it_admin') return finAuthErr('forbidden', 403, 'Only the IT administrator can do this.');
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
       if (method === 'POST' && param === 'import') return await adminImport(DB, body);
@@ -12611,8 +12612,16 @@ async function adminClear(DB) {
 
 async function adminImport(DB, data) {
   if (!data || typeof data !== 'object') return err('Invalid backup data', 400);
-  // Clear first
-  await adminClear(DB);
+  // Clear only what the backup file brings back. adminClear() also wipes the KPSC tables
+  // (accounts, partners, partner payments, …), which the app's backup export does not
+  // contain — so a restore used to delete all KPSC data for good. The approved petty-cash
+  // limit (max_float) is kept unless the backup carries its own petty config.
+  const restoreTables = ['income','expenses','petty_cash','remittances','satellite_funds','cash_transactions','audit_log','notifications'];
+  for (const t of restoreTables) {
+    await DB.prepare(`DELETE FROM ${t}`).run();
+  }
+  await DB.prepare(`UPDATE petty_config SET float_amount=0 WHERE id='main'`).run();
+  await DB.prepare(`DELETE FROM settings`).run();
   // Re-seed default settings so app still works
   await handleInit(DB);
   // Import each record type
