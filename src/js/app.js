@@ -19767,8 +19767,9 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'collection_reminder',       label:'Sunday records: follow-up reminders' },
   { key:'month_close',               label:'Month-close checklist & payment' },
   { key:'weekly_health',             label:'Weekly box health note' },
-  { key:'upload_confirmation',       label:'Upload confirmation' },
-  { key:'upload_fyi',                label:'Upload notice (for others)' },
+  // fixed: the bot always sends these (uploader / every bot user); nothing reads their ticks, so no row is shown.
+  { key:'upload_confirmation',       label:'Upload confirmation', fixed:true },
+  { key:'upload_fyi',                label:'Upload notice (for others)', fixed:true },
   { key:'sunday_note',               label:'Sunday memo-check note' },
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
@@ -19860,12 +19861,12 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '🩺 <b>Weekly system check</b>\nSat 3 Oct\n\n✅ Upload bot + scheduler\n✅ Memo runner\n✅ Statement runner\n✅ Drive sync\n\nLast memo check: Sat 3 Oct, 08:51 · ok · 0 new\nLast Drive sync: Sat 3 Oct, 17:50\nThis week: 0 automatic restart(s), 0 sync error(s)\n\nAll good. No action needed.',
   },
   upload_confirmation: {
-    what: 'The bot\'s reply to the person who uploaded a source document, once the portal confirms it. It always goes to the uploader (the ticks here don\'t change it).',
+    what: 'The bot\'s reply to the person who uploaded a source document, once the portal confirms it. It always goes to the uploader, so it has no switch in the People lists.',
     when: 'Straight after an upload through the Telegram bot.',
     sample: '✅ Uploaded and confirmed on the portal\nKingdom Parish, Finance source doc, October 2026\n(link to the file on the portal)',
   },
   upload_fyi: {
-    what: 'A note to the other bot users that someone uploaded a source document. It goes to everyone who can use the bot (the ticks here don\'t change it).',
+    what: 'A note to the other bot users that someone uploaded a source document. It goes to everyone who can use the bot, so it has no switch in the People lists.',
     when: 'Straight after an upload through the Telegram bot.',
     sample: 'ℹ️ Divine uploaded a source doc via the bot\nKingdom Parish, Finance source doc, October 2026',
   },
@@ -19891,7 +19892,7 @@ const AUTOMATION_MESSAGE_GUIDE = {
   },
   bank_transaction_detected: {
     what: 'Every real bank balance change the periodic check finds — whether it matched automatically, needs your review, or wasn\'t found in your records at all. A plain FYI, separate from the "needs review" alert above.',
-    when: 'Every time the periodic balance check (every 15 minutes, 6am-10pm) sees the balance move.',
+    when: 'Every time the periodic balance check sees the balance move (how often and between which hours: Bank reconciliation, normally every 15 minutes from 06:00 to 22:00).',
     sample: '✅ ₦245,000 came into the bank on 4 Oct — matched automatically to 1 of your records.',
   },
 };
@@ -20044,7 +20045,7 @@ function automationsTelegramBotSectionHtml(saved, saveBar){
   return `<details class="at-details" id="atTelegramBot">
       <summary>Telegram bot</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin-top:0">Who sees each command in their Telegram menu. People's roles come from Automations → People (Pays the RRR, Full status). Satellite parish pastors only ever see Month, Upload, I've paid (if they pay) and Help.</p>
+        <p class="at-note" style="margin-top:0">Who sees each command in their Telegram menu. "RRR payers" are the people with "Pays the RRR" ticked under People; "Admin only" is the box's admin person (the full-status setting, which this page does not show). Only people with "Can use the Telegram bot" ticked can use the bot at all. Satellite parish pastors only ever see Month, Upload, I've paid (if they pay) and Help.</p>
         ${rows}
         <div class="at-toggle-row at-menu-row">
           <div><div class="at-toggle-label">❓ Help</div><div class="at-subtitle">Always on for everyone</div></div>
@@ -20349,10 +20350,11 @@ function renderAutomationsRemittanceSection(config, health){
       <summary>Remittance (month-end)</summary>
       <div class="at-details-body">
         ${holdBanner}
+        <p class="at-note" style="margin-top:0">Month-end run by, for Kingdom Parish. Each satellite parish has its own "Month-end run by" under Parishes.</p>
         <div class="at-radio-group">
           <label class="at-radio-card">
             <input type="radio" name="atRemHandler" class="at-rem-handler" value="clerk_ai" ${handler==='clerk_ai'?'checked':''}>
-            <div><div class="at-toggle-label">Clerk AI (current)</div><div class="at-subtitle">The Clerk AI files the remittance and attendance on the RCCG portal when the last Sunday collection is saved. The box only does a practice run and tells David what it would have filed.</div></div>
+            <div><div class="at-toggle-label">Clerk AI</div><div class="at-subtitle">The Clerk AI files the remittance and attendance on the RCCG portal when the last Sunday collection is saved. The box only does a practice run and tells David what it would have filed.</div></div>
           </label>
           <label class="at-radio-card">
             <input type="radio" name="atRemHandler" class="at-rem-handler" value="box" ${handler==='box'?'checked':''} onclick="return App.onRemHandlerBoxClick(event)">
@@ -20384,7 +20386,7 @@ function onRemHandlerBoxClick(ev){
 function automationsRoutingTableHtml(routingFor, tgConnected, withGuide){
   return `<div class="table-wrap"><table class="at-routing-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
-        ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
+        ${AUTOMATION_MESSAGE_TYPES.filter(mt=>!mt.fixed).map(mt=>{
           const r = routingFor(mt) || {};
           const guide = withGuide ? ` <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'')}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a>` : '';
           return `<tr><td>${esc(mt.label)}${guide}</td>
@@ -20450,11 +20452,12 @@ function automationsParishCardHtml(p, i, ctx){
   const { config, box, users } = ctx;
   const code = String(p.code || '').trim();
   const isSat = code !== KINGDOM_PARISH_CODE;
-  const flags = `<div class="at-day-chips">
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}> Source documents</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance" ${p.attendance?'checked':''}> Attendance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance" ${p.remittance?'checked':''}> Remittance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement" ${p.statement?'checked':''}> Statement</label>
+  // Only "Source documents" is read by the box (upload bot, source-doc reminders, /month). The old Attendance /
+  // Remittance / Statement ticks were read by nothing (a parish's month-end follows "Month-end run by"), so they are
+  // no longer shown; their saved values are kept as they are (see collectAutomationsConfig).
+  const flags = `<div class="at-toggle-row" style="margin-top:6px">
+        <div><div class="at-toggle-label">Source documents</div><div class="at-subtitle">The Telegram upload bot offers this parish, the source-doc reminders include it, and /month shows its SOURCE DOCUMENTS.</div></div>
+        <label class="at-switch"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}><span class="at-switch-track"></span></label>
       </div>`;
   const people = isSat ? (automationsSplitPeople(config).byParish[code] || []) : [];
   // The code can be edited until a pastor has an app login (that login is tied to the code).
@@ -20477,11 +20480,12 @@ function automationsParishCardHtml(p, i, ctx){
   return `<div class="at-subcard at-par-card" data-parish-idx="${i}" data-orig-code="${esc(code)}" data-pw-sealed="${esc(p.portal_password_sealed||'')}" data-pw-set-at="${esc(p.portal_password_set_at||'')}">
       ${head}${flags}
       <div class="at-toggle-row" style="margin-top:10px">
-        <div><div class="at-toggle-label">Active</div><div class="at-subtitle">Switch off to pause this parish: its pastor cannot sign in to the app.</div></div>
+        <div><div class="at-toggle-label">Active</div><div class="at-subtitle">Switch off to pause this parish: its pastor cannot sign in to the app, the box ignores its month-end and sends it no Sunday records reminders or month-close messages, and it leaves the "Other parishes" list in /month.</div></div>
         <label class="at-switch"><input type="checkbox" class="at-par-active" ${automationsParishField(p,'active')!==false?'checked':''}><span class="at-switch-track"></span></label>
       </div>
       <div class="form-group" style="margin-top:8px"><label class="form-label">Month-end run by</label>
-        <select class="form-select at-par-handler"><option value="box" ${handler==='box'?'selected':''}>Box (default)</option><option value="clerk_ai" ${handler==='clerk_ai'?'selected':''}>Clerk AI</option></select></div>
+        <select class="form-select at-par-handler"><option value="box" ${handler==='box'?'selected':''}>Box (default)</option><option value="clerk_ai" ${handler==='clerk_ai'?'selected':''}>Clerk AI</option></select>
+        <div class="at-subtitle">Who files this parish's remittance and attendance once its last Sunday collection is saved. Box: the box does it and sends the check with the Generate RRR / Refresh buttons. Clerk AI: the box only wakes the Clerk AI.</div></div>
 
       <div class="at-par-sub-title">Pastor &amp; people of this parish</div>
       <div class="at-par-people">${people.map(x=>automationsSatPersonHtml(x, routingOfPerson(x), box, users)).join('')}</div>
@@ -20499,11 +20503,11 @@ function automationsParishCardHtml(p, i, ctx){
       </div>
 
       <div class="at-par-sub-title">Copies</div>
-      <div class="at-subtitle" style="margin:0 0 4px">Who else gets copies of this parish's check, RRR, paid and month-close messages.</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Who else gets copies of this parish's check, RRR, paid and month-close messages, and its cut-off Sunday and after-cut-off Sunday records reminders.</div>
       <div class="at-day-chips at-par-picks" data-field="copies">${automationsPicksHtml('copies', copies, pick)}</div>
 
       <div class="at-par-sub-title">Late parish alert</div>
-      <div class="at-subtitle" style="margin:0 0 4px">Told when this parish is 5 or more days late.</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Also gets this parish's daily reminders after the cut-off Sunday while its last collection is still missing (for the number of days set under Sunday records reminders).</div>
       <div class="at-day-chips at-par-picks" data-field="late_alert">${automationsPicksHtml('late_alert', late, pick)}</div>
 
       <div class="at-par-sub-title">RCCG portal login</div>
@@ -20638,7 +20642,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Source-doc reminders</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.source_doc_reminders.enabled', sdr.enabled, 'Send source-document reminders', "When turned on, a reminder is sent before the portal closes for source documents that haven't come in yet.")}
+        ${automationsBoolField('automations.source_doc_reminders.enabled', sdr.enabled, 'Send source-document reminders', "When turned on, a reminder is sent before the portal closes for source documents that haven't come in yet, for the parishes with Source documents switched on under Parishes.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Days before portal closes (comma-separated)</label><input class="form-input at-field" data-path="automations.source_doc_reminders.days_before_close" data-kind="numlist" value="${esc((sdr.days_before_close||[]).join(', '))}"></div>
           ${automationsTimeField('automations.source_doc_reminders.after_time', sdr.after_time, 'Send after (time)')}
@@ -20652,7 +20656,7 @@ function renderAutomationsSettings(config, isDefault, health){
       <div class="at-details-body">
         <p class="at-note" style="margin-top:0">Bro. Divine enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly message</div>
-        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message to Bro. Divine', "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in.")}
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message to Bro. Divine', "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in. When turned off, the same list still goes out on Monday as a follow-up reminder, unless Follow-up reminders below is off too.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
@@ -20690,6 +20694,7 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.health_note.log_trim_mb', health_.log_trim_mb, 'Trim logs larger than (MB)', 0)}
           ${automationsNumField('automations.health_note.log_trim_lines', health_.log_trim_lines, 'Keep this many lines', 0)}
         </div>
+        <p class="at-note">Log trimming runs once a day even when the health note is off: a box log larger than this is cut down to its last lines.</p>
         ${saveBar}
       </div>
     </details>
@@ -20698,13 +20703,14 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Upload bot</summary>
       <div class="at-details-body">
         <div class="form-row">
-          ${automationsNumField('automations.upload_bot.admin_max_kb', upl.admin_max_kb, 'Max size for admins (KB)', 1)}
-          ${automationsNumField('automations.upload_bot.finance_max_kb', upl.finance_max_kb, 'Max size for finance (KB)', 1)}
+          ${automationsNumField('automations.upload_bot.admin_max_kb', upl.admin_max_kb, 'Largest file for the Admin source document (KB)', 1)}
+          ${automationsNumField('automations.upload_bot.finance_max_kb', upl.finance_max_kb, 'Largest file for the Finance source document (KB)', 1)}
         </div>
         <div class="form-row" style="margin-top:10px">
-          ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Image quality (1–100)', 1, 100)}
-          ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Max image width (px)', 1)}
+          ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Best image quality to try (1–100)', 1, 100)}
+          ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Widest image to try (px)', 1)}
         </div>
+        <p class="at-note">The sizes are per portal upload slot (Admin or Finance section), not per person. The bot shrinks a photo step by step, starting from the width and quality above, until it fits the slot's size.</p>
         ${saveBar}
       </div>
     </details>
@@ -20793,7 +20799,7 @@ function renderAutomationsAccountantSummary(config){
     <div class="at-section-title">Your notifications</div>
     <p class="at-note">A read-only summary of what the box sends you, and how.</p>
     <div class="card">
-      <p style="margin-bottom:10px"><strong>Can you upload source documents?</strong> ${me?.can_upload ? 'Yes' : 'No'}</p>
+      <p style="margin-bottom:10px"><strong>Can you use the Telegram bot (including uploading source documents)?</strong> ${me?.can_upload ? 'Yes' : 'No'}</p>
       <div class="table-wrap"><table class="at-summary-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
         ${rows || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No notifications are set up for you yet.</td></tr>'}
@@ -20832,7 +20838,7 @@ function addAutomationPerson(){
     </div>
     <div class="table-wrap"><table class="at-routing-table">
       <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
-      ${AUTOMATION_MESSAGE_TYPES.map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
+      ${AUTOMATION_MESSAGE_TYPES.filter(mt=>!mt.fixed).map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
     </table></div>
     <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>`;
   // Before the "+ Add person" button (a direct child; the first button in the container is a card's Delete button).
@@ -21139,6 +21145,11 @@ function collectAutomationsConfig(){
       if(row.dataset.tgInvite) person.tg_invite = row.dataset.tgInvite; else delete person.tg_invite;
     }
     people.push(person);
+    // Rows not shown (fixed message types): keep this person's saved switches as they are.
+    AUTOMATION_MESSAGE_TYPES.filter(mt=>mt.fixed).forEach(mt=>{
+      const v = (base.routing?.[mt.key] || {})[existingKey];
+      if(v && typeof v === 'object') routing[mt.key][key] = { telegram: !!v.telegram, email: !!v.email };
+    });
     row.querySelectorAll('.at-route').forEach(cb=>{
       const mtKey = cb.dataset.mt;
       const ch = cb.dataset.ch === 'email' ? 'email' : 'telegram';
@@ -21165,7 +21176,9 @@ function collectAutomationsConfig(){
     const existing = (base.parishes||[]).find(p=>String(p.code)===(orig || code));
     const flags = {};
     card.querySelectorAll('.at-par-flag').forEach(cb=>{ flags[cb.dataset.flag] = cb.checked; });
-    const parish = { ...(existing || {}), code, name, source_docs:!!flags.source_docs, attendance:!!flags.attendance, remittance:!!flags.remittance, statement:!!flags.statement };
+    // attendance / remittance / statement are no longer shown (nothing reads them): keep what was saved, false for a new parish.
+    const kept = (f)=> (f in flags) ? !!flags[f] : (typeof existing?.[f] === 'boolean' ? existing[f] : false);
+    const parish = { ...(existing || {}), code, name, source_docs:kept('source_docs'), attendance:kept('attendance'), remittance:kept('remittance'), statement:kept('statement') };
     if(automationsIsSatCode(code) && card.querySelector('.at-par-active')){
       const picks = (field)=>[...card.querySelectorAll(`.at-par-pick[data-field="${field}"]:checked`)]
         .map(cb=>keyMap[cb.dataset.key] || cb.dataset.key).filter(k=>savedKeys.has(k));
@@ -21367,7 +21380,7 @@ return {
   satQuotaCopyFirst, saveSatQuotas,
   _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
   _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
-  _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
+  _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _collectAutomationsConfig: (saved)=>{ state.automations = { ...(state.automations||{}), config: saved }; return collectAutomationsConfig(); }, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,
