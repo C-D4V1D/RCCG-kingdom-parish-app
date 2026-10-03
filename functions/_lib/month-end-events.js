@@ -8,7 +8,7 @@
 //                       falls back to the Clerk AI so a month is never dropped.
 //
 // The box mailbox needs the CLERK_WATCHDOG_TOKEN secret (as /api/automations does). Nothing here throws.
-import { remitWebhookHeaders } from './remit-action-token.js';
+import { remitWebhookHeaders, REMIT_ACTION_PEOPLE, REMIT_ACTION_PERSON_RE, REMIT_ACTION_PARISH } from './remit-action-token.js';
 
 export const CLERK_WATCHDOG_DEFAULT_URL = 'https://clerk-watchdog.decan-inv.workers.dev';
 const TIMEOUT_MS = 15000;
@@ -24,6 +24,32 @@ function watchdogToken(env) {
 
 function timeoutSignal() {
   return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(TIMEOUT_MS) : undefined;
+}
+
+/**
+ * Who may have the signed Generate RRR / Refresh buttons: Kingdom Parish people with "buttons" on in Automations →
+ * People. Returns { people: { key: label }, fromSettings }. When the saved settings can't be read (no token, Worker
+ * unreachable, nothing saved yet) it falls back to REMIT_ACTION_PEOPLE (David and Bro. Divine), as before.
+ */
+export async function actionButtonPeople(env) {
+  const fallback = { people: { ...REMIT_ACTION_PEOPLE }, fromSettings: false };
+  const token = watchdogToken(env);
+  if (!token) return fallback;
+  try {
+    const res = await fetch(`${watchdogBase(env)}/config`, { headers: { 'x-watchdog-token': token }, signal: timeoutSignal() });
+    if (!res.ok) return fallback;
+    const data = await res.json();
+    if (data?.is_default !== false || !Array.isArray(data?.config?.people)) return fallback;
+    const people = {};
+    for (const p of data.config.people) {
+      if (!p || p.buttons !== true || !REMIT_ACTION_PERSON_RE.test(String(p.key || ''))) continue;
+      if (String(p.parish || REMIT_ACTION_PARISH) !== REMIT_ACTION_PARISH) continue;   // Kingdom Parish's people only
+      people[p.key] = String(p.called || p.name || p.key).trim() || p.key;
+    }
+    return { people, fromSettings: true };
+  } catch {
+    return fallback;
+  }
 }
 
 /** 'box' or 'clerk_ai' (the default, also whenever the saved settings can't be read). */
