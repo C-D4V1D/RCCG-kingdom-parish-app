@@ -17253,6 +17253,7 @@ function renderAdminBackup(){
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn btn-primary" onclick="App.exportData(this)">⬇ Download full backup</button>
       <button class="btn" onclick="App.importData()">⬆ Restore from backup file</button>
+      <button class="btn" onclick="App.driveRestoreStart(this)">☁ Restore from Google Drive</button>
     </div>
     <hr class="divider">
     <div id="ttCard"><div style="font-size:13px;color:var(--text2)">Loading Cloudflare restore…</div></div>
@@ -17819,14 +17820,121 @@ async function timeTravelUndo(btn){
   } catch(e){ restore(); showAlert(`Undo failed: ${e.message||'Unknown error'}`,'danger'); }
 }
 
+// ── Restore from Google Drive: sign in with Google in the browser, list the Clerk box's weekly backups
+// (Drive → Clerk Box → workspace → app-backups), download the chosen one straight into the page, restore it.
+// Needs a Google "OAuth client ID" (not a secret) saved once in settings.googleDriveClientId.
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+let _gisLoading = null;
+function loadGoogleSignIn(){
+  if(window.google?.accounts?.oauth2) return Promise.resolve();
+  if(!_gisLoading) _gisLoading = new Promise((resolve, reject)=>{
+    const sc=document.createElement('script'); sc.src='https://accounts.google.com/gsi/client'; sc.async=true;
+    sc.onload=()=>resolve(); sc.onerror=()=>{ _gisLoading=null; reject(new Error('Could not load Google sign-in. Check the internet connection.')); };
+    document.head.appendChild(sc);
+  });
+  return _gisLoading;
+}
+async function googleDriveToken(clientId){
+  await loadGoogleSignIn();
+  return new Promise((resolve, reject)=>{
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId, scope: DRIVE_SCOPE,
+      callback: r => r && r.access_token ? resolve(r.access_token) : reject(new Error(r?.error_description || r?.error || 'Google sign-in was cancelled.')),
+      error_callback: e => reject(new Error(e?.type === 'popup_closed' ? 'Google sign-in was closed.' : (e?.message || 'Google sign-in failed.'))),
+    });
+    client.requestAccessToken({ prompt: '' });
+  });
+}
+async function driveApi(token, path){
+  const res = await fetch(`https://www.googleapis.com/drive/v3/${path}`, { headers:{ Authorization:`Bearer ${token}` } });
+  if(!res.ok){ const d = await res.json().catch(()=>null); throw new Error(d?.error?.message || `Google Drive answered ${res.status}`); }
+  return res;
+}
+
+function driveSetupHtml(current=''){
+  return `<div class="modal-title">☁ Set up “Restore from Google Drive” (once)</div>
+  <p style="font-size:13px;color:var(--text2)">Google needs to know this app before it lets it read your Drive. Do this once, on a computer, signed in to the Google account that holds the Clerk Box folder:</p>
+  <ol style="font-size:12.5px;color:var(--text2);padding-left:18px;line-height:1.6">
+    <li>Open <strong>console.cloud.google.com</strong> → top bar → <strong>New project</strong> → name it <em>Parish app</em> → Create.</li>
+    <li>Search for <strong>Google Drive API</strong> → <strong>Enable</strong>.</li>
+    <li>Menu → <strong>APIs &amp; Services → OAuth consent screen</strong> → Get started. App name <em>Parish app</em>, your email, Audience <strong>External</strong>, Create. Then <strong>Audience → Test users → Add users</strong> → add your own Gmail address.</li>
+    <li><strong>Clients → Create client</strong> → type <strong>Web application</strong>. Under <strong>Authorised JavaScript origins</strong> add <code>${esc(location.origin)}</code>. Create.</li>
+    <li>Copy the <strong>Client ID</strong> (it ends in <code>.apps.googleusercontent.com</code>) and paste it here:</li>
+  </ol>
+  <input id="driveClientId" class="form-input" placeholder="1234-abc.apps.googleusercontent.com" value="${esc(current)}" />
+  <p style="font-size:12px;color:var(--text3);margin-top:6px">When you first sign in, Google may say the app “hasn't been verified”. That's expected for your own private app: click <strong>Continue</strong>.</p>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+    <button class="btn" onclick="App.closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="App.driveSaveClientId(this)">Save and continue</button>
+  </div>`;
+}
+
+async function driveRestoreStart(btn){
+  if(!requireAdmin()) return;
+  const settings = await DB.getSettings().catch(()=>({}));
+  const clientId = String(settings.googleDriveClientId||'').trim();
+  if(!clientId){ showModal(driveSetupHtml()); return; }
+  const restore = setBtnLoading(btn, 'Signing in to Google…');
+  try {
+    const token = await googleDriveToken(clientId);
+    const q = encodeURIComponent("name contains 'rccg-full-backup-' and trashed = false");
+    const res = await driveApi(token, `files?q=${q}&orderBy=createdTime desc&pageSize=50&fields=files(id,name,size,createdTime)`);
+    const files = ((await res.json()).files||[]).filter(f=>/\.json(\.gz)?/.test(f.name));
+    restore();
+    const dateOf = f => (/rccg-full-backup-(\d{4}-\d{2}-\d{2})/.exec(f.name)||[])[1] || String(f.createdTime||'').slice(0,10);
+    files.sort((a,b)=>dateOf(b).localeCompare(dateOf(a)));
+    showModal(`<div class="modal-title">☁ Backups in your Google Drive</div>
+      ${files.length ? `<p style="font-size:13px;color:var(--text2)">Newest first. Choose the one to restore — you'll be asked to confirm.</p>
+      <div style="max-height:55vh;overflow:auto">${files.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div><div style="font-weight:600">${esc(fmtDate(dateOf(f)))}</div><div style="font-size:11px;color:var(--text3)">${esc(f.name)} · ${Math.max(1,Math.round((+f.size||0)/1024))} KB</div></div>
+        <button class="btn btn-sm btn-amber" onclick="App.driveRestoreFile('${esc(f.id)}','${esc(f.name)}',this)">Restore</button></div>`).join('')}</div>`
+      : `<p style="font-size:13px;color:var(--text2)">No backups found in this Google account. They appear in Drive → Clerk Box → workspace → app-backups once the Clerk box weekly backup is installed. Make sure you signed in with the Google account that holds that folder.</p>`}
+      <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px">
+        <button class="btn btn-sm" onclick="App.closeModal();App.driveShowSetup()">Change Google settings</button>
+        <button class="btn" onclick="App.closeModal()">Close</button></div>`);
+    state._driveToken = token;
+  } catch(e){ restore(); showAlert(`Google Drive: ${e.message||'something went wrong'}`,'danger'); }
+}
+
+async function driveShowSetup(){
+  const settings = await DB.getSettings().catch(()=>({}));
+  showModal(driveSetupHtml(String(settings.googleDriveClientId||'')));
+}
+
+async function driveSaveClientId(btn){
+  const v = String(document.getElementById('driveClientId')?.value||'').trim();
+  if(!/\.apps\.googleusercontent\.com$/.test(v)){ showAlert('That does not look like a Google Client ID (it ends in .apps.googleusercontent.com).','danger'); return; }
+  const restore = setBtnLoading(btn,'Saving…');
+  try { await DB.saveSettings({ googleDriveClientId: v }); closeModal(); driveRestoreStart(null); }
+  catch(e){ restore(); showAlert(`Could not save: ${e.message||''}`,'danger'); }
+}
+
+async function driveRestoreFile(id, name, btn){
+  if(!requireAdmin()) return;
+  const restore = setBtnLoading(btn,'Downloading…');
+  try {
+    const res = await driveApi(state._driveToken, `files/${encodeURIComponent(id)}?alt=media`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const data = await parseBackupBytes(bytes);
+    if(data?.format !== 'rccg-full-backup') throw new Error('this file is not a full backup');
+    const keepClientId = (await DB.getSettings().catch(()=>({}))).googleDriveClientId;
+    closeModal();
+    await restoreFullBackup(data, { afterRestore: async ()=>{ if(keepClientId) await DB.saveSettings({ googleDriveClientId: keepClientId }).catch(()=>{}); } });
+  } catch(e){ restore(); showAlert(`Could not restore ${name}: ${e.message||'unknown error'}`,'danger'); }
+}
+
+// A backup file's bytes (gzipped or plain JSON) into an object.
+async function parseBackupBytes(bytes){
+  if(bytes[0]===0x1f && bytes[1]===0x8b){
+    if(typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open .gz files. Use Chrome.');
+    return JSON.parse(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
+  }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 // Reads a .json or .json.gz backup file into an object.
 async function readBackupFile(file){
-  if(/\.gz$/i.test(file.name)){
-    if(typeof DecompressionStream === 'undefined') throw new Error('This browser cannot open .gz files. Unzip it first, or use Chrome.');
-    const text = await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
-    return JSON.parse(text);
-  }
-  return JSON.parse(await file.text());
+  return parseBackupBytes(new Uint8Array(await file.arrayBuffer()));
 }
 
 // Splits a table's rows into requests small enough for one server call (row count and size).
@@ -17841,7 +17949,7 @@ function backupChunks(rows, maxRows=300, maxChars=1500000){
   return out;
 }
 
-async function restoreFullBackup(data){
+async function restoreFullBackup(data, { afterRestore } = {}){
   const tt = await apiFetch('admin/time-travel');
   const here = new Map((tt.databases||[]).map(d=>[d.key,d.label]));
   const keys = Object.keys(data.databases||{}).filter(k=>here.has(k));
@@ -17875,6 +17983,7 @@ async function restoreFullBackup(data){
       }
       done++;
     }
+    if(afterRestore) await afterRestore();
     const fin = await apiFetch('admin/restore-finish','POST',{ bookmarks: begin.bookmarks||{} });
     DB.addAudit('data_imported',`Full backup restored (made ${when})`,state.user?.name);
     overlay.remove();
@@ -21167,7 +21276,7 @@ return {
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
   setAdminTab, setAdminUserSearch, saveSettings, resetBudgetRules, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
-  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData, timeTravelGoBack, timeTravelUndo,
+  updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData, timeTravelGoBack, timeTravelUndo, driveRestoreStart, driveRestoreFile, driveSaveClientId, driveShowSetup,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
   renderAutomations, toggleAutomationCard, addAutomationPerson, deleteAutomationPerson, openAutomationGuide, onRemHandlerBoxClick,
