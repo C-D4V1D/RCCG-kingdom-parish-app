@@ -17877,9 +17877,14 @@ async function driveRestoreStart(btn){
   const restore = setBtnLoading(btn, 'Signing in to Google…');
   try {
     const token = await googleDriveToken(clientId);
-    const q = encodeURIComponent("name contains 'rccg-full-backup-' and trashed = false");
-    const res = await driveApi(token, `files?q=${q}&orderBy=createdTime desc&pageSize=50&fields=files(id,name,size,createdTime)`);
-    const files = ((await res.json()).files||[]).filter(f=>/\.json(\.gz)?/.test(f.name));
+    // Drive's "contains" matches whole words from the start, and a trailing hyphen can make it miss, so search
+    // for the plain words and also list the app-backups folder itself; the name check below picks the files.
+    const listQ = async q => ((await (await driveApi(token, `files?q=${encodeURIComponent(q)}&orderBy=createdTime desc&pageSize=100&fields=files(id,name,size,createdTime)`)).json()).files||[]);
+    const found = await listQ("name contains 'rccg' and name contains 'backup' and trashed = false");
+    const folders = await listQ("name = 'app-backups' and mimeType = 'application/vnd.google-apps.folder' and trashed = false");
+    for(const f of folders) found.push(...await listQ(`'${f.id}' in parents and trashed = false`));
+    const seen = new Set();
+    const files = found.filter(f=>/^rccg-full-backup-.*\.json(\.gz)?/.test(f.name) && !seen.has(f.id) && seen.add(f.id));
     restore();
     const dateOf = f => (/rccg-full-backup-(\d{4}-\d{2}-\d{2})/.exec(f.name)||[])[1] || String(f.createdTime||'').slice(0,10);
     files.sort((a,b)=>dateOf(b).localeCompare(dateOf(a)));
@@ -17888,7 +17893,7 @@ async function driveRestoreStart(btn){
       <div style="max-height:55vh;overflow:auto">${files.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
         <div><div style="font-weight:600">${esc(fmtDate(dateOf(f)))}</div><div style="font-size:11px;color:var(--text3)">${esc(f.name)} · ${Math.max(1,Math.round((+f.size||0)/1024))} KB</div></div>
         <button class="btn btn-sm btn-amber" onclick="App.driveRestoreFile('${esc(f.id)}','${esc(f.name)}',this)">Restore</button></div>`).join('')}</div>`
-      : `<p style="font-size:13px;color:var(--text2)">No backups found in this Google account. They appear in Drive → Clerk Box → workspace → app-backups once the Clerk box weekly backup is installed. Make sure you signed in with the Google account that holds that folder.</p>`}
+      : `<p style="font-size:13px;color:var(--text2)">No backups found in this Google account. They appear in Drive → Clerk Box → workspace → app-backups once the Clerk box weekly backup is installed (a new one takes up to 10 minutes to reach Drive). Make sure you signed in with the Google account that holds that folder.</p>`}
       <div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px">
         <button class="btn btn-sm" onclick="App.closeModal();App.driveShowSetup()">Change Google settings</button>
         <button class="btn" onclick="App.closeModal()">Close</button></div>`);
