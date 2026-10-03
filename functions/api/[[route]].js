@@ -16,7 +16,7 @@ import {
   REMIT_ACTION_PARISH,
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
-import { deliverMonthEndEvent, monthEndConfigured } from '../_lib/month-end-events.js';
+import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople } from '../_lib/month-end-events.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -4767,7 +4767,8 @@ function remCutoffPeriodForDate(settings, date) {
 // shared with the /remit-action confirm page so both authenticate the same way.
 //
 // Each payload also carries signed one-tap links (see ../_lib/remit-action-token.js and
-// functions/remit-action.js): links.{david,divine}.{generate_rrr,refresh,refresh_attendance}. They are null
+// functions/remit-action.js): links.<person>.{generate_rrr,refresh,refresh_attendance} for each person with buttons on
+// in Automations → People (David and Bro. Divine when the settings can't be read). They are null
 // when REMIT_WEBHOOK_KEY is unset (nothing to sign with).
 
 /** Origin of the incoming request (e.g. https://app.example), or '' if it can't be read. */
@@ -4786,7 +4787,8 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
 
   const month = period.periodEnd.slice(0, 7);          // remittance month = month of the cut-off Sunday
   const exp = remitActionExpForCutoff(period.periodEnd);
-  const links = await buildRemitActionLinks(env, origin, { month, exp });
+  const links = satParish ? null
+    : await buildRemitActionLinks(env, origin, { month, exp, people: Object.keys((await actionButtonPeople(env)).people) });
   const payload = {
     event: 'cutoff_collection_saved',
     collectionDate,
@@ -4859,7 +4861,7 @@ async function sendRemitWebhookTest(env, account, origin = '') {
   // and valid for 24 hours. The month is the current month; nothing is done for it.
   const month = sentAt.slice(0, 7);
   const exp = Math.floor(Date.now() / 1000) + REMIT_ACTION_TEST_TTL_S;
-  const links = await buildRemitActionLinks(env, origin, { month, exp, test: true });
+  const links = await buildRemitActionLinks(env, origin, { month, exp, test: true, people: Object.keys((await actionButtonPeople(env)).people) });
   const payload = {
     event: 'webhook_test',
     test: true,

@@ -14,10 +14,24 @@ os.makedirs(os.path.join(TMP, "tools"))
 for d in ("rccg-remit/state", "rccg-attendance", "telegram", "state/monthend/out"):
     os.makedirs(os.path.join(TMP, d), exist_ok=True)
 for f in ("tools/clerkcfg.py", "tools/mailer.py", "tools/monthend.py", "telegram/send_msg.py", "telegram/tg.py",
-          "telegram/contacts.json", "rccg-remit/make-check-email.py", "rccg-remit/remit_match.py"):
+          "telegram/contacts.json", "rccg-remit/make-check-email.py", "rccg-remit/remit_match.py", "telegram/tg_msgs.py"):
     shutil.copy2(os.path.join(SRC, f), os.path.join(TMP, f))
+for f in os.listdir(os.path.join(SRC, "rccg-remit")):  # make-check-email.py's helpers (section 6)
+    if f.endswith(".py") and not os.path.exists(os.path.join(TMP, "rccg-remit", f)):
+        shutil.copy2(os.path.join(SRC, "rccg-remit", f), os.path.join(TMP, "rccg-remit", f))
 subprocess.run([sys.executable, os.path.join(HERE, "patch.py")], env=dict(os.environ, CLERK_ROOT=TMP), check=True,
                stdout=subprocess.DEVNULL)
+# checkpeople-20261003 (installed after this fix): keep a copy without it to compare against, then apply it too
+CP = os.path.join(os.path.dirname(HERE), "checkpeople-20261003", "patch.py")
+OLD = TMP + "-before"
+shutil.copytree(TMP, OLD)
+if os.path.exists(CP):
+    subprocess.run([sys.executable, CP], env=dict(os.environ, CLERK_ROOT=TMP), check=True, stdout=subprocess.DEVNULL)
+for _r in (TMP, OLD):  # these copies use their own tools/clerkcfg.py (not the box's), so section 6 tests the right code
+    for _f in [os.path.join(_r, "rccg-remit", x) for x in os.listdir(os.path.join(_r, "rccg-remit")) if x.endswith(".py")] + [os.path.join(_r, "telegram", "tg_msgs.py")]:
+        _s = open(_f).read()
+        if "'/workspace/tools'" in _s:
+            open(_f, "w").write(_s.replace("'/workspace/tools'", repr(os.path.join(_r, "tools"))))
 os.environ["CLERK_ROOT"] = TMP
 os.environ.pop("CLERK_MSG_TYPE", None); os.environ.pop("CLERK_PERSONAL", None)
 sys.path.insert(0, os.path.join(TMP, "tools"))
@@ -201,6 +215,88 @@ for who, _, kb in plan:
     print(f"  RRR message to {who:<7} pays_rrr={who in payers!s:<5} I've-paid button={paid}")
     check(paid == (who in payers), f"{who}: I've-paid button follows pays_rrr")
 
+# 6. checkpeople-20261003: the check goes to whoever Automations routes remittance_check to (email + Telegram)
+if os.path.exists(CP):
+    import base64, filecmp, time
+    print("\n== Check emails + Telegram for everyone routed in Automations (make-check-email.py, tg_msgs.py)")
+    RUN = os.path.join(SRC, "rccg-remit", "runs", "sample-2026-09.json")
+    SL = json.load(open(os.path.join(SRC, "rccg-remit", "runs", "sample-links-2026-09.json")))
+    def tok(url, person, exp):  # same link shape, our own person/expiry (the box never checks the signature)
+        base, t = url.split("?t="); body, sig = t.split(".")
+        pl = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))); pl.update(person=person, exp=exp)
+        return base + "?t=" + base64.urlsafe_b64encode(json.dumps(pl, separators=(",", ":")).encode()).decode().rstrip("=") + "." + sig
+    EXP = int(time.time()) + 3 * 86400
+    def links_for(people):
+        d = dict(SL, links={w: {a: tok(u, w, EXP) for a, u in SL["links"]["david"].items()} for w in people})
+        f = os.path.join(TMP, "links-" + "-".join(people) + ".json"); json.dump(d, open(f, "w")); return f
+    def build(root, cfg, lf, tag):
+        env = dict(os.environ, CLERK_CFG=cfg)
+        out = os.path.join(TMP, "mce-" + tag)
+        r = subprocess.run([sys.executable, os.path.join(root, "rccg-remit", "make-check-email.py"), "--in", RUN, "--links", lf,
+                            "--out-dir", out], cwd=os.path.join(SRC, "rccg-remit"), env=env, capture_output=True, text=True)
+        check(r.returncode == 0, f"{tag}: make-check-email.py builds" + ("" if not r.returncode else ": " + (r.stderr or r.stdout)[-200:]))
+        tgf = os.path.join(TMP, "tg-" + tag + ".json")
+        r = subprocess.run([sys.executable, os.path.join(root, "telegram", "tg_msgs.py"), "check", "--summary",
+                            os.path.join(out, "check-summary.json"), "--links", lf, "--run", RUN, "--out", tgf],
+                           env=env, capture_output=True, text=True)
+        check(r.returncode == 0, f"{tag}: tg_msgs.py builds" + ("" if not r.returncode else ": " + (r.stderr or r.stdout)[-200:]))
+        return out, (json.load(open(tgf)) if os.path.exists(tgf) else {"messages": {}})
+    tree = lambda d: sorted(os.path.relpath(os.path.join(p, f), d) for p, _, fs in os.walk(d) for f in fs)
+    nodir = lambda f: [{k: v for k, v in r.items() if k != "dir"} for r in json.load(open(f))]
+    # 6a. current settings: exactly the same emails and Telegram messages as before this change
+    lf = links_for(["david", "divine"])
+    cfg0 = os.environ.get("CLERK_CFG", "/workspace/config.json")
+    oa, ta = build(OLD, cfg0, lf, "before"); ob, tb = build(TMP, cfg0, lf, "after")
+    same = tree(oa) == tree(ob) and all(f == "recipients.json" or filecmp.cmp(os.path.join(oa, f), os.path.join(ob, f), shallow=False)
+                                        for f in tree(oa)) and nodir(os.path.join(oa, "recipients.json")) == nodir(os.path.join(ob, "recipients.json"))
+    print(f"  current settings: emails to {','.join(json.load(open(os.path.join(ob, 'check-summary.json')))['recipients'])}; "
+          f"Telegram to {','.join(tb['messages'])}")
+    check(same, "current settings: every check email is byte-for-byte the same as before")
+    check(ta["messages"] == tb["messages"], "current settings: the Telegram check messages are the same as before")
+    # 6b. a 4th Kingdom person with buttons on, switched on for the check (a copy of the config; nothing is saved)
+    raw = json.load(open(cfg0)); c4 = raw["config"]
+    c4["people"].append({"key": "tester4", "name": "Test Person", "called": "Bro. Test", "email": "tester4@example.invalid",
+                         "telegram_chat_id": "999000111", "buttons": True})
+    c4["routing"]["remittance_check"]["tester4"] = {"email": True, "telegram": True}
+    cfg4 = os.path.join(TMP, "config-4th.json"); json.dump(raw, open(cfg4, "w"))
+    lf4 = links_for(["david", "divine", "tester4"])
+    o4, t4 = build(TMP, cfg4, lf4, "4th")
+    R4 = json.load(open(os.path.join(o4, "check-summary.json")))["recipients"]
+    L4 = json.load(open(lf4))["links"]
+    p4 = json.load(open(os.path.join(o4, "tester4", "payload.json"))) if os.path.exists(os.path.join(o4, "tester4", "payload.json")) else {}
+    body4 = (p4.get("htmlBody") or "") + (p4.get("body") or "")
+    found = set(re.findall(r"https://[^\s\"'<>]+/remit-action\?t=[A-Za-z0-9_.-]+", body4))
+    print(f"  with a 4th person: emails to {','.join(R4)}; Telegram to {','.join(t4['messages'])}")
+    check(R4.count("tester4") == 1 and p4.get("to") == ["tester4@example.invalid"], "4th person: one email, to their own address only")
+    check(found and found <= set(L4["tester4"].values()), "4th person: their email has buttons, only their own signed links")
+    check(all(not (set(L4["tester4"].values()) & set(re.findall(r"https://\S+?remit-action\?t=[A-Za-z0-9_.-]+",
+              open(os.path.join(o4, w, "check-email.html")).read()))) for w in R4 if w != "tester4"), "nobody else gets the 4th person's links")
+    m4 = t4["messages"].get("tester4") or {}
+    tgu = [b["url"] for row in (m4.get("buttons") or []) for b in row if "url" in b]
+    check(list(t4["messages"]).count("tester4") == 1 and tgu and set(tgu) <= set(L4["tester4"].values()),
+          "4th person: one Telegram message with their own buttons")
+    check(not (t4["messages"].get("pastor") or {}).get("buttons"), "the pastor still gets no buttons")
+    check("Bro. Test" in (t4["messages"].get("pastor") or {}).get("text", ""), "the information text names everyone who can confirm")
+    # sending: monthend.send_checks sends each one once; the mailer lets the 4th person's buttons through; Telegram plan OK
+    C.CFG, C._cache["mtime"] = cfg4, None
+    try:
+        SENT.clear(); M.send_checks(ctx, o4, "r1"); n4 = len(SENT); M.send_checks(ctx, o4, "r1")
+        got = [names(s["to"]) if s["to"] != ["tester4@example.invalid"] else "tester4" for s in SENT if s["result"] == "send"]
+        check(len(SENT) == n4 == len(R4) and sorted(got) == sorted(R4), "send_checks: one email per routed person, none on the repeat")
+        check(all(s["result"] == "send" for s in SENT), "the 4th person's buttons email is not refused (buttons on)")
+        plan, err = sm_plan(t4, "check:2026-10-test:r1")
+        check(err is None and [w for w, _, _ in plan].count("tester4") == 1, "Telegram: the 4th person's buttons are allowed, once")
+        off = json.load(open(cfg4)); [p.update(buttons=False) for p in off["config"]["people"] if p["key"] == "tester4"]
+        json.dump(off, open(cfg4, "w")); C._cache["mtime"] = None
+        plan, err = sm_plan(t4, "check:2026-10-test:r1")
+        check(err is not None and "tester4" in err, "buttons switched off for them -> their link buttons are refused")
+        o5, t5 = build(TMP, cfg4, lf4, "4th-off")
+        check(not (t5["messages"].get("tester4") or {}).get("buttons") and "/remit-action" not in open(os.path.join(o5, "tester4", "check-email.html")).read(),
+              "buttons off -> they still get the check, without buttons")
+    finally:
+        C.CFG, C._cache["mtime"] = cfg0, None
+
 shutil.rmtree(TMP, ignore_errors=True)
+shutil.rmtree(OLD, ignore_errors=True)
 print(f"\n{'ALL PASSED' if not FAIL else str(len(FAIL)) + ' FAILED'} (nothing was sent)")
 sys.exit(1 if FAIL else 0)
