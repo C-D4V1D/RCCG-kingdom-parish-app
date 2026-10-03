@@ -9,8 +9,8 @@ supervisor.sh:
   - a failed ping is retried every cycle with a shorter wait (60 s, 120 s, 240 s, then the normal interval), and
     "lost connection" / "connection back" is written once to supervisor.log (it never stops on a lost connection);
   - the fallback ping uses curl -f, so an HTTP error counts as a failed ping;
-  - a bot whose process is up but whose heartbeat is older than 30 min is restarted (ensure_running.sh --restart,
-    which refuses while an upload is in progress), at most once an hour.
+  - a bot whose process is up but whose heartbeat is older than Automations bot_hung_restart_minutes (default 30,
+    0 = never) is restarted (ensure_running.sh --restart, which refuses mid-upload), at most once an hour.
 WAKE-RUN.md: event = box_down -> RESTART-RUN.md.
 Files are replaced atomically (new file + rename), so a supervisor that is running keeps its loop.
 """
@@ -38,12 +38,15 @@ while true; do
 ''',
 '''N=0
 FAILS=0
-botcheck() {  # restart-20261003: the bot process is up but its loop has stopped (heartbeat > 30 min): restart it, max once an hour
-  local A P E M=/workspace/tools/.bot-hung-restart
+botcheck() {  # restart-20261003: the bot process is up but its loop has stopped: restart it, max once an hour
+  # Automations > Box connection: bot_hung_restart_minutes (default 30; 0 = never)
+  local A P E LIM M=/workspace/tools/.bot-hung-restart
+  LIM=$($CC int automations.supervisor.bot_hung_restart_minutes 30 0 2>/dev/null); LIM=${LIM:-30}
+  [ "$LIM" -gt 0 ] 2>/dev/null || return 0
   P=$(cat /workspace/telegram/srcdoc/poller.pid 2>/dev/null); E=$(ps -o etimes= -p "${P:-0}" 2>/dev/null | tr -d ' ')
   [ -n "$E" ] && [ "$E" -gt 900 ] || return 0  # only a bot that has been up for 15+ minutes
   A=$(python3 -c "import json,datetime as d;v=json.load(open('/workspace/telegram/srcdoc/heartbeat.json')).get('poll_loop_at');print(int((d.datetime.now().astimezone()-d.datetime.fromisoformat(v)).total_seconds()//60))" 2>/dev/null)
-  [ -n "$A" ] && [ "$A" -gt 30 ] || return 0
+  [ -n "$A" ] && [ "$A" -gt "$LIM" ] || return 0
   [ -f "$M" ] && [ $(( $(date +%s) - $(stat -c %Y "$M") )) -lt 3600 ] && return 0
   touch "$M"; echo "$(date '+%F %H:%M') bot heartbeat ${A} min old -> restart" >> "$LOG"
   (nohup setsid bash /workspace/telegram/srcdoc/ensure_running.sh --restart >> "$LOG" 2>&1 </dev/null &)

@@ -1,7 +1,8 @@
 # RESTART-RUN: the Clerk box went quiet (event = box_down)
 
-The clerk-watchdog Worker sends this through the "Box scheduler wake" webhook when the box has not pinged it for the
-Automations "AI takeover" minutes (at least 40). `details` = {last_ping, silent_minutes, attempt, max_attempts}.
+The clerk-watchdog Worker sends this through the "Box scheduler wake" webhook when Automations > Box connection
+"Wake the Clerk AI to restart a silent box" is on and the box has not pinged for the minutes set there (default 40).
+`details` = {last_ping, silent_minutes, attempt, max_attempts}.
 Usual cause: the box restarted or moved, which stops everything (there is no autostart on the box). Times are UK.
 Never print secrets. Do not send emails. Do not run any month-end, statement or portal script by hand.
 

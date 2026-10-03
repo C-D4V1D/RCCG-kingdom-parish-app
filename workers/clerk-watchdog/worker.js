@@ -4,10 +4,11 @@
 // once a day while the box stays silent, and a "reporting again" message when the pings come back.
 // Once a day (cron 30 6 * * *): only if that Telegram alert couldn't be sent, it wakes Church Clerk via its webhook
 // (max once per 20h), as before.
-// Every 15 minutes (restart-20261003): when the box has been silent for Automations > Box connection "AI takeover"
-// minutes (at least 40), it wakes the Clerk AI through the box's own "Box scheduler wake" webhook (Worker secrets
-// SCHED_WEBHOOK_URL + SCHED_WEBHOOK_KEY) with event box_down, so the AI restarts the box (RESTART-RUN.md) before David
-// is alerted. Once per silence, again after 3 hours, at most 3 times. Without those secrets it does nothing.
+// Every 15 minutes (restart-20261003), only when Automations > Box connection "Wake the Clerk AI to restart a silent
+// box" is on (restart_wake, default off): once the box has been silent for restart_wake_minutes (default 40) it wakes
+// the Clerk AI through the box's own "Box scheduler wake" webhook (Worker secrets SCHED_WEBHOOK_URL + SCHED_WEBHOOK_KEY)
+// with event box_down, so the AI restarts the box (RESTART-RUN.md) before David is alerted; again every
+// restart_wake_repeat_hours (default 3) while still silent, at most restart_wake_max (default 3) times.
 // Also serves as the config + health API for the Automations tab: KV keys config, config_version, health.
 import { DEFAULT_CONFIG, validateConfig } from "./config.js";
 
@@ -18,9 +19,7 @@ const MAX_EVENT_BYTES = 16 * 1024;
 const EVENT_TTL_S = 60 * 24 * 60 * 60;
 const DAILY_CRON = "30 6 * * *";
 const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;
-const RESTART_MIN_SILENCE_MS = 40 * 60 * 1000;   // a slow supervisor cycle can leave ~35 min between pings
-const RESTART_REPEAT_MS = 3 * 60 * 60 * 1000;
-const RESTART_MAX_WAKES = 3;
+const RESTART_DEFAULTS = { minutes: 40, repeat_hours: 3, max: 3 };   // used when a setting is absent or out of range
 const RESTART_RUNBOOK = "/workspace/telegram/srcdoc/RESTART-RUN.md";
 
 const json = (o, status = 200) =>
@@ -313,22 +312,28 @@ async function wake(env, reason, force) {
 }
 
 // ---- box down: wake the Clerk AI to restart the box (restart-20261003) ----
-async function restartSilenceMs(env) {
-  try {
-    const m = Number(JSON.parse((await env.KV.get("config")) || "null")?.automations?.supervisor?.ai_takeover_minutes);
-    if (Number.isFinite(m) && m >= 10 && m <= 240) return Math.max(m * 60 * 1000, RESTART_MIN_SILENCE_MS);
-  } catch { /* unreadable config: the default */ }
-  return RESTART_MIN_SILENCE_MS;
+async function restartSettings(env) {
+  let sup = {};
+  try { sup = JSON.parse((await env.KV.get("config")) || "null")?.automations?.supervisor || {}; } catch { sup = {}; }
+  const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) && v !== null && v !== "" && Number(v) >= lo && Number(v) <= hi ? Number(v) : d);
+  return {
+    on: sup.restart_wake === true,
+    silenceMs: num(sup.restart_wake_minutes, 20, 240, RESTART_DEFAULTS.minutes) * 60 * 1000,
+    repeatMs: num(sup.restart_wake_repeat_hours, 1, 24, RESTART_DEFAULTS.repeat_hours) * 60 * 60 * 1000,
+    max: num(sup.restart_wake_max, 1, 10, RESTART_DEFAULTS.max),
+  };
 }
 
 // Returns the attempt made ({ok, status|error, attempt}) or null when nothing was due.
 async function restartWake(env, now = Date.now()) {
+  const set = await restartSettings(env);
+  if (!set.on) return null;                                          // Automations: off (the default)
   const p = +((await env.KV.get("last_ping")) || 0);
-  if (!p || now - p < await restartSilenceMs(env)) return null;   // never pinged, or healthy
+  if (!p || now - p < set.silenceMs) return null;                    // never pinged, or healthy
   let st = null;
   try { st = JSON.parse((await env.KV.get("restart_wake")) || "null"); } catch { st = null; }
   const same = !!(st && st.since === p);
-  if (same && (st.count >= RESTART_MAX_WAKES || now - st.at < RESTART_REPEAT_MS)) return null;
+  if (same && (st.count >= set.max || now - st.at < set.repeatMs)) return null;
   const attempt = same ? st.count + 1 : 1;
   const url = env.SCHED_WEBHOOK_URL, key = env.SCHED_WEBHOOK_KEY;
   let result;
@@ -340,7 +345,7 @@ async function restartWake(env, now = Date.now()) {
       [hname]: hname.toLowerCase() === "authorization" ? `Bearer ${key}` : key };
     const body = {
       event: "box_down", key: `box_down:${p}:${attempt}`,
-      details: { last_ping: new Date(p).toISOString(), silent_minutes: Math.round((now - p) / 60000), attempt, max_attempts: RESTART_MAX_WAKES },
+      details: { last_ping: new Date(p).toISOString(), silent_minutes: Math.round((now - p) / 60000), attempt, max_attempts: set.max },
       runbook: RESTART_RUNBOOK, source: "clerk-watchdog", sent_at: new Date(now).toISOString(),
     };
     try {

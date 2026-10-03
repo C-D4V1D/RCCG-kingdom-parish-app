@@ -12,16 +12,17 @@ and the desktop session runs no user autostart. After the move on 2 Oct everythi
    - a failed ping is retried every cycle with a shorter wait (60 / 120 / 240 s), with "lost connection" and
      "connection back" written once each to `supervisor.log`. A lost connection never stops it;
    - the fallback curl ping counts HTTP errors as failures;
-   - a bot that is running but whose heartbeat is over 30 minutes old is restarted, at most once an hour. This uses
-     `ensure_running.sh --restart`, which refuses while an upload is in progress.
+   - a bot that is running but whose heartbeat is older than Automations `bot_hung_restart_minutes` (default 30,
+     0 = never) is restarted, at most once an hour. This uses `ensure_running.sh --restart`, which refuses while an
+     upload is in progress.
 3. `telegram/srcdoc/RESTART-RUN.md` + a `box_down` section in `WAKE-RUN.md`: what the Clerk AI does when the
    clerk-watchdog Worker wakes it. It runs `start-box.sh`, stays silent if that works, and tells David once if it can't fix it.
 4. `workers/clerk-watchdog` (same PR):
    - the Worker cron runs every 15 minutes;
-   - when the box has been silent for the Automations "AI takeover" minutes (at least 40), the Worker POSTs
-     `{event: "box_down", ...}` to the "Box scheduler wake" webhook. That needs the Worker secrets `SCHED_WEBHOOK_URL`
-     and `SCHED_WEBHOOK_KEY`; without them nothing changes;
-   - it wakes once per silence, again after 3 hours, and at most 3 times;
+   - only when Automations > Box connection `restart_wake` is on (default **off**): once the box has been silent for
+     `restart_wake_minutes` (default 40), the Worker POSTs `{event: "box_down", ...}` to the "Box scheduler wake"
+     webhook. That needs the Worker secrets `SCHED_WEBHOOK_URL` and `SCHED_WEBHOOK_KEY`;
+   - it tries again every `restart_wake_repeat_hours` (default 3), at most `restart_wake_max` (default 3) times per silence;
    - the direct Telegram box-down alert to David (after "alert after hours") is unchanged.
 
 **Install on the box:** `bash install.sh --check`, then `bash install.sh`. It restarts only the supervisor; the bot and

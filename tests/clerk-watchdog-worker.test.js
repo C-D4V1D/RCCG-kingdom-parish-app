@@ -596,9 +596,9 @@ function wakeStub() {
   };
   return { calls, restore: () => { globalThis.fetch = real; } };
 }
-const restartEnv = (minsAgo, extra = {}) => {
+const restartEnv = (minsAgo, extra = {}, supExtra = {}) => {
   const env = createEnv({ last_ping: String(Date.now() - minsAgo * 60000),
-    config: JSON.stringify({ ...alertConfig, automations: { supervisor: { alert_after_hours: 1, ai_takeover_minutes: 30 } } }), ...extra });
+    config: JSON.stringify({ ...alertConfig, automations: { supervisor: { alert_after_hours: 1, restart_wake: true, ...supExtra } } }), ...extra });
   env.SCHED_WEBHOOK_URL = 'https://hooks.example/sched';
   env.SCHED_WEBHOOK_KEY = 'sched-key';
   return env;
@@ -612,7 +612,14 @@ test('restart wake: after the takeover minutes (min 40) the AI is woken once wit
     assert.equal(s.calls.length, 0);                                   // 25 min: healthy
     const early = restartEnv(35);
     await tick(early, '*/15 * * * *');
-    assert.equal(s.calls.length, 0);                                   // 30 min set, but never before 40
+    assert.equal(s.calls.length, 0);                                   // default 40 min
+    const off = restartEnv(45, {}, { restart_wake: false });
+    await tick(off, '*/15 * * * *');
+    assert.equal(s.calls.length, 0);                                   // switched off in Automations
+    const quick = restartEnv(25, {}, { restart_wake_minutes: 20 });
+    await tick(quick, '*/15 * * * *');
+    assert.equal(s.calls.length, 1);                                   // 20 min set
+    s.calls.length = 0;
     const env = restartEnv(45);
     await tick(env, '*/15 * * * *');
     assert.equal(s.calls.length, 1);
@@ -660,4 +667,22 @@ test('restart wake: without the secrets nothing is called; GET /status shows the
     assert.equal(st.restart_wake_configured, false);
     assert.match(st.restart_wake.result.error, /not set/);
   } finally { s.restore(); }
+});
+
+test('restart wake: off unless switched on in Automations (default); settings validated', async () => {
+  const s = wakeStub();
+  try {
+    const env = createEnv({ last_ping: String(Date.now() - 5 * 3600000), config: JSON.stringify(alertConfig) });
+    env.SCHED_WEBHOOK_URL = 'https://hooks.example/sched'; env.SCHED_WEBHOOK_KEY = 'k';
+    await tick(env, '*/15 * * * *');
+    assert.equal(s.calls.filter(c => c.url.includes('hooks.example')).length, 0);
+    assert.equal(env.KV._map.get('restart_wake'), undefined);
+  } finally { s.restore(); }
+  const base = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+  const withSup = (x) => ({ ...base, automations: { ...base.automations, supervisor: { ...base.automations.supervisor, ...x } } });
+  assert.deepEqual(validateConfig(withSup({ restart_wake: true, restart_wake_minutes: 40, restart_wake_repeat_hours: 3, restart_wake_max: 3, bot_hung_restart_minutes: 0 })), []);
+  assert.ok(validateConfig(withSup({ restart_wake: 'yes' })).length);
+  assert.ok(validateConfig(withSup({ restart_wake_minutes: 5 })).length);
+  assert.ok(validateConfig(withSup({ restart_wake_max: 50 })).length);
+  assert.ok(validateConfig(withSup({ bot_hung_restart_minutes: -1 })).length);
 });
