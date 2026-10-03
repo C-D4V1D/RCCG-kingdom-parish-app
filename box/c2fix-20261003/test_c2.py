@@ -11,10 +11,11 @@ SRC = os.environ.get("CLERK_ROOT", "/workspace")
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="c2test-")
 os.makedirs(os.path.join(TMP, "tools"))
-for f in ("clerkcfg.py", "mailer.py", "monthend.py"):
-    shutil.copy2(os.path.join(SRC, "tools", f), os.path.join(TMP, "tools", f))
 for d in ("rccg-remit/state", "rccg-attendance", "telegram", "state/monthend/out"):
     os.makedirs(os.path.join(TMP, d), exist_ok=True)
+for f in ("tools/clerkcfg.py", "tools/mailer.py", "tools/monthend.py", "telegram/send_msg.py", "telegram/tg.py",
+          "telegram/contacts.json", "rccg-remit/make-check-email.py", "rccg-remit/remit_match.py"):
+    shutil.copy2(os.path.join(SRC, f), os.path.join(TMP, f))
 subprocess.run([sys.executable, os.path.join(HERE, "patch.py")], env=dict(os.environ, CLERK_ROOT=TMP), check=True,
                stdout=subprocess.DEVNULL)
 os.environ["CLERK_ROOT"] = TMP
@@ -80,6 +81,15 @@ def check(cond, what):
         FAIL.append(what)
 
 
+# 0. each person's settings in Automations (the source of truth for everything below)
+R = lambda t, k, ch: bool(((C._routing(t) or {}).get(k) or {}).get(ch))
+print("== People (Automations)        buttons pays_rrr | email: check rrr att | telegram: check rrr")
+for p in C.all_people():
+    k = p["key"]
+    print(f"  {k:<8} {('sat ' + str(p.get('parish'))) if C.is_sat(p) else 'kingdom':<12} {bool(p.get('buttons'))!s:<7} {bool(p.get('pays_rrr'))!s:<8} |"
+          f"        {R('remittance_check', k, 'email')!s:<5} {R('rrr_generated', k, 'email')!s:<5} {R('attendance_filed', k, 'email')!s:<5} |"
+          f"           {R('remittance_check', k, 'telegram')!s:<5} {R('rrr_generated', k, 'telegram')!s:<5}")
+
 # 1. the three check emails, through monthend.send_checks (twice: the second round must send nothing)
 out = os.path.join(TMP, "rccg-remit", "runs", "out-test")
 for who in ("david", "divine", "pastor"):
@@ -140,6 +150,56 @@ try:
     check(False, "a check email with two addresses stops the run")
 except Stopped:
     check(True, "a check email with two addresses stops the run")
+
+# 4. make-check-email.py: each person's address and buttons from Automations (only the top of the script is run)
+print("\n== make-check-email.py recipients (from Automations)")
+mce = open(os.path.join(TMP, "rccg-remit", "make-check-email.py")).read()
+def mce_recipients(people_override=None):
+    real = C.people
+    if people_override is not None:
+        C.people = lambda: people_override
+    old_argv, sys.argv = sys.argv, ["make-check-email.py", "--out-dir", os.path.join(TMP, "mce")]
+    g = {"__name__": "mce", "__file__": os.path.join(TMP, "rccg-remit", "make-check-email.py")}
+    try:
+        exec(compile(mce.split("\ndef acts(")[0], "make-check-email.py", "exec"), g)
+    finally:
+        sys.argv, C.people = old_argv, real
+    return g["RECIPIENTS"]
+rc = mce_recipients()
+for k, (addr, nm, b) in rc.items():
+    print(f"  {k:<7} address from Automations={addr.lower() == str(EM.get(k) or '').lower()!s:<5} buttons={b}")
+    check(b == bool(next((p.get("buttons") for p in C.people() if p["key"] == k), False)), f"{k}: buttons follow the Automations flag")
+alt = [dict(p, buttons=(False if p["key"] == "divine" else p.get("buttons"))) for p in C.people()]
+check(mce_recipients(alt)["divine"][2] is False, "Bro. Divine switched to buttons off in Automations -> her check email has no buttons")
+check("if RECIPIENTS[w][2] and not LINKS.get(w):" in mce, "buttons on but no signed link from the app -> no buttons (not a stop)")
+check("if who == 'pastor' or not RECIPIENTS[who][2]:" in mce, "anyone without buttons gets the information-only wording")
+
+# 5. send_msg.py (Telegram): who may get link buttons, and who gets the "I've paid" button (pays_rrr)
+print("\n== Telegram (send_msg.py plan only, nothing sent)")
+smsrc = open(os.path.join(TMP, "telegram", "send_msg.py")).read().split("\nUK = ZoneInfo")[0]
+def sm_plan(bundle, key):
+    bf = os.path.join(TMP, "bundle.json"); json.dump(bundle, open(bf, "w"))
+    old_argv, sys.argv = sys.argv, ["send_msg.py", "--bundle", bf, "--guard", os.path.join(TMP, "g.json"), "--key", key]
+    sys.path.insert(0, os.path.join(TMP, "telegram"))
+    g = {"__name__": "sm", "__file__": os.path.join(TMP, "telegram", "send_msg.py")}
+    try:
+        exec(compile(smsrc, "send_msg.py", "exec"), g); return g["plan"], None
+    except SystemExit as e:
+        return g.get("plan"), str(e)
+    finally:
+        sys.argv = old_argv
+url_btn = [[{"text": "Generate RRR", "url": "https://app.example/remit-action?t=x.y"}]]
+plan, err = sm_plan({"messages": {"david": {"text": "t", "buttons": url_btn}, "divine": {"text": "t", "buttons": url_btn},
+                                  "pastor": {"text": "t"}}}, "remit:602757:2026-10:r1")
+check(err is None, "check message: link buttons for the people with buttons on are allowed")
+plan, err = sm_plan({"messages": {"fabian": {"text": "t", "buttons": url_btn}}}, "remit:602757:2026-10:r1")
+check(err is not None and "fabian" in err, "link buttons for Fabian (buttons off) are refused")
+plan, err = sm_plan({"messages": {"david": {"text": "RRR"}}}, "rrr:602757:2026-10")
+payers = {p["key"] for p in C.people() if p.get("pays_rrr")}
+for who, _, kb in plan:
+    paid = any(b.get("callback_data", "").startswith("paid|") for row in (kb or []) for b in row)
+    print(f"  RRR message to {who:<7} pays_rrr={who in payers!s:<5} I've-paid button={paid}")
+    check(paid == (who in payers), f"{who}: I've-paid button follows pays_rrr")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'ALL PASSED' if not FAIL else str(len(FAIL)) + ' FAILED'} (nothing was sent)")

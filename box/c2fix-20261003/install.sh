@@ -8,7 +8,7 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 TAG=c2fix-20261003
 BK=/workspace/backups/$TAG
-FILES="tools/clerkcfg.py tools/mailer.py tools/monthend.py"
+FILES="tools/clerkcfg.py tools/mailer.py tools/monthend.py telegram/send_msg.py rccg-remit/make-check-email.py"
 say() { printf '%s\n' "$*"; }
 fail() { say ""; say "STOPPED: $*"; exit 1; }
 

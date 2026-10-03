@@ -10,6 +10,9 @@ Changes (text replacements, each must match exactly once):
   tools/mailer.py    resolve(): routing as before for group emails; a personal email (payload "personal": true or
                      CLERK_PERSONAL=1) is only filtered, and skipped (not sent) when its person is switched off;
                      an email with /remit-action buttons is refused (exit 3) unless every recipient has buttons on.
+  telegram/send_msg.py         Telegram link buttons only for people with buttons on in Automations.
+  rccg-remit/make-check-email.py  each person's address and buttons from Automations; buttons on but no signed link
+                     from the app -> that person gets the no-button version.
   tools/monthend.py  mail(..., personal=False); the three check emails and the webhook-test email are personal;
                      a check email not addressed to exactly one person stops the run; a refused email is not retried.
 """
@@ -142,6 +145,49 @@ def send(a):
 ''',
 '''    if rc or not mail(os.path.join(outdir, "david", "payload.json"), personal=True):  # c2fix-20261003
 '''),
+],
+"telegram/send_msg.py": [
+('''for who, _, kb in plan:
+    if kb and who not in ('david', 'divine') and any('url' in b for row in kb for b in row): sys.exit(f'refused: link buttons only for david/divine, not {who}')  # monthclose-20260930
+''',
+'''_BTN = None
+try:  # c2fix-20261003: link buttons only for people with buttons on in Automations (the old rule only without saved settings)
+    if _C is not None and _C.config() is not None:
+        _BTN = {p['key'] for p in _C.all_people() if p.get('buttons')}
+except Exception:
+    _BTN = None
+if _BTN is None: _BTN = {'david', 'divine'}
+for who, _, kb in plan:
+    if kb and who not in _BTN and any('url' in b for row in kb for b in row): sys.exit(f'refused: link buttons only for people with buttons on in Automations, not {who}')  # monthclose-20260930
+'''),
+],
+"rccg-remit/make-check-email.py": [
+('''ACTIONS = [('generate_rrr', 'Generate RRR', '#1e6b3a'), ('refresh', 'Refresh', '#1f3f7a')]       # required for every button recipient
+''',
+'''try:  # c2fix-20261003: each person's address and buttons come from Automations (people: email, buttons)
+    sys.path.insert(0, '/workspace/tools'); import clerkcfg as _C
+    if _C.config() is not None:
+        for _p in _C.people():
+            if _p.get('key') in RECIPIENTS:
+                _a, _n, _b = RECIPIENTS[_p['key']]
+                RECIPIENTS[_p['key']] = (str(_p.get('email') or _a).strip(), _n, bool(_p.get('buttons')))
+except Exception:
+    pass
+ACTIONS = [('generate_rrr', 'Generate RRR', '#1e6b3a'), ('refresh', 'Refresh', '#1f3f7a')]       # required for every button recipient
+'''),
+('''    LINKS_UNTIL = exp_label(_lexp)
+    for w in WHOS:
+''',
+'''    LINKS_UNTIL = exp_label(_lexp)
+    for w in WHOS:  # c2fix-20261003: buttons on in Automations but the app signed no links for this person: no buttons
+        if RECIPIENTS[w][2] and not LINKS.get(w):
+            RECIPIENTS[w] = (RECIPIENTS[w][0], RECIPIENTS[w][1], False)
+    for w in WHOS:
+'''),
+('''    if who == 'pastor':
+        return ("For information only''',
+'''    if who == 'pastor' or not RECIPIENTS[who][2]:  # c2fix-20261003: anyone without buttons
+        return ("For information only'''),
 ],
 }
 
