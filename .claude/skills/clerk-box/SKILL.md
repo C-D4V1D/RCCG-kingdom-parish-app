@@ -70,19 +70,22 @@ Don't let a subagent download many files — base64 overflows its context.
 
 ### Shipping a box change (the only safe way)
 
-1. Change `box/automations-20260928/` (or add a new dated folder for a big change): `patch.py` holds anchored,
-   all-or-nothing edits (each anchor must match exactly once, whitespace-insensitive; every patched file must compile;
-   files carrying the marker are skipped), `clerkcfg.py`, `supervisor.sh`, `install.sh`, `undo.sh`.
-   For a new round of patches on already-patched files, use a NEW marker/folder; the old marker makes patch.py skip them.
+0. First read `box/INSTALL-ORDER.md`: it gives the verified install order and lists the retired installers. Never re-run
+   one of those, because it would copy older whole files over newer fixes.
+1. Add a NEW dated folder `box/<name>-YYYYMMDD/`. Never edit an old bundle or ship a whole copy of an existing box file.
+   `patch.py` holds anchored, all-or-nothing edits (each anchor must match exactly once, whitespace-insensitive; every
+   patched file must compile; files carrying the new marker are skipped), plus `install.sh` (`--check`, backup to
+   `/workspace/backups/<tag>/`) and `undo.sh`. Brand-new files may be shipped whole. Add the folder to the end of
+   `box/INSTALL-ORDER.md`.
 2. Test on fixtures (build a fake root with the anchor lines; `CLERK_ROOT=<fake> python3 patch.py --check`, apply,
    run twice, break one anchor and confirm nothing changed).
-3. Regenerate `SHA256SUMS` (`sha256sum clerkcfg.py patch.py supervisor.sh undo.sh install.sh > SHA256SUMS`), PR, merge.
+3. Regenerate `SHA256SUMS` (`sha256sum <every file in the folder> > SHA256SUMS`), PR, merge.
    The repo is public, so the box downloads from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdom-parish-app/main/box/...`.
 4. Give the owner one copy-paste command: download with curl, `sha256sum -c`, then `bash install.sh --check`, then
    `bash install.sh`. Never between 07:25 and 09:05 (statement/memo runs). Undo:
-   `bash /workspace/backups/automations-20260928/undo.sh`. Ask him for a screenshot of the output.
-5. A single-file fix to clerkcfg.py can be shipped as "curl it, sha256sum -c --ignore-missing, install -m 755 to
-   /workspace/tools/clerkcfg.py" (no restart needed).
+   `bash /workspace/backups/<tag>/undo.sh`. Ask him for a screenshot of the output.
+5. Don't ship a fix as a whole replacement `clerkcfg.py` (or any other existing file). Even a one-line fix goes in a
+   new patch installer.
 
 ## Deploying the Worker
 
@@ -120,8 +123,9 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
   (David + Bro. Divine told by email and Telegram; not the AI); saving the line in the app resumes it within 5 minutes.
 - Status: `/workspace/state/monthend/status.json` → `health.remittance` {handler, portal_lines, categories, hold} and the
   dashboard's Month-end card. Tests: `tests/box-monthend.test.js` (real box files against a fake /workspace of stubs).
-- Newest clerkcfg.py: `box/cleanup-20260928/clerkcfg.py` (bundles are applied in order: automations-20260928 →
-  monthend-20261001 → cleanup-20260928). Never re-run an older bundle's install.sh: it would put back an older clerkcfg.py.
+- The repo's whole `clerkcfg.py` / `monthinfo.py` / `monthend.py` / `supervisor.sh` copies are all OLD: the live files
+  have many later patches. The live box = the chain in `box/INSTALL-ORDER.md` (checksums in `box/INSTALL-ORDER.sha256`).
+  Never re-run a retired bundle's install.sh.
 - reminders-20260929: `tools/monthinfo.py` (read-only app status) drives the Sunday collection reminders (in
   reminders.py) and the bot's `/month`; `/status` and `/refresh` also understand months filed by the month-end run.
   App settings: automations.collection_reminders; routing type `collection_reminder` (app-side default when not saved:

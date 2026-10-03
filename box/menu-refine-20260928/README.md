@@ -1,5 +1,8 @@
 # Clerk box: Telegram bot menu refinements (menu-refine-20260928)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 A review of the bot's `/help` list and `/status` output turned up: `/status` promised "deadlines... and statement"
 but never showed remittance at all; no section showed the period's total collection or amount remitted; `/month` and
 `/statement` were type-the-month-yourself with no way to browse previous ones; and `/paid` / `/cancel` cluttered the

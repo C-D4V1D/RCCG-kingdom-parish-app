@@ -1,5 +1,8 @@
 # Clerk box: Sunday collection reminders and the bot's /month (reminders-20260929)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 The month-end filing starts only when the cut-off Sunday's collection is saved, and the app refuses that save while an
 earlier Sunday of the period has no collection. These reminders make sure nothing is forgotten.
 

@@ -1,5 +1,8 @@
 # records-20260928: statement send day + Sunday records reminders
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 - **Statement day**: `stmt-runner.py` asks `make-statement.js --check-due --today <day>` for each of the last
   `days_after_cutoff .. days_after_cutoff + catchup_days - 1` days, so the statement goes out N days after the cut-off
   Sunday (Automations > Monthly statement) and catches up if the box missed that day; `--live --month <YYYY-MM>` builds

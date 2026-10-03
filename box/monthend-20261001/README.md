@@ -1,5 +1,8 @@
 # Clerk box: month-end runner (monthend-20261001)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 Lets the Clerk box do the monthly remittance itself, as a script, instead of the Clerk AI. Until David switches
 Automations → Settings → Remittance (month-end) → "Month-end run by" to **Clerk box**, the box only does a
 **practice run** each month next to the Clerk AI's real one and tells David on Telegram whether it matched.

@@ -1,5 +1,8 @@
 # Clerk box: RRR payment check and the month-close checklist (monthclose-20260930)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 - `remita-check.cjs` (→ `/workspace/tools/`): read-only check on remita.net/pay/pay-rrr (headless Chromium from
   `/workspace/tools/pw`). Remita's answer to the page's lookup: status "23" "Transaction already processed" = paid.
 - `monthclose.py` (→ `/workspace/tools/`, run by `supervisor.sh` every cycle as `monthclose.py tick`):
