@@ -2785,6 +2785,12 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     // Restore backup / Clear data / full reset are Finance-app IT-admin buttons, so this is a Finance route
     // (it used to demand a KPSC session, which the Finance app never sends, so every one of them failed).
     if (route === 'admin') {
+      // The Clerk box's read-only automation key may download the full backup (its weekly copy to Google Drive,
+      // box/appbackup-20261003); everything else here is the IT admin's.
+      if (authz?.automation && method === 'GET' && param === 'backup') {
+        await putSettingValue(DB, BOX_BACKUP_LAST_KEY, new Date().toISOString());
+        return await adminBackupRoutes(context, DB, url, method, parts, body, { finance: { name: 'Clerk box weekly backup' } });
+      }
       if (authz?.finance?.role !== 'it_admin') return finAuthErr('forbidden', 403, 'Only the IT administrator can do this.');
       if (method === 'POST' && param === 'clear')      return await adminClear(DB);
       if (method === 'POST' && param === 'clear-data') return await adminClearDataOnly(DB);
@@ -12692,6 +12698,7 @@ async function adminImport(DB, data) {
 // ── FULL BACKUP, RESTORE FROM FILE, CLOUDFLARE TIME TRAVEL (/api/admin/...) ──
 // See functions/_lib/backup.js. Every route here is IT-admin only (checked by the caller).
 const TIME_TRAVEL_UNDO_KEY = 'time_travel_undo';
+const BOX_BACKUP_LAST_KEY = 'box_backup_last_at';   // when the Clerk box last downloaded its weekly backup
 
 async function satParishNames(DB) {
   const names = {};
@@ -12738,6 +12745,7 @@ async function adminBackupRoutes(context, DB, url, method, parts, body, authz) {
       production: new URL(request.url).hostname === PRODUCTION_HOST,
       databases: backupDatabases(env, names).filter(d => ids[d.key]).map(({ key, label }) => ({ key, label })),
       undo: safeJsonParse(await getSettingValue(DB, TIME_TRAVEL_UNDO_KEY), null),
+      lastBoxBackup: await getSettingValue(DB, BOX_BACKUP_LAST_KEY),
     });
   }
   if (method === 'POST' && sub === 'time-travel' && action === 'restore') {
