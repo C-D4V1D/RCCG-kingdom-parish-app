@@ -200,6 +200,10 @@ alerts don't wait for the hourly scheduler. The app's scheduler is a separate Wo
 - `/month` REMITTANCE (remitinfo-20261003): RRR, amount remitted/to remit and Paid come from the RCCG portal's invoices
   (`api-fill.js invoices`, read-only, cached in `state/remitinfo-cache.json`: PAID 30 days, else 30 min, errors 10 min),
   else the app's Remittances (Part A paid, same periodTo), else the box's rrr/monthclose files; each line names its source.
+- `/month` SOURCE DOCUMENTS + ATTENDANCE FILING (srcdocinfo-20261003): `tools/portal-month.cjs` (GET-only) reads the
+  parish's Admin/Finance slots, upload lock, financial report and stored attendance; `tools/srcdocinfo.py` caches it
+  (`state/srcdocinfo-cache.json`: complete 30 days, else 30 min, errors 10 min; a newer bot upload re-reads) and falls back
+  to the bot's `poller.log` "upload result" lines. `month_portal_check: off` = no portal read. Next step adds the upload.
 
 ## Known open items
 

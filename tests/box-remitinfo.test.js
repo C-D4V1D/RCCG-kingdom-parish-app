@@ -73,14 +73,14 @@ test('patch.py: an anchor that does not fit -> NOT CHANGED, files untouched', { 
   } finally { rm(root); }
 });
 
-test('bundle: valid shell, SHA256SUMS matches, INSTALL-ORDER lists it last, no personal data', () => {
+test('bundle: valid shell, SHA256SUMS matches, INSTALL-ORDER lists it (step 23), no personal data', () => {
   for (const f of ['install.sh', 'undo.sh']) assert.equal(spawnSync('bash', ['-n', path.join(BUNDLE, f)]).status, 0, f);
   const sums = fs.readFileSync(path.join(BUNDLE, 'SHA256SUMS'), 'utf8').trim().split('\n').map(l => l.split(/\s+/)[1]).sort();
   assert.deepEqual(sums, fs.readdirSync(BUNDLE).filter(f => f !== 'SHA256SUMS').sort());
   const r = spawnSync('sha256sum', ['-c', '--quiet', 'SHA256SUMS'], { cwd: BUNDLE, encoding: 'utf8' });
   if (!r.error) assert.equal(r.status, 0, r.stdout + r.stderr);
   const rows = fs.readFileSync(path.join(REPO, 'box/INSTALL-ORDER.md'), 'utf8').split('\n').filter(l => /^\| \d+ \|/.test(l));
-  assert.match(rows[rows.length - 1], /remitinfo-20261003/);
+  assert.ok(rows.some(r => /^\| 23 \| `remitinfo-20261003`/.test(r)), 'remitinfo-20261003 is step 23');
   const install = fs.readFileSync(path.join(BUNDLE, 'install.sh'), 'utf8');
   assert.match(install, /-ge 0725/);
   assert.doesNotMatch(install, /botmenu\.py apply|send_msg/, 'the installer must not send anything');
