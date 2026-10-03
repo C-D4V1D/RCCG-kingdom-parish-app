@@ -2798,7 +2798,7 @@ function updateSidebarUser(){
 async function navigate(page, fromHistory){
   // The Automations dashboard auto-refreshes on a 60s timer while it is on screen —
   // stop it the moment we leave that page so it doesn't keep polling in the background.
-  if(state.page==='automations' && page!=='automations') stopAutomationsRefresh();
+  if(state.page==='automations' && page!=='automations'){ stopAutomationsRefresh(); atFlushAutosave(); }
   if(!canAccessPage(page)){
     // Fall back to the first page this role can open (an Usher's only page is Attendance).
     const home = canAccessPage('dashboard') ? 'dashboard' : (NAV.find(n=>canAccessPage(n.id))?.id || 'dashboard');
@@ -20274,6 +20274,8 @@ async function renderAutomations(){
     // DEFAULT_CONFIG.automations.supervisor doesn't carry it). Comparing against the raw saved config
     // would see those filled-in defaults as "edits" and block the button on a page nobody has touched.
     state.automations.configBaseline = JSON.stringify(collectAutomationsConfig());
+    state.automations.saveFailed = false;
+    atWireAutosave(settingsEl);
   } else {
     settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
   }
@@ -20423,7 +20425,8 @@ function renderAutomationsRemittanceSection(config, health){
         </table></div>
         <div class="at-save-bar">
           <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
-          <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+          <span class="at-save-status" aria-live="polite"></span>
+          <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
         </div>
       </div>
     </details>`;
@@ -20623,7 +20626,8 @@ function renderAutomationsSettings(config, isDefault, health){
 
   const saveBar = `<div class="at-save-bar">
       <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
-      <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+      <span class="at-save-status" aria-live="polite"></span>
+      <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
     </div>`;
   const dayChips = (path, selected)=>`<div class="at-day-chips">${AUTOMATION_DAYS.map(d=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="${path}" data-kind="day" data-day="${d.key}" ${((selected||[]).includes(d.key))?'checked':''}> ${d.label}</label>`).join('')}</div>`;
 
@@ -20916,6 +20920,7 @@ function deleteAutomationPerson(btn){
   if(!confirm(`Remove this person? They will stop receiving any notifications from the box.${linked}`)) return;
   row.remove();
   atRefreshPicks();
+  atScheduleAutosave();
 }
 function addAutomationParish(){
   const container = document.getElementById('atParishRows');
@@ -20938,6 +20943,7 @@ function deleteAutomationParish(btn){
   if(!confirm(`Remove this parish from tracking?${extra}`)) return;
   row.remove();
   atRefreshPicks();
+  atScheduleAutosave();
 }
 
 // ── Parish cards: people, logins, Telegram invites, pick lists, portal password, overview ──
@@ -20969,20 +20975,28 @@ function atClearPortalPw(btn){
   const card = atCard(btn); if(!card) return;
   card.dataset.pwSealed = ''; card.dataset.pwSetAt = '';
   const st = card.querySelector('.at-par-pwstatus');
-  if(st) st.textContent = 'The saved password will be removed when you press Save changes.';
+  if(st) st.textContent = 'The saved password will be removed when the changes save.';
+  atScheduleAutosave();
 }
 async function atCopyText(text){
   try { await navigator.clipboard.writeText(text); return true; } catch(e){ return false; }
 }
-function atCopyInvite(btn){
+async function atCopyInvite(btn){
   const row = btn.closest('.at-par-person'); if(!row) return;
   let code = row.dataset.tgInvite;
   if(!code){ code = automationsInviteCode(); row.dataset.tgInvite = code; }
   const url = AUTOMATION_BOT_LINK + code;
-  atCopyText(url).then(ok=>{
-    showAlert(ok ? 'Invite link copied. Send it to them, and press Save changes so the box knows this invite.'
-                 : `Could not copy automatically. Send them this link, then press Save changes: ${url}`, ok ? 'success' : 'warn');
-  });
+  const isSaved = ()=>(state.automations?.config?.people || []).some(p=>p.tg_invite === code);
+  const copied = await atCopyText(url);   // copy first, while the click still counts as a user action
+  // The bot only accepts an invite the saved config knows, so save straight away (the normal Save changes path).
+  const saved = isSaved() || await atSaveNow();
+  if(saved && isSaved()){
+    showAlert(copied ? 'Invite link copied and saved. Send it to them; the box picks it up within a few minutes.'
+                     : `Invite saved, but it could not be copied automatically. Send them this link: ${url}`, copied ? 'success' : 'warn');
+  } else {
+    showAlert(copied ? 'Invite link copied, but it could not be saved, so it will not work yet. Fix the problem shown next to Save changes, then press Save changes (or Copy invite link again) before you send it.'
+                     : 'The invite could not be copied or saved. Fix the problem shown next to Save changes, then press Copy invite link again.', 'danger');
+  }
 }
 function atShowPin(name, pin, isReset){
   showModal(`
@@ -20991,7 +21005,7 @@ function atShowPin(name, pin, isReset){
     <p style="font-size:14px;margin-bottom:10px">PIN for <b>${esc(name)}</b>:</p>
     <div id="atPinValue" style="font-size:32px;font-weight:800;letter-spacing:6px;text-align:center;margin:8px 0 14px">${esc(pin)}</div>
     <p style="font-size:13px;color:var(--text2)">Send it to them on WhatsApp. They choose their own PIN the first time they sign in. This PIN is shown only now.</p>
-    <p style="font-size:12px;color:var(--text3);margin-top:8px">Press <b>Save changes</b> on this page as well so the app remembers the login.</p>
+    <p style="font-size:12px;color:var(--text3);margin-top:8px">The page saves the login automatically (see the status next to <b>Save changes</b>).</p>
     <div class="modal-footer"><button class="btn" onclick="App.atCopyPin(this)">Copy PIN</button><button class="btn btn-primary" onclick="closeModal()">Done</button></div>`);
 }
 async function atCopyPin(btn){
@@ -21021,6 +21035,7 @@ async function atCreateLogin(btn){
     if(Array.isArray(list)) list.push({ id:u.id, name, role:'satellite', email, parishCode:code });
     atRedrawLogin(row);
     atShowPin(name, pin, false);
+    atScheduleAutosave();
   } catch(e){
     restore();
     showAlert(`Could not create the login: ${e.message || 'Unknown error'}`, 'danger');
@@ -21052,7 +21067,8 @@ async function atRemoveLogin(btn){
     row.dataset.appUserId = '';
     if(Array.isArray(state.automations?.satUsers)) state.automations.satUsers = state.automations.satUsers.filter(u=>u.id !== id);
     atRedrawLogin(row);
-    showAlert('Login removed. Press Save changes so the app forgets it.', 'success');
+    showAlert('Login removed.', 'success');
+    atScheduleAutosave();
   } catch(e){
     restore();
     showAlert(`Could not remove the login: ${e.message || 'Unknown error'}`, 'danger');
@@ -21076,6 +21092,7 @@ function atAddParishPerson(btn){
   card.querySelector('.at-par-people')?.appendChild(wrap.firstElementChild);
   card.querySelectorAll('.at-new-name,.at-new-title,.at-new-called,.at-new-email,.at-new-tg').forEach(i=>{ i.value = ''; });
   atRefreshPicks();
+  atScheduleAutosave();
 }
 /** Encrypt any newly typed portal password (in the browser, with the box's public key) before the config is collected. */
 async function automationsSealPending(){
@@ -21370,47 +21387,125 @@ async function sendTestAlert(btn){
   }
 }
 
-async function saveAutomationsConfig(btn){
-  if(state.automations?.saving) return;
-  state.automations.saving = true;
+// ── Autosave: the Settings section saves itself through saveAutomationsConfig (same request and checks as the
+// Save changes button, which stays as a manual fallback). Only real user edits count: a 'change' event from the
+// form (text boxes fire it when you leave the box, not on every key) or an add/remove/login action. Rendering the
+// page, the 60s dashboard refresh and the area overview never fire 'change', and a save is skipped when the form
+// still matches what was last saved. One save at a time; an edit made during a save queues one more.
+const AT_AUTOSAVE_MS = 1500;
+let atUnloadHooked = false;
+function atSetSaveStatus(text, kind){
+  document.querySelectorAll('#atSettings .at-save-status').forEach(el=>{ el.textContent = text || ''; el.dataset.kind = kind || ''; });
+}
+function atHasPendingPw(){ return [...document.querySelectorAll('#atParishRows .at-par-pw')].some(i=>i.value); }
+function atSettingsOnScreen(){ return state.page === 'automations' && !!document.getElementById('atSettings') && !!state.automations?.configBaseline; }
+function atIsDirty(){
+  if(!atSettingsOnScreen()) return false;
+  return atHasPendingPw() || JSON.stringify(collectAutomationsConfig()) !== state.automations.configBaseline;
+}
+function atScheduleAutosave(){
+  const A = state.automations; if(!A?.configBaseline) return;   // settings not loaded (or not an IT admin)
+  clearTimeout(A.autosaveTimer);
+  A.autosaveTimer = setTimeout(atRunAutosave, AT_AUTOSAVE_MS);
+  if(!A.saving) atSetSaveStatus('Changes waiting to save…', 'pending');
+}
+function atRunAutosave(){
+  const A = state.automations; if(!A) return;
+  clearTimeout(A.autosaveTimer); A.autosaveTimer = null;
+  if(!atSettingsOnScreen()) return;          // never save a page that is no longer on screen
+  if(A.saving){ A.saveQueued = true; return; }
+  if(!atIsDirty()){ A.saveFailed = false; atSetSaveStatus('All changes saved', 'ok'); return; }
+  saveAutomationsConfig(null, { auto:true });
+}
+/** Leaving the page: send a waiting autosave now (the form is read before the page is replaced). */
+function atFlushAutosave(){ if(state.automations?.autosaveTimer) atRunAutosave(); }
+/** Save right away (after any save in flight); resolves true when the save went through. */
+async function atSaveNow(){
+  const A = state.automations; if(!A) return false;
+  while(A.saving && A.savePromise) await A.savePromise.catch(()=>{});
+  return (await saveAutomationsConfig(null, { auto:true })) === true;
+}
+function atWireAutosave(el){
+  el.addEventListener('change', ev=>{
+    if(!ev.isTrusted) return;
+    const t = ev.target;
+    // The "add a parish person" boxes are only a staging form (+ Add person saves the person itself).
+    if(t?.matches?.('.at-new-name,.at-new-title,.at-new-called,.at-new-email,.at-new-tg')) return;
+    atScheduleAutosave();
+  });
+  if(!atUnloadHooked){
+    atUnloadHooked = true;
+    window.addEventListener('beforeunload', ev=>{
+      const A = state.automations;
+      if(!A || state.page !== 'automations') return;
+      if(A.autosaveTimer || A.saving || A.saveQueued || atIsDirty()){ ev.preventDefault(); ev.returnValue = ''; return ''; }
+    });
+  }
+}
+
+function saveAutomationsConfig(btn, opts){
+  const A = state.automations;
+  if(!A) return Promise.resolve(false);
+  if(A.saving){ A.saveQueued = true; return A.savePromise || Promise.resolve(false); }
+  A.savePromise = atDoSave(btn, !!opts?.auto);
+  return A.savePromise;
+}
+async function atDoSave(btn, auto){
+  const A = state.automations;
+  clearTimeout(A.autosaveTimer); A.autosaveTimer = null;
+  A.saving = true; A.saveQueued = false;
   const origText = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  atSetSaveStatus('Saving…', 'pending');
   const errBox = document.getElementById('atSaveErrors');
   if(errBox) errBox.innerHTML = '';
+  let ok = false, reason = '';
+  const fail = (msg, why)=>{ reason = why || msg; if(!auto) showAlert(msg, 'danger'); };
   try{
-    await automationsSealPending();   // portal passwords are locked in the browser before anything is sent
+    if(atHasPendingPw()) await automationsSealPending();   // portal passwords are locked in the browser before anything is sent
+    if(!document.getElementById('atSettings')) throw new Error('You left the page before the changes were saved.');
     const config = collectAutomationsConfig();
     const res = await authFetch('/api/automations/config', {
       method:'PUT',
       headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ config, base_version: state.automations.configVersion })
+      body: JSON.stringify({ config, base_version: A.configVersion })
     });
     const data = await res.json().catch(()=>({}));
     if(res.ok && data.ok){
-      state.automations.configVersion = data.config_version;
-      state.automations.config = config;
-      state.automations.configBaseline = JSON.stringify(config);
-      state.automations.isDefault = false;
+      ok = true;
+      A.configVersion = data.config_version;
+      A.config = config;
+      A.configBaseline = JSON.stringify(config);
+      A.isDefault = false;
       // The app itself needs the parish list too (parish name, and refusing a paused parish's pastor).
       let listErr = null;
       try { await syncSatParishesSetting(config); } catch(e){ listErr = e; }
       if(listErr) showAlert(`Saved for the box, but the app's own parish list could not be updated (${listErr.message || 'unknown error'}). Press Save changes again.`, 'danger');
-      else showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
+      else if(!auto) showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
     } else if(res.status === 409){
+      reason = 'someone else saved a change first; the latest settings were reloaded, please make your change again';
       showAlert('Someone else saved a change just before you did. Reloading the latest settings — please make your change again.', 'danger');
-      await renderAutomations();
+      if(state.page === 'automations') await renderAutomations();
     } else if(res.status === 400 && Array.isArray(data.errors)){
+      reason = 'please fix the problems listed at the top of Settings';
       if(errBox) errBox.innerHTML = `<div class="at-error-list">Please fix the following:<ul>${data.errors.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></div>`;
-      errBox?.scrollIntoView({ behavior:'smooth', block:'center' });
+      if(!auto) errBox?.scrollIntoView({ behavior:'smooth', block:'center' });
     } else {
-      showAlert(data.error || 'Could not save changes. Please try again.', 'danger');
+      fail(data.error || 'Could not save changes. Please try again.', data.error || 'the server did not accept the save');
     }
   }catch(e){
-    showAlert(e?.message && !(e instanceof TypeError) ? e.message : 'Could not reach the server. Check your connection and try again.', 'danger');
+    fail(e?.message && !(e instanceof TypeError) ? e.message : 'Could not reach the server. Check your connection and try again.',
+      e?.message && !(e instanceof TypeError) ? e.message : 'could not reach the server');
   } finally {
-    state.automations.saving = false;
+    A.saving = false;
+    A.saveFailed = !ok;
     if(btn){ btn.disabled = false; btn.textContent = origText || 'Save changes'; }
+    if(ok && !A.saveQueued && atIsDirty()) A.saveQueued = true;   // edited while this save was on its way
+    if(ok) atSetSaveStatus(A.saveQueued ? 'Changes waiting to save…' : 'All changes saved', A.saveQueued ? 'pending' : 'ok');
+    else atSetSaveStatus(`Not saved – ${String(reason).replace(/\.$/, '')}`, 'error');
+    if(A.saveQueued){ A.saveQueued = false; atScheduleAutosave(); }
   }
+  return ok;
 }
 
 // ──────────────────────────────────────────
