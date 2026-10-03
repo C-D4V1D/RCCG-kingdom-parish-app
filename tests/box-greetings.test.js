@@ -261,7 +261,7 @@ test('greet.py: names from Automations -> People, HTML-safe, unknown people get 
   } finally { rm(root); }
 });
 
-test('bundle: install.sh and undo.sh are valid shell, SHA256SUMS matches, INSTALL-ORDER lists it last, no personal data', () => {
+test('bundle: install.sh and undo.sh are valid shell, SHA256SUMS matches, INSTALL-ORDER lists it (step 21), no personal data', () => {
   for (const f of ['install.sh', 'undo.sh']) assert.equal(spawnSync('bash', ['-n', path.join(BUNDLE, f)]).status, 0, f);
   const sums = fs.readFileSync(path.join(BUNDLE, 'SHA256SUMS'), 'utf8').trim().split('\n');
   assert.equal(sums.length, 5);
@@ -272,7 +272,7 @@ test('bundle: install.sh and undo.sh are valid shell, SHA256SUMS matches, INSTAL
   }
   const order = fs.readFileSync(path.join(REPO, 'box/INSTALL-ORDER.md'), 'utf8');
   const rows = order.split('\n').filter(l => /^\| \d+ \|/.test(l));
-  assert.match(rows[rows.length - 1], /greetings-20261003/);
+  assert.ok(rows.some(r => /^\| 21 \| `greetings-20261003`/.test(r)), 'greetings-20261003 is step 21');
   const install = fs.readFileSync(path.join(BUNDLE, 'install.sh'), 'utf8');
   assert.match(install, /botmenu-20261003 is not installed/);
   assert.match(install, /\/workspace\/backups\/\$TAG/);
