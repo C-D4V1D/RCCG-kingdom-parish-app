@@ -1,5 +1,8 @@
 # Clerk box: no more hourly attendance checks (cleanup-20260928)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 Attendance is filed with the month-end run (the Clerk AI's WEBHOOK-RUN.md §3-ATT today, or the box's `monthend.py`).
 The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and
 every earlier Sunday collection are in, so the separate polling was a duplicate. This bundle:

@@ -1,5 +1,8 @@
 # Clerk box: Automations update (2026-09-28)
 
+> **RETIRED (2026-10-03).** Do not run this `install.sh` on the box: newer installers changed the same files and it would undo them. It stops unless `FORCE_OLD_INSTALLER=1`. See [`box/INSTALL-ORDER.md`](../INSTALL-ORDER.md).
+
+
 Connects the Clerk box's runners to the church app's **Automations** tab. After it's installed:
 
 - The box sends a status report every 10 minutes, and the dashboard shows it.

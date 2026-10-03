@@ -3,6 +3,45 @@
 #   bash install.sh           install (backs up first; safe to run twice)
 #   bash install.sh --check   only check; changes nothing
 set -u
+# RETIRED (2026-10-03): superseded by newer installers; see box/INSTALL-ORDER.md. Kept for history only.
+if [ "${FORCE_OLD_INSTALLER:-}" != 1 ]; then
+  cat <<'RETIRED'
+STOPPED: menu-refine-20260928 has been replaced by newer installers. Nothing was changed.
+Running it again would put back an OLDER copy of the bot's Telegram (/) menu (it would drop /balance)
+and undo newer fixes. The Clerk box already has everything this installer did.
+
+Nothing to do on a working box. Only to build a fresh box from scratch, follow box/INSTALL-ORDER.md
+and run these, in this order (this one is step 8):
+    1. box/automations-20260928/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    2. box/monthend-20261001/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    3. box/cleanup-20260928/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    4. box/healthfix-20260928/  (python3 fix.py)
+    5. box/reminders-20260929/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    6. box/monthclose-20260930/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    7. box/records-20260928/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    8. box/menu-refine-20260928/  (FORCE_OLD_INSTALLER=1 bash install.sh)
+    9. box/bankbalance-20260929/  (bash install.sh)
+   10. box/bankbalance-fastcheck-20261001/  (bash install.sh)
+   11. box/parishes-20261003/  (bash install.sh)
+   12. box/bankbalance-reconcile-20261001/  (bash install.sh)
+   13. box/restart-20261003/  (bash install.sh)
+   14. box/appbackup-20261003/  (bash install.sh)
+   15. box/c2fix-20261003/  (bash install.sh)
+   16. box/checkpeople-20261003/  (bash install.sh)
+   17. box/m2fix-20261003/  (bash install.sh)
+   18. box/sentlog-20261003/  (bash install.sh)
+For a fresh build only: FORCE_OLD_INSTALLER=1 bash install.sh
+RETIRED
+  exit 1
+fi
+_retired_warn() { printf '
+WARNING: FORCE_OLD_INSTALLER=1: menu-refine-20260928 is retired; it %s OLD files.
+' "$1"; cat <<'RETIRED'
+Afterwards re-run these newer installers, in this order (box/INSTALL-ORDER.md):
+   - box/bankbalance-20260929/
+RETIRED
+}
+_retired_warn "will put back"; trap '_retired_warn "has put back"' EXIT
 HERE=$(cd "$(dirname "$0")" && pwd)
 BK=/workspace/backups/menu-refine-20260928
 FILES="tools/monthinfo.py tools/clerkinfo.py telegram/srcdoc/poller.py"
