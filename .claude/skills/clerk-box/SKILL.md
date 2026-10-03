@@ -26,7 +26,7 @@ Clerk box (VM, /workspace)  --POST /ping {health, config_version} every 10 min--
   reads/writes; the accountant gets a read-only view filtered to his own rows; everyone else gets 403.
 - The Worker: `workers/clerk-watchdog/` (worker.js, config.js = DEFAULT_CONFIG + validateConfig, README).
   KV binding `KV`, namespace id `6a977aa2091048e18512cfdb5d3e1008`; Cloudflare account `63d7bbd4f912ddc7b6272dbda2881a82`.
-  Existing cron `30 6 * * *` (daily wake check). wrangler.toml deliberately has NO [triggers] block so deploys keep it.
+  Its cron schedule lives in wrangler.toml `[triggers]` (see "Deploying the Worker" below).
   KV free tier ≈ 1000 writes/day: each ping writes 2 keys; don't ping more often than every 10 minutes.
 - The app page: `src/js/app.js` (search `renderAutomations`), CSS `.at-*` in `src/css/styles.css`; run
   `npm run build` after editing src/ (dist/ and index.html's hash are committed). Tests: `npm test`
@@ -94,7 +94,9 @@ hourly box-down check). The Worker secret `TELEGRAM_BOT_TOKEN` (set in the Cloud
 box-down alerts to the people ticked for `watchdog_down`; `POST /test-alert` (watchdog token) sends a test message.
 A changed bank balance (`POST /bank-balance`) makes the Worker call the app's
 `/api/internal/run-bank-recon` with the box's token (wrangler.toml var `APP_URL`), so reconciliation and its Telegram
-alerts don't wait for the GitHub cron (whose `CRON_SECRET` repo secret was missing as of 2026-10-02). Verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages secret
+alerts don't wait for the hourly scheduler. The app's scheduler is a separate Worker, `rccgkp-admin-cron`
+(`workers/admin-cron/`, deployed by `.github/workflows/deploy-admin-cron.yml`): every hour it POSTs each
+`/api/internal/run-*` job with its own `CRON_SECRET` secret. The GitHub cron workflow is manual-only now. Verify the live code with the Cloudflare connector (`workers_get_worker_code clerk-watchdog`). The app's Pages secret
 `CLERK_WATCHDOG_TOKEN` must equal the box's `/workspace/.secrets/watchdog-token` (only the owner can copy it).
 
 ## Month-end (remittance) — who runs it

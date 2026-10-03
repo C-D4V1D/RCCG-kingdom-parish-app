@@ -1,4 +1,4 @@
-name: Cron — Follow-ups & Pre-briefs
+name: Cron — Follow-ups & Pre-briefs (manual run)
 
 # Polls several internal Pages endpoints on a timer. Each endpoint checks for
 # itself whether there is anything to do (day of month, send window, whether the
@@ -55,13 +55,13 @@ name: Cron — Follow-ups & Pre-briefs
 #     now fails the job, so a broken scheduler shows up as a red X.
 
 on:
-  schedule:
-    # Best effort only. GitHub throttles `schedule` heavily and in practice
-    # delivers a handful of these ticks per day at unpredictable times, so the
-    # endpoints must never depend on being polled at a particular moment — they
-    # stay "due" until they have actually run and catch up on a later tick.
-    - cron: "*/30 * * * *"
-  workflow_dispatch:   # allow manual trigger for testing
+  # Manual only. The hourly schedule now lives in Cloudflare: the rccgkp-admin-cron
+  # Worker (workers/admin-cron) calls the same endpoints every hour. GitHub's own
+  # schedule ran only a few times a day and had been failing since CRON_SECRET went
+  # missing from the repo secrets; running both would also risk overlapping sends.
+  # Use "Run workflow" here to run every job once by hand (needs the CRON_SECRET
+  # repo secret, the same value as in Cloudflare).
+  workflow_dispatch:
 
 concurrency:
   # Two overlapping runs would send the same SMS batch twice.
