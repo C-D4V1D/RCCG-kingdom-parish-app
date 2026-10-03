@@ -17,7 +17,7 @@ import {
   remitActionSecret,
   REMIT_ACTION_PEOPLE,
 } from './_lib/remit-action-token.js';
-import { deliverMonthEndEvent, monthEndConfigured } from './_lib/month-end-events.js';
+import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople } from './_lib/month-end-events.js';
 
 const MAX_BODY_BYTES = 4096;
 const PARISH_NAME = 'RCCG Kingdom Parish, Aguleri';
@@ -66,8 +66,10 @@ async function handleGet(request, env) {
   if (!secret) return notConfigured();
   const v = await verifyRemitActionToken(secret, token);
   if (!v.ok) return invalidPage(v);
+  const allowed = await actionButtonPeople(env);   // the person's buttons must still be on in Automations
+  if (!Object.prototype.hasOwnProperty.call(allowed.people, v.payload.person)) return buttonsOffPage();
 
-  const p = v.payload;
+  const p = { ...v.payload, personLabel: allowed.people[v.payload.person] };
   const a = ACTIONS[p.action];
   const nonce = crypto.randomUUID().replace(/-/g, '');
   const body = `
@@ -108,8 +110,10 @@ async function handlePost(request, env) {
   }
   const v = await verifyRemitActionToken(secret, token);
   if (!v.ok) return invalidPage(v);
+  const allowed = await actionButtonPeople(env);   // checked again on press: switched off since the email -> refused
+  if (!Object.prototype.hasOwnProperty.call(allowed.people, v.payload.person)) return buttonsOffPage();
 
-  const p = v.payload;
+  const p = { ...v.payload, personLabel: allowed.people[v.payload.person] };
   const notice = {
     event: 'remit_action',
     action: p.action,
@@ -147,7 +151,7 @@ function details(p) {
   return `<table class="kv" role="presentation">
   <tr><th>Parish</th><td>${esc(PARISH_NAME)}</td></tr>
   <tr><th>${p.action === 'refresh_attendance' ? 'Attendance' : 'Remittance'}</th><td>${esc(monthLabel(p.month))}</td></tr>
-  <tr><th>Confirming as</th><td>${esc(REMIT_ACTION_PEOPLE[p.person] || p.person)}</td></tr>
+  <tr><th>Confirming as</th><td>${esc(p.personLabel || REMIT_ACTION_PEOPLE[p.person] || p.person)}</td></tr>
   <tr><th>Action</th><td>${esc(actionTitle(p))}</td></tr>
 </table>`;
 }
@@ -165,6 +169,11 @@ function invalidPage(v) {
   return page(400, 'Link not valid',
     `<p class="lead">This link isn't valid.</p>
 <p>It may have been cut short or changed. Please open it again from the remittance check email, or ask David.</p>`);
+}
+
+function buttonsOffPage() {
+  return page(403, 'Not available',
+    `<p class="lead">These buttons are switched off for you.</p><p>Nothing was sent. Buttons are turned on per person in Automations → People; please ask David.</p>`);
 }
 
 function notConfigured() {
