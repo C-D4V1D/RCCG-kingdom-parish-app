@@ -14,6 +14,8 @@ APP_URL = "https://rccg-kingdom-parish-app.pages.dev"
 binding = "KV"
 id = "6a977aa2091048e18512cfdb5d3e1008"
 
-# Daily (06:30 UTC): the old AI wake, only if the Telegram alert couldn't be sent. Hourly (:17): the box-down check.
+# Daily (06:30 UTC): the old AI wake, only if the Telegram alert couldn't be sent. Every 15 min: the box-down checks
+# (AI restart wake after the "AI takeover" minutes, then the Telegram alert after "alert after hours").
+# Optional secrets for the restart wake (dashboard or `wrangler secret put`): SCHED_WEBHOOK_URL, SCHED_WEBHOOK_KEY.
 [triggers]
-crons = ["30 6 * * *", "17 * * * *"]
+crons = ["30 6 * * *", "*/15 * * * *"]
