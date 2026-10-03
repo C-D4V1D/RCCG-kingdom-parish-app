@@ -1,0 +1,59 @@
+# drive-sync-20261003: what the Clerk box copies to Google Drive ("Clerk Box/workspace").
+# Parish/Clerk files only. First matching rule wins. Anything not listed is skipped.
+# Skipped files that are already on Drive STAY there: drive-sync.sh uses "rclone sync"
+# WITHOUT --delete-excluded, so rclone never looks at (or deletes) excluded files on Drive.
+# Never add --delete-excluded to drive-sync.sh.
+
+# --- never (secrets, junk, regenerable) ---
+- /.secrets/**
+- venv*/**
+- .venv*/**
+- node_modules/**
+- __pycache__/**
+- .git/**
+- *.pyc
+- heartbeat.json
+- *.lock
+- *.pid
+- nohup.out
+- *.tmp
+- /tools/rclone
+- /tools/*.log
+- /tools/.*
+- /state/monthend/lock
+
+# --- parish / Clerk box ---
++ /config.json
++ /tools/**
++ /telegram/**
++ /logs/**
++ /backups/**
++ /app-backups/**
++ /state/**
++ /updates/**
++ /rccg-attendance/**
++ /rccg-memos/**
++ /rccg-remit/**
++ /rccg-portal/**
++ /rccg-sat/**
++ /rccg-verify/**
++ /fin-statement/**
++ /sample-20260926/**
++ /example-20260926/**
++ /m2fix-20261003/**
++ /sentlog-20261003/**
++ /perf-auth/**
++ /pr-finance-auth/**
++ /finance-auth-plan.md
++ /AUDIT-2026-10-03.md
++ /RCCG_Memo_September_2026_Remittance.pdf
++ /install.sh
++ /patch.py
++ /undo.sh
++ /SHA256SUMS
+
+# --- everything else is skipped: job hunt (JobTracker*, jt_*, sheet_*, jobhunt/, scout-*,
+# daily-sweep-*, job-harvest/, verify-run/, digest*, ...), other agents' work (agent-tools/,
+# .playwright-mcp/, venv-*/), git clones of the app (rccg-app*, pr313, kp-app-webhook-test,
+# repo-audit-*: on GitHub) and the 46 MB portal capture (rccg-portal-capture/).
+- **
