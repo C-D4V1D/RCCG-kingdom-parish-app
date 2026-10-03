@@ -4,9 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#1e3a5f" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="robots" content="noindex" />
   <title>Install KPSC Meeting Portal</title>
   <link rel="manifest" href="/kpsc/manifest.json" />
+  <link rel="apple-touch-icon" href="/kpsc/icons/icon-180.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Lora:wght@600&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -295,7 +297,6 @@
   const isIOS = /iphone|ipad|ipod/i.test(ua);
   const isAndroid = /android/i.test(ua);
   const isStandalone = window.matchMedia('(display-mode: standalone)').matches || !!navigator.standalone;
-  const isChrome = /chrome|chromium/i.test(ua) && !/edg/i.test(ua);
   const isSafari = /safari/i.test(ua) && !/chrome|crios|fxios/i.test(ua);
   const isMobile = isIOS || isAndroid;
 
@@ -309,6 +310,10 @@
     }).catch(() => {});
   }
 
+  // The steps below 'return' early once a card is shown, so they run inside a
+  // function: a bare top-level return is a syntax error that stopped the whole
+  // page (it sat on "Detecting your device…" forever).
+  (() => {
   // ── Already installed as standalone app ─────────────────────────
   if (isStandalone) {
     card.innerHTML = `
@@ -341,7 +346,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
         </svg>
-        <span>Open this page in <strong>Chrome</strong> to use the install button.</span>
+        <span id="android-hint-text">Open this page in <strong>Chrome</strong> to install the app.</span>
       </div>`;
 
     card.innerHTML = androidHTML;
@@ -350,51 +355,69 @@
     const label = document.getElementById('install-btn-label');
     const hint = document.getElementById('android-hint');
 
-    if (!isChrome) {
+    // Which Android browser is this? Samsung Internet, Edge, Opera and in-app
+    // browsers (WhatsApp, Facebook, Instagram…) all say "Chrome" in their user
+    // agent, so check them first. In-app browsers and Opera Mini can't install apps.
+    const androidBrowser = /; wv\)|fban|fbav|instagram|whatsapp|line\/|opera mini|ucbrowser/i.test(ua) ? 'inapp'
+      : /samsungbrowser/i.test(ua) ? 'samsung'
+      : /firefox/i.test(ua) ? 'firefox'
+      : /edga?\//i.test(ua) ? 'edge'
+      : /opr\//i.test(ua) ? 'opera'
+      : /chrome|chromium/i.test(ua) ? 'chrome'
+      : 'other';
+    const MENU_STEPS = {
+      chrome: [['Tap the menu', 'Tap the <span class="step-icon">⋮</span> three-dot menu at the top right of Chrome.'],
+               ['Choose "Install app"', 'Tap <strong>Install app</strong> or <strong>Add to Home screen</strong> (the name depends on your Chrome version).'],
+               ['Confirm', 'Tap <strong>Install</strong> (or <strong>Add</strong>).']],
+      samsung: [['Tap the menu', 'Tap the <span class="step-icon">≡</span> menu at the bottom right of Samsung Internet.'],
+                ['Choose "Add page to"', 'Tap <strong>Add page to</strong>, then <strong>Home screen</strong>.'],
+                ['Confirm', 'Tap <strong>Add</strong>.']],
+      edge: [['Tap the menu', 'Tap the <span class="step-icon">…</span> menu at the bottom of Edge.'],
+             ['Choose "Add to phone"', 'Tap <strong>Add to phone</strong> or <strong>Add to Home screen</strong>.'],
+             ['Confirm', 'Tap <strong>Install</strong> (or <strong>Add</strong>).']],
+      firefox: [['Tap the menu', 'Tap the <span class="step-icon">⋮</span> menu.'],
+                ['Choose "Install"', 'Tap <strong>Install</strong> or <strong>Add to Home screen</strong>.'],
+                ['Confirm', 'Tap <strong>Add</strong>.']],
+      opera: [['Tap the menu', 'Tap the <span class="step-icon">⋮</span> menu.'],
+              ['Choose "Add to"', 'Tap <strong>Add to…</strong> then <strong>Home screen</strong>.'],
+              ['Confirm', 'Tap <strong>Add</strong>.']],
+    };
+    MENU_STEPS.other = MENU_STEPS.chrome;
+    const showMenuSteps = () => {
+      card.innerHTML = `
+        <h2>Add from the browser menu</h2>
+        <p class="subtitle">The install prompt may already have appeared. If not, use the menu:</p>
+        <div class="steps">${MENU_STEPS[androidBrowser].map(([title, text], i) => `
+          <div class="step">
+            <div class="step-num">${i + 1}</div>
+            <div class="step-body"><strong>${title}</strong><span>${text}</span></div>
+          </div>`).join('')}
+        </div>`;
+    };
+
+    if (androidBrowser === 'inapp') {
       installBtn.style.display = 'none';
       hint.style.display = 'flex';
+      document.getElementById('android-hint-text').innerHTML =
+        'This page is open inside another app. Tap <strong>⋮</strong> and choose <strong>Open in Chrome</strong> (or copy the link into Chrome), then install from there.';
     }
 
     window.addEventListener('beforeinstallprompt', e => {
       e.preventDefault();
       deferredPrompt = e;
+      installBtn.style.display = '';
+      hint.style.display = 'none';
       installBtn.disabled = false;
       label.textContent = 'Install App';
     });
 
-    // If prompt doesn't fire after 3s, show fallback menu instructions
+    // No install prompt after 3s (already dismissed, older Android, or a browser
+    // without one): show this browser's own menu steps instead.
     setTimeout(() => {
-      if (!deferredPrompt && isChrome) {
+      if (!deferredPrompt && androidBrowser !== 'inapp') {
         label.textContent = 'Add to Home Screen';
         installBtn.disabled = false;
-        installBtn.onclick = () => {
-          card.innerHTML = `
-            <h2>Add via Chrome Menu</h2>
-            <p class="subtitle">Chrome's install prompt may have already appeared, or use the menu:</p>
-            <div class="steps">
-              <div class="step">
-                <div class="step-num">1</div>
-                <div class="step-body">
-                  <strong>Tap the menu</strong>
-                  <span>Tap the <span class="step-icon">⋮</span> three-dot menu at the top right of Chrome.</span>
-                </div>
-              </div>
-              <div class="step">
-                <div class="step-num">2</div>
-                <div class="step-body">
-                  <strong>Select "Add to Home screen"</strong>
-                  <span>Scroll down the menu and tap <strong>Add to Home screen</strong>.</span>
-                </div>
-              </div>
-              <div class="step">
-                <div class="step-num">3</div>
-                <div class="step-body">
-                  <strong>Tap "Add"</strong>
-                  <span>Confirm by tapping <strong>Add</strong> in the prompt.</span>
-                </div>
-              </div>
-            </div>`;
-        };
+        installBtn.onclick = () => { if (!deferredPrompt) showMenuSteps(); };
       }
     }, 3000);
 
@@ -494,6 +517,7 @@
       <div class="divider"></div>
       <a href="/kpsc/" class="btn-open" style="max-width:240px;margin:0 auto">Open in This Browser</a>
     </div>`;
+  })();
 </script>
 </body>
 </html>
