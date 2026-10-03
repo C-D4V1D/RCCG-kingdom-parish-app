@@ -51,6 +51,7 @@ Download each folder from `https://raw.githubusercontent.com/C-D4V1D/RCCG-kingdo
 | 18 | `sentlog-20261003` | `bash install.sh` |
 | 19 | `drive-sync-20261003` | `bash install.sh` |
 | 20 | `botmenu-20261003` | `bash install.sh` |
+| 21 | `greetings-20261003` | `bash install.sh` |
 
 In a fresh build the retired steps print a "re-run afterwards" warning. You can ignore it there, because the later steps
 come next anyway. Add every new installer to the end of this table in the same PR that adds it.
@@ -76,6 +77,11 @@ file, so `INSTALL-ORDER.sha256` now lists 40 files.
 `botmenu-20261003` (step 20: the bot's per-person menus and screens) was tested on exact copies of the live
 `clerkcfg.py`, `monthinfo.py`, `clerkinfo.py`, `satinfo.py`, `satbot.py` and `srcdoc/poller.py`, whose checksums
 matched `INSTALL-ORDER.sha256`. Once it is installed on the box, update those six sums and add `tools/botmenu.py`.
+
+`greetings-20261003` (step 21: each person greeted by their own name in the Sunday-records reminders) changes
+`tools/reminders.py`, `tools/monthinfo.py`, `tools/satinfo.py` and adds `tools/greet.py`. It was tested on `reminders.py` and
+`monthinfo.py` as they come out of the chain (checksums match `INSTALL-ORDER.sha256`) and `satinfo.py` after botmenu. Once it
+is installed, update those three sums and add `tools/greet.py`.
 
 ## Making a box change
 
