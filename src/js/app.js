@@ -20053,7 +20053,7 @@ const AUTOMATION_WHATSAPP_DEFAULTS = {
   cutoff_checklist: { enabled: true, time: '06:00' },
   morning_reminders: { enabled: true, time: '09:00' },
   saturday_note: { enabled: true, time: '18:00' },
-  sunday_records: { enabled: true, every_hours: 2 },
+  sunday_records: { enabled: true, every_minutes: 10 },
   bank_movements: { enabled: true }, memo: { enabled: true }, statement: { enabled: true }, rrr_reminders: { enabled: true },
 };
 // Telegram bot menu (Automations -> Telegram bot). App-side default = the box's built-in menu, so an unsaved config
@@ -20123,8 +20123,8 @@ function automationsWhatsappSectionHtml(saved, saveBar){
         <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.whatsapp.saturday_note.time', sn.time, 'Send after (time)')}</div>
 
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">When something happens</div>
-        ${automationsBoolField('automations.whatsapp.sunday_records.enabled', sr.enabled, 'Sunday attendance and collection', "Posted when attendance or a collection is saved in the app, with that Sunday's figures.")}
-        <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.sunday_records.every_hours', sr.every_hours, 'Look for new records every (hours)', 1, 12)}</div>
+        ${automationsBoolField('automations.whatsapp.sunday_records.enabled', sr.enabled, 'Sunday attendance and collection', "Posted the moment attendance or a collection is saved in the app — the app tells the box straight away. The safety look below only catches a signal that went missing.")}
+        <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.sunday_records.every_minutes', sr.every_minutes, 'Safety look for new records every (minutes)', 5, 720)}</div>
         ${automationsBoolField('automations.whatsapp.bank_movements.enabled', bm.enabled, 'Bank movements', 'A CREDIT or DEBIT note when the church bank balance moves, with the new balance. The portal only gives the balance, so there is no sender or recipient.')}
         ${automationsBoolField('automations.whatsapp.memo.enabled', mm.enabled, 'New memos', 'A new RCCG memo is posted with its PDF attached, at the same time as it is emailed.')}
         ${automationsBoolField('automations.whatsapp.statement.enabled', st.enabled, 'Monthly statement', 'The monthly statement is posted with its PDF and a link to view it, at the same time as it is emailed.')}

@@ -123,6 +123,16 @@ async function postToClerkAi(env, event) {
   }
 }
 
+/**
+ * A Sunday record was saved in the app (attendance submitted, or a Sunday collection saved).
+ * Straight to the Clerk box mailbox only, so the Clerk's WhatsApp post goes out at once instead of
+ * waiting for the next look. The Clerk AI routine must never see these: they are not month-end signals.
+ */
+export async function postSundayRecord(env, payload) {
+  if (!watchdogToken(env)) return false;
+  return postToBox(env, { ...payload, event: 'sunday_record_saved', handler: 'box', savedAt: new Date().toISOString() });
+}
+
 /** True when at least one destination is configured. */
 export function monthEndConfigured(env) {
   return !!(String(env?.REMIT_WEBHOOK_URL || '').trim() || watchdogToken(env));
