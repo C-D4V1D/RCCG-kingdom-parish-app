@@ -19991,6 +19991,16 @@ async function automationsSealPassword(publicKeyB64, password){
 /** The box's own health object (the health route wraps it as {last_ping, health}); tolerates the bare object too. */
 function automationsBoxHealth(h){ return (h && typeof h === 'object' ? (h.health && typeof h.health === 'object' ? h.health : h) : {}) || {}; }
 const AUTOMATION_COLLECTION_REMINDER_DEFAULTS = { enabled: true, second_day: 'thu', time: '10:00', cutoff_evening: '20:00', after_days: 5 };
+// WhatsApp posts (Automations -> WhatsApp posts). App-side default = the box's built-in values, so an unsaved
+// config shows the right switches and the next Save keeps them on.
+const AUTOMATION_WHATSAPP_DEFAULTS = {
+  enabled: true, to: '+4740944059',
+  cutoff_checklist: { enabled: true, time: '06:00' },
+  morning_reminders: { enabled: true, time: '09:00' },
+  saturday_note: { enabled: true, time: '18:00' },
+  sunday_records: { enabled: true, every_hours: 2 },
+  bank_movements: { enabled: true }, memo: { enabled: true }, statement: { enabled: true }, rrr_reminders: { enabled: true },
+};
 // Telegram bot menu (Automations -> Telegram bot). App-side default = the box's built-in menu, so an unsaved config
 // shows the right values and the next Save keeps them on. 'everyone' is accepted for statement/balance/refresh/system
 // and treated as 'kingdom'; help is always on.
@@ -20029,6 +20039,45 @@ function automationsTelegramBot(saved){
     unknown_contact: contact || d.unknown_contact,
   };
 }
+function automationsWhatsappSectionHtml(saved, saveBar){
+  const s = saved || {};
+  const wa = { ...AUTOMATION_WHATSAPP_DEFAULTS, ...s };
+  const sub = (k)=>({ ...AUTOMATION_WHATSAPP_DEFAULTS[k], ...(s[k] || {}) });
+  const cc = sub('cutoff_checklist'), mr = sub('morning_reminders'), sn = sub('saturday_note'),
+        sr = sub('sunday_records'), bm = sub('bank_movements'), mm = sub('memo'), st = sub('statement'), rr = sub('rrr_reminders');
+  return `<details class="at-details">
+      <summary>WhatsApp posts</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin-top:0">Short updates the Clerk posts to the parish WhatsApp group: the remittance checklist, the reminders, the Saturday spending note, Sunday attendance and collection, bank movements, new memos and the monthly statement. Nothing here is sent outside that group. Turn any one off to stop just that post; everything else keeps going.</p>
+        ${automationsBoolField('automations.whatsapp.enabled', wa.enabled, 'Send WhatsApp posts', 'The main switch for all of them. When this is off, nothing at all is posted.')}
+        <div class="form-row" style="margin-top:10px">
+          <div class="form-group"><label class="form-label">Send to</label><input class="form-input at-field" data-path="automations.whatsapp.to" data-kind="str" value="${esc(wa.to||'')}" placeholder="+47… or the group name"><div class="at-subtitle">The WhatsApp number or group the posts go to. While testing, this is your own chat.</div></div>
+        </div>
+
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Remittance day</div>
+        ${automationsBoolField('automations.whatsapp.cutoff_checklist.enabled', cc.enabled, 'Remittance-day checklist', 'On the cut-off Sunday the checklist of steps (attendance, collection, portal, RRR, documents, payment) is posted in the morning and updated as each step is finished.')}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.whatsapp.cutoff_checklist.time', cc.time, 'Post at (time)')}</div>
+        ${automationsBoolField('automations.whatsapp.rrr_reminders.enabled', rr.enabled, 'Unpaid RRR reminders after remittance day', 'If the RRR is still unpaid, the checklist is posted again each morning until it is paid, and it shows the date the portal closes.')}
+
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Every day</div>
+        ${automationsBoolField('automations.whatsapp.morning_reminders.enabled', mr.enabled, 'Morning reminders', 'A Sunday whose collection has not been recorded yet, and cash still held by the accountant, until each one is done.')}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.whatsapp.morning_reminders.time', mr.time, 'Send after (time)')}</div>
+
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Every week</div>
+        ${automationsBoolField('automations.whatsapp.saturday_note.enabled', sn.enabled, 'Saturday spending note', "Every Saturday: what was spent that week, how it compares with the month's budget, and how many Sundays are left.")}
+        <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.whatsapp.saturday_note.time', sn.time, 'Send after (time)')}</div>
+
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">When something happens</div>
+        ${automationsBoolField('automations.whatsapp.sunday_records.enabled', sr.enabled, 'Sunday attendance and collection', "Posted when attendance or a collection is saved in the app, with that Sunday's figures.")}
+        <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.sunday_records.every_hours', sr.every_hours, 'Look for new records every (hours)', 1, 12)}</div>
+        ${automationsBoolField('automations.whatsapp.bank_movements.enabled', bm.enabled, 'Bank movements', 'A CREDIT or DEBIT note when the church bank balance moves, with the new balance. The portal only gives the balance, so there is no sender or recipient.')}
+        ${automationsBoolField('automations.whatsapp.memo.enabled', mm.enabled, 'New memos', 'A new RCCG memo is posted with its PDF attached, at the same time as it is emailed.')}
+        ${automationsBoolField('automations.whatsapp.statement.enabled', st.enabled, 'Monthly statement', 'The monthly statement is posted with its PDF and a link to view it, at the same time as it is emailed.')}
+        ${saveBar}
+      </div>
+    </details>`;
+}
+
 function automationsTelegramBotSectionHtml(saved, saveBar){
   const tb = automationsTelegramBot(saved);
   const rows = AUTOMATION_TG_COMMANDS.map(c=>{
@@ -20727,6 +20776,8 @@ function renderAutomationsSettings(config, isDefault, health){
         ${saveBar}
       </div>
     </details>
+
+    ${automationsWhatsappSectionHtml(a.whatsapp, saveBar)}
 
     ${automationsTelegramBotSectionHtml(a.telegram_bot, saveBar)}
 
