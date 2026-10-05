@@ -113,6 +113,18 @@ export const DEFAULT_CONFIG = {
     supervisor: { interval_seconds: 300, ping_every_cycles: 2, // ping every 10 min so the dashboard stays green
       balance_check_interval_minutes: 15, balance_check_active_from: "06:00", balance_check_active_until: "22:00",
       balance_match_window_days: 7 },
+    // WhatsApp posts: the Clerk's short updates to the parish WhatsApp group. Times are the box's own clock.
+    whatsapp: {
+      enabled: true, to: "+4740944059",
+      cutoff_checklist: { enabled: true, time: "06:00" },
+      morning_reminders: { enabled: true, time: "09:00" },
+      saturday_note: { enabled: true, time: "18:00" },
+      sunday_records: { enabled: true, every_hours: 2 },
+      bank_movements: { enabled: true },
+      memo: { enabled: true },
+      statement: { enabled: true },
+      rrr_reminders: { enabled: true },
+    },
     // Telegram bot menu: who sees each command (everyone | kingdom | payers | admin | off). Help is always on.
     telegram_bot: {
       menu: { month: "everyone", upload: "everyone", paid: "payers", statement: "kingdom", balance: "kingdom",
@@ -372,6 +384,42 @@ export function validateConfig(cfg) {
                                  ["bot_hung_restart_minutes", 0, 240]]) {
         if (sup[k] !== undefined && !(isNonNegFinite(sup[k]) && sup[k] >= lo && sup[k] <= hi)) {
           errors.push(`automations.supervisor.${k} must be a number from ${lo} to ${hi}`);
+        }
+      }
+    }
+
+    // Optional (configs saved before WhatsApp posts existed don't have it). Every field inside is optional;
+    // the box falls back to its own built-in values when one is absent, same as everywhere else in this file.
+    const wa = a.whatsapp;
+    if (wa !== undefined) {
+      if (!wa || typeof wa !== "object" || Array.isArray(wa)) errors.push("automations.whatsapp must be an object");
+      else {
+        if (wa.enabled !== undefined && !isBool(wa.enabled)) errors.push("automations.whatsapp.enabled must be true or false");
+        if (wa.to !== undefined && !(typeof wa.to === "string" && wa.to.trim() && wa.to.trim().length <= 40)) {
+          errors.push("automations.whatsapp.to must be a number or group name (1 to 40 characters)");
+        }
+        for (const k of ["cutoff_checklist", "morning_reminders", "saturday_note"]) {
+          const b = wa[k];
+          if (b === undefined) continue;
+          if (!b || typeof b !== "object" || Array.isArray(b)) { errors.push(`automations.whatsapp.${k} must be an object`); continue; }
+          if (b.enabled !== undefined && !isBool(b.enabled)) errors.push(`automations.whatsapp.${k}.enabled must be true or false`);
+          if (b.time !== undefined && !isTime(b.time)) errors.push(`automations.whatsapp.${k}.time must be HH:MM 24h`);
+        }
+        const sr = wa.sunday_records;
+        if (sr !== undefined) {
+          if (!sr || typeof sr !== "object" || Array.isArray(sr)) errors.push("automations.whatsapp.sunday_records must be an object");
+          else {
+            if (sr.enabled !== undefined && !isBool(sr.enabled)) errors.push("automations.whatsapp.sunday_records.enabled must be true or false");
+            if (sr.every_hours !== undefined && !(isNonNegFinite(sr.every_hours) && sr.every_hours >= 1 && sr.every_hours <= 12)) {
+              errors.push("automations.whatsapp.sunday_records.every_hours must be a number from 1 to 12");
+            }
+          }
+        }
+        for (const k of ["bank_movements", "memo", "statement", "rrr_reminders"]) {
+          const b = wa[k];
+          if (b === undefined) continue;
+          if (!b || typeof b !== "object" || Array.isArray(b)) { errors.push(`automations.whatsapp.${k} must be an object`); continue; }
+          if (b.enabled !== undefined && !isBool(b.enabled)) errors.push(`automations.whatsapp.${k}.enabled must be true or false`);
         }
       }
     }
