@@ -119,7 +119,7 @@ export const DEFAULT_CONFIG = {
       cutoff_checklist: { enabled: true, time: "06:00" },
       morning_reminders: { enabled: true, time: "09:00" },
       saturday_note: { enabled: true, time: "18:00" },
-      sunday_records: { enabled: true, every_hours: 2 },
+      sunday_records: { enabled: true, every_minutes: 10 },
       bank_movements: { enabled: true },
       memo: { enabled: true },
       statement: { enabled: true },
@@ -410,8 +410,8 @@ export function validateConfig(cfg) {
           if (!sr || typeof sr !== "object" || Array.isArray(sr)) errors.push("automations.whatsapp.sunday_records must be an object");
           else {
             if (sr.enabled !== undefined && !isBool(sr.enabled)) errors.push("automations.whatsapp.sunday_records.enabled must be true or false");
-            if (sr.every_hours !== undefined && !(isNonNegFinite(sr.every_hours) && sr.every_hours >= 1 && sr.every_hours <= 12)) {
-              errors.push("automations.whatsapp.sunday_records.every_hours must be a number from 1 to 12");
+            if (sr.every_minutes !== undefined && !(isNonNegFinite(sr.every_minutes) && sr.every_minutes >= 5 && sr.every_minutes <= 720)) {
+              errors.push("automations.whatsapp.sunday_records.every_minutes must be a number from 5 to 720");
             }
           }
         }

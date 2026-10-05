@@ -16,7 +16,7 @@ import {
   REMIT_ACTION_PARISH,
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
-import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople } from '../_lib/month-end-events.js';
+import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -2447,6 +2447,8 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
         // collection is saved. Runs after the response via waitUntil and can never
         // fail or slow the save — see queueCutoffCollectionWebhook.
         queueCutoffCollectionWebhook(context, DB, env, body, result);
+        // And tell the Clerk box at once, so its WhatsApp post is immediate.
+        queueSundayCollectionSignal(context, DB, env, body, result);
         return result;
       }
       if (method === 'PUT'  &&  param && context.satParish) return await updateSatelliteIncome(DB, param, body);
@@ -2459,7 +2461,11 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'GET' && !param) return await getAttendanceWeeks(DB, url.searchParams.get('from'), url.searchParams.get('to'));
       const action = parts[2] || null;
       if (method === 'PUT' && param && !action) return await saveAttendanceDraft(DB, param, body);
-      if (method === 'POST' && param && action === 'submit') return await submitAttendanceWeek(DB, param, body);
+      if (method === 'POST' && param && action === 'submit') {
+        const result = await submitAttendanceWeek(DB, param, body);
+        if (result && result.status === 200 && isSundayYmd(param)) queueSundayRecordSignal(context, env, { kind: 'attendance', date: param });
+        return result;
+      }
       if (method === 'POST' && param && action === 'unlock') return await unlockAttendanceWeek(DB, param, body, request);
     }
 
@@ -4813,6 +4819,36 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
   const sent = await deliverMonthEndEvent(env, payload);
   if (!sent.ok) {
     console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
+  }
+}
+
+/** Fire-and-forget: a Sunday record went in — tell the Clerk box at once, so its WhatsApp post is immediate.
+ * Box only, and it never delays or fails the save. The box's own periodic look stays as the safety net. */
+function queueSundayRecordSignal(context, env, payload) {
+  try {
+    if (!monthEndConfigured(env)) return;
+    const job = postSundayRecord(env, payload)
+      .then(ok => { if (!ok) console.error(`[whatsapp] Sunday record signal for ${payload?.date || '?'} (${payload?.kind || '?'}) not accepted by the box`); })
+      .catch(e => console.error('[whatsapp] Sunday record signal failed:', e?.message || e));
+    if (typeof context?.waitUntil === 'function') context.waitUntil(job);
+  } catch (e) {
+    console.error('[whatsapp] could not queue the Sunday record signal:', e?.message || e);
+  }
+}
+
+/** A saved Sunday collection: signal the box with that date. */
+function queueSundayCollectionSignal(context, DB, env, data, result) {
+  try {
+    if (!monthEndConfigured(env) || !isSundayCollectionSource(data?.source)) return;
+    const job = result.clone().json().catch(() => null).then(saved => {
+      const date = String(saved?.date || data?.date || '').slice(0, 10);
+      if (date) return postSundayRecord(env, { kind: 'collection', date, recordId: saved?.id || '' }).then(ok => {
+        if (!ok) console.error(`[whatsapp] Sunday collection signal for ${date} not accepted by the box`);
+      });
+    }).catch(e => console.error('[whatsapp] Sunday collection signal failed:', e?.message || e));
+    if (typeof context?.waitUntil === 'function') context.waitUntil(job);
+  } catch (e) {
+    console.error('[whatsapp] could not queue the Sunday collection signal:', e?.message || e);
   }
 }
 
