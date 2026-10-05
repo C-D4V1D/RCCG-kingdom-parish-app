@@ -18,16 +18,18 @@ function route(overrides) {
   return r;
 }
 
+// Used only when the KV "config" key is missing (GET /config then says is_default: true and the box ignores it).
+// The real people, chat IDs and emails live in KV, saved from the app; these are placeholders, never real data.
 export const DEFAULT_CONFIG = {
   people: [
-    { key: "david", name: "David Chukwuemeka", app_role: "it_admin", telegram_chat_id: "8910112376",
-      email: "chukwuemeka.david@zoho.com", can_upload: true, full_status: true, buttons: true },
-    { key: "divine", name: "Divine Faith (Bro. Divine)", app_role: "accountant", telegram_chat_id: "6871279109",
-      email: "fdivine810@gmail.com", can_upload: true, full_status: false, buttons: true },
-    { key: "fabian", name: "Fabian ALOM (Bro. Fabian)", app_role: null, telegram_chat_id: "7410099201",
-      email: "fabianalomterpase@gmail.com", can_upload: false, full_status: false, buttons: false },
-    { key: "pastor", name: "Pastor (Henry Ofunne)", app_role: "pastor", telegram_chat_id: null,
-      email: "henryofunne2@gmail.com", can_upload: false, full_status: false, buttons: false },
+    { key: "david", name: "Finance Officer", app_role: "it_admin", telegram_chat_id: null,
+      email: null, can_upload: true, full_status: true, buttons: true },
+    { key: "divine", name: "Accountant", app_role: "accountant", telegram_chat_id: null,
+      email: null, can_upload: true, full_status: false, buttons: true },
+    { key: "fabian", name: "Admin Officer", app_role: null, telegram_chat_id: null,
+      email: null, can_upload: false, full_status: false, buttons: false },
+    { key: "pastor", name: "Pastor", app_role: "pastor", telegram_chat_id: null,
+      email: null, can_upload: false, full_status: false, buttons: false },
   ],
   parishes: [
     { code: "602757", name: "Kingdom Parish", source_docs: true, attendance: true, remittance: true, statement: true },
@@ -97,7 +99,7 @@ export const DEFAULT_CONFIG = {
     memo: { enabled: true, auto_forward: true, check_time: "08:45",
       days: ["mon", "tue", "wed", "thu", "fri", "sat"], stop_after: "2099-12-31" },
     statement: { enabled: true, auto_send: true, check_time: "07:30",
-      signature: "God bless.\nBro. David Chukwuemeka" },
+      signature: "God bless." },
     attendance: { enabled: true, auto_file: true, active_from: "08:00", active_until: "22:00",
       check_interval_minutes: 60, first_month: "2026-10",
       reminder1: { days_before_close: 1, time: "18:00" },

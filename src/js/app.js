@@ -2798,7 +2798,7 @@ function updateSidebarUser(){
 async function navigate(page, fromHistory){
   // The Automations dashboard auto-refreshes on a 60s timer while it is on screen —
   // stop it the moment we leave that page so it doesn't keep polling in the background.
-  if(state.page==='automations' && page!=='automations') stopAutomationsRefresh();
+  if(state.page==='automations' && page!=='automations'){ stopAutomationsRefresh(); atFlushAutosave(); }
   if(!canAccessPage(page)){
     // Fall back to the first page this role can open (an Usher's only page is Attendance).
     const home = canAccessPage('dashboard') ? 'dashboard' : (NAV.find(n=>canAccessPage(n.id))?.id || 'dashboard');
@@ -19767,8 +19767,9 @@ const AUTOMATION_MESSAGE_TYPES = [
   { key:'collection_reminder',       label:'Sunday records: follow-up reminders' },
   { key:'month_close',               label:'Month-close checklist & payment' },
   { key:'weekly_health',             label:'Weekly box health note' },
-  { key:'upload_confirmation',       label:'Upload confirmation' },
-  { key:'upload_fyi',                label:'Upload notice (for others)' },
+  // fixed: the bot always sends these (uploader / every bot user); nothing reads their ticks, so no row is shown.
+  { key:'upload_confirmation',       label:'Upload confirmation', fixed:true },
+  { key:'upload_fyi',                label:'Upload notice (for others)', fixed:true },
   { key:'sunday_note',               label:'Sunday memo-check note' },
   { key:'watchdog_down',             label:'Box-down alert' },
   { key:'scheduler_fallback',        label:'Scheduler fallback alert' },
@@ -19790,7 +19791,7 @@ const AUTOMATION_ROUTING_DEFAULTS = {
 // guide). Examples only: the real message fills in the live figures and names, so the wording can differ a little.
 const AUTOMATION_MESSAGE_GUIDE = {
   memo_forwarded: {
-    what: 'A new memo from the RCCG memo portal. The box emails it (PDF attached) to the Pastor, Bro. Divine and Bro. Fabian, and sends this Telegram card with the PDF to the people ticked here.',
+    what: 'A new memo from the RCCG memo portal. The box emails it (PDF attached) to the people ticked for Email ({email:memo_forwarded}) and sends this Telegram card with the PDF to the people ticked for Telegram ({tg:memo_forwarded}).',
     when: 'Monday to Saturday, from the time set under Memo forwarding, when the daily check finds a new memo.',
     sample: '📨 <b>New RCCG memo</b>\nSpecial Thanksgiving Service\n\nFrom: RCCG Region 25\nDate: 12 Oct 2026\nRef: RCCG/REG/2026/114\n\nThe memo PDF is attached.',
   },
@@ -19800,9 +19801,9 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '❌ <b>Memo not forwarded</b>\nRef: RCCG/REG/2026/114\n\nTitle: Special Thanksgiving Service\nProblem: the PDF download failed\nStatus: not emailed\n\n<b>Next step:</b> tell Claude',
   },
   remittance_check: {
-    what: 'Kingdom Parish month-end check: the app\'s figures compared line by line with the RCCG portal, with Generate RRR and Refresh buttons (Bro. Divine and you get your own; the Pastor gets it for information). When someone presses a button, the "… confirmed Generate RRR" note is this type too.',
+    what: 'Kingdom Parish month-end check: the app\'s figures compared line by line with the RCCG portal, with Generate RRR and Refresh buttons (people with "Generate RRR / Refresh buttons" ticked get their own: {role:buttons}; the others ticked here get it for information). When someone presses a button, the "… confirmed Generate RRR" note is this type too.',
     when: 'Once the last Sunday collection of the period is saved in the app (the month-end run), again after each Refresh, and when a button is pressed.',
-    sample: '✅ <b>Kingdom Parish remittance check</b>\nOctober 2026 · 28 Sep – 25 Oct 2026\n\nApp total: ₦1,245,300.00\nPortal total: ₦1,245,300.00\n✅ <b>Aligned</b> (14 lines; differences under ₦1 count as aligned)\n\nAmount to remit: <b>₦1,245,300.00</b>\nRemita fee ₦1,500.00 is added at payment.\n\n<b>Next step:</b> press Generate RRR only if the figures are right.\nYour buttons are personal. The first confirmation (you or Bro. Divine) is the one acted on.\nFull details in your email.\n[ ✅ Generate RRR ]  [ Refresh ]',
+    sample: '✅ <b>Kingdom Parish remittance check</b>\nOctober 2026 · 28 Sep – 25 Oct 2026\n\nApp total: ₦1,245,300.00\nPortal total: ₦1,245,300.00\n✅ <b>Aligned</b> (14 lines; differences under ₦1 count as aligned)\n\nAmount to remit: <b>₦1,245,300.00</b>\nRemita fee ₦1,500.00 is added at payment.\n\n<b>Next step:</b> press Generate RRR only if the figures are right.\nYour buttons are personal. The first confirmation ({role:buttons}) is the one acted on.\nFull details in your email.\n[ ✅ Generate RRR ]  [ Refresh ]',
   },
   rrr_generated: {
     what: 'The RRR (Remita payment number) and the amount to pay, after Generate RRR. People who pay the RRR also get the ✅ I\'ve paid button under it, so keep Telegram ticked for them.',
@@ -19815,7 +19816,7 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '⚠️ <b>God Is Able remittance check</b>\nOctober 2026\n\nYour figures (total input): ₦412,000.00\nAmount to remit (portal): <b>₦409,500.00</b>\n\n❌ <b>1 difference(s)</b>\n• Week 2: portal ₦98,000.00 / yours ₦100,500.00\n\n<b>Next step:</b> tell Church Clerk in chat when to generate the RRR.\nFull details in your email.',
   },
   monthly_statement: {
-    what: 'The monthly financial statement: emailed with the PDF to the Pastor, Bro. Divine, you and Bro. Fabian, and this Telegram card (with the PDF) to the people ticked here.',
+    what: 'The monthly financial statement: emailed with the PDF to the people ticked for Email ({email:monthly_statement}), and this Telegram card (with the PDF) to the people ticked for Telegram ({tg:monthly_statement}).',
     when: 'The set number of days after a cut-off Sunday (normally 1 = Monday), from the time set under Monthly statement; if the box misses that day it keeps trying for the set number of days.',
     sample: '📄 <b>Kingdom Parish monthly financial statement</b>\nPeriod 28 Sep – 25 Oct 2026\nOpen the statement (PDF attached). Same as the email.',
   },
@@ -19825,7 +19826,7 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '⏳ <b>Statement due, not sent</b>\n28 Sep – 25 Oct 2026\n\nAuto-send is off in Automations, so nothing was created or emailed.\n\nTurn Auto-send on and it goes out at the next daily check.',
   },
   attendance_filed: {
-    what: 'The month\'s attendance, as filed on the RCCG portal: the result, each week\'s total and any difference from the app. You and Bro. Divine can get a Refresh attendance button under it.',
+    what: 'The month\'s attendance, as filed on the RCCG portal: the result, each week\'s total and any difference from the app. People with "Generate RRR / Refresh buttons" ticked ({role:buttons}) can get a Refresh attendance button under it.',
     when: 'During the month-end run (straight after the remittance), and again if Refresh attendance re-files it.',
     sample: '📋 <b>Kingdom Parish attendance (RCCG portal)</b>\nOctober 2026 · period 28 Sep – 25 Oct 2026\n\n✅ <b>Filed on the portal</b>\n\n<b>Weeks</b>\nW1 · 5 Oct: 212\nW2 · 12 Oct: 198\nW3 · 19 Oct: 205\nW4 · 25 Oct: 220\n\nFull details in your email.',
   },
@@ -19835,24 +19836,24 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '⚠️ October 2026 attendance was filed but the portal differs from the app: W2 Sunday service. The check email shows it.',
   },
   source_doc_reminder: {
-    what: 'A reminder that source-document slots on the portal are still empty. You get all parishes; Bro. Divine gets Kingdom Parish only (starting "Good morning Bro. Divine").',
+    what: 'A reminder that source-document slots on the portal are still empty. The people ticked here get all parishes, except {person:divine}, who gets Kingdom Parish only (starting "Good morning {person:divine}").',
     when: 'On the days before the portal closes set under Source-doc reminders (normally 3 days and 1 day before), after the time set there.',
     sample: '⏳ <b>Source-doc reminder</b>\nPortal closes Fri 7 Nov (3 days left)\n\nStill empty:\n• Kingdom Parish: Finance (October 2026)\n\nSend the page(s) to the bot and choose Admin, Finance or Both.',
   },
   weekly_attendance_reminder: {
-    what: 'Bro. Divine\'s weekly message: each past Sunday of the month that still needs its attendance and/or collection (a collection can only be saved once that week\'s attendance is in), and the Monthly report in the cut-off week. Nothing is sent when everything is in.',
+    what: 'The weekly message to {tg:weekly_attendance_reminder}: each past Sunday of the month that still needs its attendance and/or collection (a collection can only be saved once that week\'s attendance is in), and the Monthly report in the cut-off week. Nothing is sent when everything is in.',
     when: 'Once a week, on the day and after the time set under Sunday records reminders (normally Monday).',
-    sample: 'Good morning Bro. Divine,\n\n⏳ <b>Sunday records not complete</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 11 Oct: attendance, then collection\n• Sun 18 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.\n\nGod bless.',
+    sample: 'Good morning {first:weekly_attendance_reminder},\n\n⏳ <b>Sunday records not complete</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 11 Oct: attendance, then collection\n• Sun 18 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.\n\nGod bless.',
   },
   collection_reminder: {
-    what: 'Follow-ups while a Sunday record is still missing: a 2nd reminder to Bro. Divine, then on the cut-off Sunday evening and every day after the cut-off, the same list to Bro. Divine and you, until the last collection is saved.',
+    what: 'Follow-ups while a Sunday record is still missing: a 2nd reminder to the people ticked here except {person:david}, then on the cut-off Sunday evening and every day after the cut-off, the same list to everyone ticked here ({tg:collection_reminder}), until the last collection is saved.',
     when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening (normally 20:00), then daily after the cut-off for the number of days set (normally 5), only while something is missing.',
     sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 25 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.',
   },
   month_close: {
     what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist, the warning before the portal closes, and the "month-close complete" note.',
     when: 'When the payer taps ✅ I\'ve paid or sends /paid (and at the Remita check times), the set number of days before the portal closes if something is still open, and once everything is done.',
-    sample: '✅ <b>October 2026 remittance PAID</b>\nRRR 2515-1524-5138 · ₦1,246,912.50\nPaid by Bro. Fabian (Admin Officer) (confirmed on Remita, Tue 4 Nov 14:02)\n\n<b>Month-close checklist</b> (portal closes Fri 7 Nov)\n✅ Remittance filed on the portal · RRR 2515-1524-5138\n✅ Paid (Bro. Fabian (Admin Officer))\n✅ Attendance filed\n✅ Source docs, Finance: uploaded\n⚠️ Source docs, Admin: NOT uploaded yet\n⚠️ Payment not yet recorded in the app (Bro. Divine (Accountant))\n\nBro. Divine (Accountant): please record the payment in the app (Remittances).',
+    sample: '✅ <b>October 2026 remittance PAID</b>\nRRR 2515-1524-5138 · ₦1,246,912.50\nPaid by {who:payers} (confirmed on Remita, Tue 4 Nov 14:02)\n\n<b>Month-close checklist</b> (portal closes Fri 7 Nov)\n✅ Remittance filed on the portal · RRR 2515-1524-5138\n✅ Paid ({who:payers})\n✅ Attendance filed\n✅ Source docs, Finance: uploaded\n⚠️ Source docs, Admin: NOT uploaded yet\n⚠️ Payment not yet recorded in the app ({who:accountant})\n\n{who:accountant}: please record the payment in the app (Remittances).',
   },
   weekly_health: {
     what: 'A weekly check of the box: are its programs running, when the last memo check and Drive backup happened, and how many restarts or sync errors there were this week.',
@@ -19860,14 +19861,14 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '🩺 <b>Weekly system check</b>\nSat 3 Oct\n\n✅ Upload bot + scheduler\n✅ Memo runner\n✅ Statement runner\n✅ Drive sync\n\nLast memo check: Sat 3 Oct, 08:51 · ok · 0 new\nLast Drive sync: Sat 3 Oct, 17:50\nThis week: 0 automatic restart(s), 0 sync error(s)\n\nAll good. No action needed.',
   },
   upload_confirmation: {
-    what: 'The bot\'s reply to the person who uploaded a source document, once the portal confirms it. It always goes to the uploader (the ticks here don\'t change it).',
+    what: 'The bot\'s reply to the person who uploaded a source document, once the portal confirms it. It always goes to the uploader, so it has no switch in the People lists.',
     when: 'Straight after an upload through the Telegram bot.',
     sample: '✅ Uploaded and confirmed on the portal\nKingdom Parish, Finance source doc, October 2026\n(link to the file on the portal)',
   },
   upload_fyi: {
-    what: 'A note to the other bot users that someone uploaded a source document. It goes to everyone who can use the bot (the ticks here don\'t change it).',
+    what: 'A note to the other bot users that someone uploaded a source document. It goes to everyone who can use the bot, so it has no switch in the People lists.',
     when: 'Straight after an upload through the Telegram bot.',
-    sample: 'ℹ️ Divine uploaded a source doc via the bot\nKingdom Parish, Finance source doc, October 2026',
+    sample: 'ℹ️ {role:accountant} uploaded a source doc via the bot\nKingdom Parish, Finance source doc, October 2026',
   },
   sunday_note: {
     what: 'Your weekly memo-check summary: whether the daily memo check ran each day Monday to Saturday, any new memos found and any problems, plus the result of Sunday\'s own check. It is about memos only, not attendance or collections.',
@@ -19891,20 +19892,21 @@ const AUTOMATION_MESSAGE_GUIDE = {
   },
   bank_transaction_detected: {
     what: 'Every real bank balance change the periodic check finds — whether it matched automatically, needs your review, or wasn\'t found in your records at all. A plain FYI, separate from the "needs review" alert above.',
-    when: 'Every time the periodic balance check (every 15 minutes, 6am-10pm) sees the balance move.',
+    when: 'Every time the periodic balance check sees the balance move (how often and between which hours: Bank reconciliation, normally every 15 minutes from 06:00 to 22:00).',
     sample: '✅ ₦245,000 came into the bank on 4 Oct — matched automatically to 1 of your records.',
   },
 };
-function automationsMessageGuideHtml(keys){
+function automationsMessageGuideHtml(keys, config){
   const list = AUTOMATION_MESSAGE_TYPES.filter(mt=>!keys || keys.includes(mt.key));
+  const h = (t)=>automationsHelpText(t, config);
   return list.map(mt=>{
     const g = AUTOMATION_MESSAGE_GUIDE[mt.key];
     if(!g) return '';
-    const sample = esc(g.sample).replace(/&lt;(\/?)b&gt;/g, '<$1b>');
+    const sample = esc(h(g.sample)).replace(/&lt;(\/?)b&gt;/g, '<$1b>');
     return `<details class="at-guide-item" id="at-guide-${esc(mt.key)}">
       <summary>${esc(mt.label)}</summary>
-      <p><b>What it is:</b> ${esc(g.what)}</p>
-      <p><b>When it's sent:</b> ${esc(g.when)}</p>
+      <p><b>What it is:</b> ${esc(h(g.what))}</p>
+      <p><b>When it's sent:</b> ${esc(h(g.when))}</p>
       <div class="at-guide-label">Example (Telegram)</div>
       <div class="at-guide-sample">${sample}</div>
     </details>`;
@@ -19914,7 +19916,7 @@ const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
   enabled: true, check_times: ['10:00', '14:00', '18:00'], warn_days: 2, complete_message: true,
   items: { source_docs: true, app_record: true, csr: false },
 };
-// Titles used in messages ("Bro. Fabian (Admin Officer)") and who pays the RRR, for people saved before these existed.
+// Titles used in messages ("Called (Title)") and who pays the RRR, for people saved before these existed.
 const AUTOMATION_PEOPLE_DEFAULTS = {
   david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true, month_all_parishes: true },
   divine: { title: 'Accountant', called: 'Bro. Divine', pays_rrr: false, month_all_parishes: false },
@@ -19924,6 +19926,59 @@ const AUTOMATION_PEOPLE_DEFAULTS = {
 function automationsPersonField(p, f){
   return p?.[f] !== undefined ? p[f] : AUTOMATION_PEOPLE_DEFAULTS[p?.key]?.[f];
 }
+// Names in help text come from Automations -> People ("Called in messages", else the name), never from the code.
+// Tokens: {tg:<type>} / {email:<type>} / {to:<type>} = the Kingdom people ticked for that message (Telegram / Email /
+// either); {first:<type>} = the first of them; {role:buttons|payers|admin|accountant} = the people with that tick or
+// app role; {who:<role>} = the first of them as "Called (Title)"; {person:<key>} = one person the box itself names.
+function automationsCalled(p){ return String(automationsPersonField(p, 'called') || p?.name || p?.key || '').trim(); }
+function automationsJoinNames(names){
+  const n = [...new Set(names.filter(Boolean))];
+  return n.length <= 1 ? (n[0] || '') : `${n.slice(0, -1).join(', ')} and ${n[n.length - 1]}`;
+}
+const AUTOMATION_ROLE_TEST = {
+  buttons: p=>!!p.buttons, payers: p=>!!automationsPersonField(p, 'pays_rrr'), admin: p=>!!p.full_status,
+  accountant: p=>p.app_role === 'accountant',
+};
+const AUTOMATION_HELP_FALLBACK = { tg:'the people ticked for it', email:'the people ticked for it', to:'the people ticked for it',
+  first:'Bro. …', buttons:'the people with buttons', payers:'the RRR payer', admin:'the admin', accountant:'the accountant', person:'the person the box names' };
+function automationsHelpText(text, config){
+  const kingdom = automationsSplitPeople(config || {}).kingdom;
+  const ticked = (mt, ch)=>{
+    const r = config?.routing?.[mt] || AUTOMATION_ROUTING_DEFAULTS[mt] || {};
+    return kingdom.filter(p=>{ const x = r[p.key] || {}; return ch ? !!x[ch] : !!(x.telegram || x.email); });
+  };
+  return String(text ?? '').replace(/\{(tg|email|to|first|role|who|person):([a-z_]+)\}/g, (m, kind, arg)=>{
+    let out = '';
+    if(kind === 'tg' || kind === 'email' || kind === 'to') out = automationsJoinNames(ticked(arg, kind === 'to' ? null : (kind === 'tg' ? 'telegram' : 'email')).map(automationsCalled));
+    else if(kind === 'first') out = automationsCalled(ticked(arg, 'telegram')[0]);
+    else if(kind === 'role') out = automationsJoinNames(kingdom.filter(AUTOMATION_ROLE_TEST[arg] || (()=>false)).map(automationsCalled));
+    else if(kind === 'who'){
+      const p = kingdom.find(AUTOMATION_ROLE_TEST[arg] || (()=>false));
+      const t = p ? String(automationsPersonField(p, 'title') || '').trim() : '';
+      out = p ? (t ? `${automationsCalled(p)} (${t})` : automationsCalled(p)) : '';
+    }
+    else if(kind === 'person'){ const p = kingdom.find(x=>x.key === arg); out = p ? automationsCalled(p) : ''; }
+    return out || AUTOMATION_HELP_FALLBACK[kind === 'role' || kind === 'who' ? arg : kind] || '';
+  });
+}
+// The weekly Sunday-records message: until the page is saved with follow_ticks (box followticks-20261003), the box sends
+// it only to this built-in person (if ticked), whatever else is ticked. The page shows that real result, and Save turns
+// follow_ticks on, so the saved ticks are then exactly what the box does.
+const AUTOMATION_WEEKLY_LEGACY_KEY = 'divine';
+function automationsEffectiveConfig(config){
+  if(!config || config.automations?.weekly_attendance_reminder?.follow_ticks === true) return config;
+  const r = config.routing?.weekly_attendance_reminder;
+  if(!r || typeof r !== 'object') return config;
+  const kingdom = new Set(automationsSplitPeople(config).kingdom.map(p=>p.key));
+  const fixed = {};
+  for(const [k, v] of Object.entries(r)){
+    fixed[k] = (kingdom.has(k) && k !== AUTOMATION_WEEKLY_LEGACY_KEY) ? { ...(v || {}), telegram: false } : v;
+  }
+  return { ...config, routing: { ...config.routing, weekly_attendance_reminder: fixed } };
+}
+// What the box reads for a satellite parish's people (satinfo / satmonthend / satclose): only these message types.
+const AUTOMATION_PERSON_TICKS_NOTE = `<p class="at-note" style="margin:-4px 0 10px"><b>Admin (full status):</b> sees the admin-only Telegram bot commands (Refresh attendance, System) and is named as the admin in /month; the first admin with a Telegram chat ID also chooses the parish when uploading with the bot. <b>Generate RRR / Refresh buttons:</b> may get the action buttons in the check emails; the box never emails buttons to anyone else.</p>`;
+const AUTOMATION_SAT_USED_TYPES = ['remittance_check', 'rrr_generated', 'month_close', 'collection_reminder'];
 
 // Satellite parishes (every parish except Kingdom's own). What a parish saved before these settings existed acts like,
 // so the boxes show it and a Save never switches it off or empties who gets copies.
@@ -20093,7 +20148,7 @@ function automationsTelegramBotSectionHtml(saved, saveBar){
   return `<details class="at-details" id="atTelegramBot">
       <summary>Telegram bot</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin-top:0">Who sees each command in their Telegram menu. People's roles come from Automations → People (Pays the RRR, Full status). Satellite parish pastors only ever see Month, Upload, I've paid (if they pay) and Help.</p>
+        <p class="at-note" style="margin-top:0">Who sees each command in their Telegram menu. "RRR payers" are the people with "Pays the RRR" ticked under People; "Admin only" are the people with "Admin (full status)" ticked. Only people with "Can use the Telegram bot" ticked can use the bot at all. Satellite parish pastors only ever see Month, Upload, I've paid (if they pay) and Help.</p>
         ${rows}
         <div class="at-toggle-row at-menu-row">
           <div><div class="at-toggle-label">❓ Help</div><div class="at-subtitle">Always on for everyone</div></div>
@@ -20268,6 +20323,8 @@ async function renderAutomations(){
     // DEFAULT_CONFIG.automations.supervisor doesn't carry it). Comparing against the raw saved config
     // would see those filled-in defaults as "edits" and block the button on a page nobody has touched.
     state.automations.configBaseline = JSON.stringify(collectAutomationsConfig());
+    state.automations.saveFailed = false;
+    atWireAutosave(settingsEl);
   } else {
     settingsEl.innerHTML = renderAutomationsAccountantSummary(configData.config);
   }
@@ -20398,10 +20455,11 @@ function renderAutomationsRemittanceSection(config, health){
       <summary>Remittance (month-end)</summary>
       <div class="at-details-body">
         ${holdBanner}
+        <p class="at-note" style="margin-top:0">Month-end run by, for Kingdom Parish. Each satellite parish has its own "Month-end run by" under Parishes.</p>
         <div class="at-radio-group">
           <label class="at-radio-card">
             <input type="radio" name="atRemHandler" class="at-rem-handler" value="clerk_ai" ${handler==='clerk_ai'?'checked':''}>
-            <div><div class="at-toggle-label">Clerk AI (current)</div><div class="at-subtitle">The Clerk AI files the remittance and attendance on the RCCG portal when the last Sunday collection is saved. The box only does a practice run and tells David what it would have filed.</div></div>
+            <div><div class="at-toggle-label">Clerk AI</div><div class="at-subtitle">The Clerk AI files the remittance and attendance on the RCCG portal when the last Sunday collection is saved. The box only does a practice run and tells ${esc(automationsHelpText('{person:david}', config))} what it would have filed.</div></div>
           </label>
           <label class="at-radio-card">
             <input type="radio" name="atRemHandler" class="at-rem-handler" value="box" ${handler==='box'?'checked':''} onclick="return App.onRemHandlerBoxClick(event)">
@@ -20416,7 +20474,8 @@ function renderAutomationsRemittanceSection(config, health){
         </table></div>
         <div class="at-save-bar">
           <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
-          <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+          <span class="at-save-status" aria-live="polite"></span>
+          <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
         </div>
       </div>
     </details>`;
@@ -20430,12 +20489,12 @@ function onRemHandlerBoxClick(ev){
 
 // One routing table (Message × Telegram/Email) — the same component for Kingdom people and parish people.
 // routingFor(mt) returns {telegram,email} for a message type; withGuide adds the ⓘ link to the Message guide.
-function automationsRoutingTableHtml(routingFor, tgConnected, withGuide){
+function automationsRoutingTableHtml(routingFor, tgConnected, withGuide, only, config){
   return `<div class="table-wrap"><table class="at-routing-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
-        ${AUTOMATION_MESSAGE_TYPES.map(mt=>{
+        ${AUTOMATION_MESSAGE_TYPES.filter(mt=>!mt.fixed && (!only || only.includes(mt.key))).map(mt=>{
           const r = routingFor(mt) || {};
-          const guide = withGuide ? ` <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'')}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a>` : '';
+          const guide = withGuide ? ` <a href="#at-guide-${esc(mt.key)}" class="at-guide-link" title="${esc(automationsHelpText(AUTOMATION_MESSAGE_GUIDE[mt.key]?.what||'', config))}" onclick="App.openAutomationGuide('${esc(mt.key)}');return false">ⓘ</a>` : '';
           return `<tr><td>${esc(mt.label)}${guide}</td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" ${r.telegram?'checked':''} ${tgConnected?'':'title="This person is not connected on Telegram yet"'}></td>
             <td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email" ${r.email?'checked':''}></td>
@@ -20486,7 +20545,8 @@ function automationsSatPersonHtml(p, routingFor, box, users){
       <div class="at-p-line"><span class="at-p-line-l">Telegram</span><span class="at-p-telegram">${automationsTelegramHtml(connected)}</span></div>
       <details class="at-details at-details-inner">
         <summary>Messages this person gets</summary>
-        <div class="at-details-body">${automationsRoutingTableHtml(routingFor, !!p.telegram_chat_id, false)}</div>
+        <div class="at-details-body">${automationsRoutingTableHtml(routingFor, !!p.telegram_chat_id, false, AUTOMATION_SAT_USED_TYPES)}
+          <p class="at-note">Only these messages go to a parish's people. For Remittance check and RRR generated, the Telegram tick also decides the email copy (the Email tick there is not read). Sunday records follow-ups go by email only to someone with no Telegram.</p></div>
       </details>
       <button type="button" class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Remove person</button>
     </div>`;
@@ -20499,11 +20559,12 @@ function automationsParishCardHtml(p, i, ctx){
   const { config, box, users } = ctx;
   const code = String(p.code || '').trim();
   const isSat = code !== KINGDOM_PARISH_CODE;
-  const flags = `<div class="at-day-chips">
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}> Source documents</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="attendance" ${p.attendance?'checked':''}> Attendance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="remittance" ${p.remittance?'checked':''}> Remittance</label>
-        <label class="at-day-chip"><input type="checkbox" class="at-par-flag" data-flag="statement" ${p.statement?'checked':''}> Statement</label>
+  // Only "Source documents" is read by the box (upload bot, source-doc reminders, /month). The old Attendance /
+  // Remittance / Statement ticks were read by nothing (a parish's month-end follows "Month-end run by"), so they are
+  // no longer shown; their saved values are kept as they are (see collectAutomationsConfig).
+  const flags = `<div class="at-toggle-row" style="margin-top:6px">
+        <div><div class="at-toggle-label">Source documents</div><div class="at-subtitle">The Telegram upload bot offers this parish, the source-doc reminders include it, and /month shows its SOURCE DOCUMENTS.</div></div>
+        <label class="at-switch"><input type="checkbox" class="at-par-flag" data-flag="source_docs" ${p.source_docs?'checked':''}><span class="at-switch-track"></span></label>
       </div>`;
   const people = isSat ? (automationsSplitPeople(config).byParish[code] || []) : [];
   // The code can be edited until a pastor has an app login (that login is tied to the code).
@@ -20526,11 +20587,12 @@ function automationsParishCardHtml(p, i, ctx){
   return `<div class="at-subcard at-par-card" data-parish-idx="${i}" data-orig-code="${esc(code)}" data-pw-sealed="${esc(p.portal_password_sealed||'')}" data-pw-set-at="${esc(p.portal_password_set_at||'')}">
       ${head}${flags}
       <div class="at-toggle-row" style="margin-top:10px">
-        <div><div class="at-toggle-label">Active</div><div class="at-subtitle">Switch off to pause this parish: its pastor cannot sign in to the app.</div></div>
+        <div><div class="at-toggle-label">Active</div><div class="at-subtitle">Switch off to pause this parish: its pastor cannot sign in to the app, the box ignores its month-end and sends it no Sunday records reminders or month-close messages, and it leaves the "Other parishes" list in /month.</div></div>
         <label class="at-switch"><input type="checkbox" class="at-par-active" ${automationsParishField(p,'active')!==false?'checked':''}><span class="at-switch-track"></span></label>
       </div>
       <div class="form-group" style="margin-top:8px"><label class="form-label">Month-end run by</label>
-        <select class="form-select at-par-handler"><option value="box" ${handler==='box'?'selected':''}>Box (default)</option><option value="clerk_ai" ${handler==='clerk_ai'?'selected':''}>Clerk AI</option></select></div>
+        <select class="form-select at-par-handler"><option value="box" ${handler==='box'?'selected':''}>Box (default)</option><option value="clerk_ai" ${handler==='clerk_ai'?'selected':''}>Clerk AI</option></select>
+        <div class="at-subtitle">Who files this parish's remittance and attendance once its last Sunday collection is saved. Box: the box does it and sends the check with the Generate RRR / Refresh buttons. Clerk AI: the box only wakes the Clerk AI.</div></div>
 
       <div class="at-par-sub-title">Pastor &amp; people of this parish</div>
       <div class="at-par-people">${people.map(x=>automationsSatPersonHtml(x, routingOfPerson(x), box, users)).join('')}</div>
@@ -20548,15 +20610,16 @@ function automationsParishCardHtml(p, i, ctx){
       </div>
 
       <div class="at-par-sub-title">Copies</div>
-      <div class="at-subtitle" style="margin:0 0 4px">Who else gets copies of this parish's check, RRR, paid and month-close messages.</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Who else gets copies of this parish's check, RRR, paid and month-close messages, and its cut-off Sunday and after-cut-off Sunday records reminders.</div>
       <div class="at-day-chips at-par-picks" data-field="copies">${automationsPicksHtml('copies', copies, pick)}</div>
 
       <div class="at-par-sub-title">Late parish alert</div>
-      <div class="at-subtitle" style="margin:0 0 4px">Told when this parish is 5 or more days late.</div>
+      <div class="at-subtitle" style="margin:0 0 4px">Also gets this parish's daily reminders after the cut-off Sunday while its last collection is still missing (for the number of days set under Sunday records reminders).</div>
       <div class="at-day-chips at-par-picks" data-field="late_alert">${automationsPicksHtml('late_alert', late, pick)}</div>
 
       <div class="at-par-sub-title">RCCG portal login</div>
-      <div class="form-group"><select class="form-select at-par-plogin" onchange="App.atPortalToggle(this)"><option value="area" ${own?'':'selected'}>Area account (ours)</option><option value="own" ${own?'selected':''}>Parish's own account</option></select></div>
+      <div class="form-group"><select class="form-select at-par-plogin" onchange="App.atPortalToggle(this)"><option value="area" ${own?'':'selected'}>Area account (ours)</option><option value="own" ${own?'selected':''}>Parish's own account</option></select>
+        <div class="at-subtitle">Not used yet: the box signs in with the Area account.</div></div>
       <div class="at-par-own" style="${own?'':'display:none'}">
         <div class="form-row">
           <div class="form-group"><label class="form-label">Portal username</label><input class="form-input at-par-pusername" autocomplete="off" value="${esc(p.portal_username||'')}"></div>
@@ -20571,6 +20634,7 @@ function automationsParishCardHtml(p, i, ctx){
 }
 
 function renderAutomationsSettings(config, isDefault, health){
+  config = automationsEffectiveConfig(config);
   const parishes = config.parishes || [];
   const kingdomPeople = automationsSplitPeople(config).kingdom;
   const a = config.automations || {};
@@ -20591,14 +20655,17 @@ function renderAutomationsSettings(config, isDefault, health){
       </div>
       <div class="form-row">
         <div class="form-group"><label class="form-label">Title (used in messages)</label><input class="form-input at-p-title" value="${esc(automationsPersonField(p,'title')||'')}" placeholder="e.g. Finance Officer"></div>
-        <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="${esc(automationsPersonField(p,'called')||'')}" placeholder="e.g. Bro. David"></div>
+        <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="${esc(automationsPersonField(p,'called')||'')}" placeholder="e.g. Bro. Tunde"></div>
       </div>
       <div class="form-row" style="margin:6px 0 10px">
         <label class="at-inline-check"><input type="checkbox" class="at-p-pays" ${automationsPersonField(p,'pays_rrr')?'checked':''}> Pays the RRR ("I've paid" button, /paid)</label>
         <label class="at-inline-check"><input type="checkbox" class="at-p-bot" ${p.can_upload?'checked':''}> Can use the Telegram bot</label>
         <label class="at-inline-check" title="Adds an &quot;Other parishes&quot; button under /month in the Telegram bot"><input type="checkbox" class="at-p-mallp" ${automationsPersonField(p,'month_all_parishes')?'checked':''}> Can view other parishes' month (/month)</label>
+        <label class="at-inline-check"><input type="checkbox" class="at-p-admin" ${p.full_status?'checked':''}> Admin (full status)</label>
+        <label class="at-inline-check"><input type="checkbox" class="at-p-buttons" ${p.buttons?'checked':''}> Generate RRR / Refresh buttons</label>
       </div>
-      ${automationsRoutingTableHtml(routingOf(p), !!p.telegram_chat_id, true)}
+      ${AUTOMATION_PERSON_TICKS_NOTE}
+      ${automationsRoutingTableHtml(routingOf(p), !!p.telegram_chat_id, true, null, config)}
       <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>
     </div>`;
   }).join('');
@@ -20608,7 +20675,8 @@ function renderAutomationsSettings(config, isDefault, health){
 
   const saveBar = `<div class="at-save-bar">
       <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
-      <span class="at-save-hint">Changes take up to 5 minutes to reach the box</span>
+      <span class="at-save-status" aria-live="polite"></span>
+      <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
     </div>`;
   const dayChips = (path, selected)=>`<div class="at-day-chips">${AUTOMATION_DAYS.map(d=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="${path}" data-kind="day" data-day="${d.key}" ${((selected||[]).includes(d.key))?'checked':''}> ${d.label}</label>`).join('')}</div>`;
 
@@ -20631,7 +20699,7 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Message guide (what each message says)</summary>
       <div class="at-details-body">
         <p class="at-note" style="margin-top:0">What each message in the ticks above is, when the box sends it, and an example of how it looks on Telegram (the real one fills in the live names and figures). Tap ⓘ next to a message above to jump here.</p>
-        ${automationsMessageGuideHtml()}
+        ${automationsMessageGuideHtml(null, config)}
       </div>
     </details>
 
@@ -20654,7 +20722,7 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Memo forwarding</summary>
       <div class="at-details-body">
         ${automationsBoolField('automations.memo.enabled', memo.enabled, 'Check for new memos', 'When turned off, the box stops checking for new memos altogether.')}
-        ${automationsBoolField('automations.memo.auto_forward', memo.auto_forward, 'Auto-forward new memos', "When turned on, a new memo is downloaded and sent out immediately. When turned off, you'll get a notification that a new memo was found, and it won't be sent out until you confirm it.")}
+        ${automationsBoolField('automations.memo.auto_forward', memo.auto_forward, 'Auto-forward new memos', "When turned on, a new memo is downloaded and sent out immediately. " + automationsHelpText("When turned off, {person:david} gets a notification that a new memo was found (if ticked for Memo forwarding problem), and it won't be sent out until it is confirmed.", config))}
         <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.memo.check_time', memo.check_time, 'Check from (time)')}</div>
         <div style="margin-top:8px"><label class="form-label">Days to check</label>${dayChips('automations.memo.days', memo.days)}</div>
         <div class="form-row" style="margin-top:10px"><div class="form-group"><label class="form-label">Stop checking after (date)</label><input type="date" class="form-input at-field" data-path="automations.memo.stop_after" data-kind="str" value="${esc(memo.stop_after||'')}"></div></div>
@@ -20680,14 +20748,14 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Attendance</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. Bro. Divine's Monday reminder is under Sunday records reminders.</p>
+        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. The Monday reminder to ${esc(automationsHelpText('{tg:weekly_attendance_reminder}', config))} is under Sunday records reminders.</p>
       </div>
     </details>
 
     <details class="at-details">
       <summary>Source-doc reminders</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.source_doc_reminders.enabled', sdr.enabled, 'Send source-document reminders', "When turned on, a reminder is sent before the portal closes for source documents that haven't come in yet.")}
+        ${automationsBoolField('automations.source_doc_reminders.enabled', sdr.enabled, 'Send source-document reminders', "When turned on, a reminder is sent before the portal closes for source documents that haven't come in yet, for the parishes with Source documents switched on under Parishes.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Days before portal closes (comma-separated)</label><input class="form-input at-field" data-path="automations.source_doc_reminders.days_before_close" data-kind="numlist" value="${esc((sdr.days_before_close||[]).join(', '))}"></div>
           ${automationsTimeField('automations.source_doc_reminders.after_time', sdr.after_time, 'Send after (time)')}
@@ -20699,15 +20767,15 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Sunday records reminders (attendance &amp; collection)</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin-top:0">Bro. Divine enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
+        <p class="at-note" style="margin-top:0">${esc(automationsHelpText('{role:accountant}', config))} enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly message</div>
-        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message to Bro. Divine', "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in.")}
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message', automationsHelpText('To the people ticked for "Sunday records: weekly message" under People (now: {tg:weekly_attendance_reminder}). ', config) + "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in. When turned off, the same list still goes out on Monday as a follow-up reminder, unless Follow-up reminders below is off too.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
         </div>
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Follow-up reminders</div>
-        ${automationsBoolField('automations.collection_reminders.enabled', cr.enabled, 'Follow-up reminders', "If something is still missing: a 2nd reminder to Bro. Divine on the day below; then on the cut-off Sunday evening, and every day after the cut-off for the number of days below, Bro. Divine and you get the same list until the last collection is saved.")}
+        ${automationsBoolField('automations.collection_reminders.enabled', cr.enabled, 'Follow-up reminders', automationsHelpText("If something is still missing: a 2nd reminder on the day below to the people ticked for \"Sunday records: follow-up reminders\" except {person:david}; then on the cut-off Sunday evening, and every day after the cut-off for the number of days below, everyone ticked for it ({tg:collection_reminder}) gets the same list until the last collection is saved.", config))}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">2nd reminder on</label><select class="form-select at-field" data-path="automations.collection_reminders.second_day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${cr.second_day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.collection_reminders.time', cr.time, 'Send after (time)')}
@@ -20721,7 +20789,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Sunday note</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.sunday_note.enabled', sun.enabled, 'Send the Sunday memo-check note', 'When turned on, you get a weekly summary every Sunday after the time below: did the daily memo check run each day Monday to Saturday, which new memos were found, and any problems. It is about memos only. When turned off, this weekly note is skipped.')}
+        ${automationsBoolField('automations.sunday_note.enabled', sun.enabled, 'Send the Sunday memo-check note', automationsHelpText('When turned on, {person:david} gets a weekly summary every Sunday after the time below:', config) + ' did the daily memo check run each day Monday to Saturday, which new memos were found, and any problems. It is about memos only. When turned off, this weekly note is skipped.')}
         <div class="form-row" style="margin-top:10px">${automationsTimeField('automations.sunday_note.after_time', sun.after_time, 'Send after (time)')}</div>
         ${saveBar}
       </div>
@@ -20730,7 +20798,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Health note</summary>
       <div class="at-details-body">
-        ${automationsBoolField('automations.health_note.enabled', health_.enabled, 'Send the weekly health note', "When turned on, a weekly summary of how the box is doing is sent to you.")}
+        ${automationsBoolField('automations.health_note.enabled', health_.enabled, 'Send the weekly health note', "" + automationsHelpText("When turned on, a weekly summary of how the box is doing is sent to the people ticked for Weekly box health note ({tg:weekly_health}).", config))}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.health_note.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${health_.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.health_note.after_time', health_.after_time, 'Send after (time)')}
@@ -20739,6 +20807,7 @@ function renderAutomationsSettings(config, isDefault, health){
           ${automationsNumField('automations.health_note.log_trim_mb', health_.log_trim_mb, 'Trim logs larger than (MB)', 0)}
           ${automationsNumField('automations.health_note.log_trim_lines', health_.log_trim_lines, 'Keep this many lines', 0)}
         </div>
+        <p class="at-note">Log trimming runs once a day even when the health note is off: a box log larger than this is cut down to its last lines.</p>
         ${saveBar}
       </div>
     </details>
@@ -20747,13 +20816,14 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Upload bot</summary>
       <div class="at-details-body">
         <div class="form-row">
-          ${automationsNumField('automations.upload_bot.admin_max_kb', upl.admin_max_kb, 'Max size for admins (KB)', 1)}
-          ${automationsNumField('automations.upload_bot.finance_max_kb', upl.finance_max_kb, 'Max size for finance (KB)', 1)}
+          ${automationsNumField('automations.upload_bot.admin_max_kb', upl.admin_max_kb, 'Largest file for the Admin source document (KB)', 1)}
+          ${automationsNumField('automations.upload_bot.finance_max_kb', upl.finance_max_kb, 'Largest file for the Finance source document (KB)', 1)}
         </div>
         <div class="form-row" style="margin-top:10px">
-          ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Image quality (1–100)', 1, 100)}
-          ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Max image width (px)', 1)}
+          ${automationsNumField('automations.upload_bot.jpeg_quality', upl.jpeg_quality, 'Best image quality to try (1–100)', 1, 100)}
+          ${automationsNumField('automations.upload_bot.max_width_px', upl.max_width_px, 'Widest image to try (px)', 1)}
         </div>
+        <p class="at-note">The sizes are per portal upload slot (Admin or Finance section), not per person. The bot shrinks a photo step by step, starting from the width and quality above, until it fits the slot's size.</p>
         ${saveBar}
       </div>
     </details>
@@ -20830,6 +20900,7 @@ function renderAutomationsSettings(config, isDefault, health){
 }
 
 function renderAutomationsAccountantSummary(config){
+  config = automationsEffectiveConfig(config);
   const me = (config.people || [])[0] || null;
   const rows = AUTOMATION_MESSAGE_TYPES.map(mt=>{
     const r = me ? ((config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[me.key] || {}) : {};
@@ -20844,12 +20915,12 @@ function renderAutomationsAccountantSummary(config){
     <div class="at-section-title">Your notifications</div>
     <p class="at-note">A read-only summary of what the box sends you, and how.</p>
     <div class="card">
-      <p style="margin-bottom:10px"><strong>Can you upload source documents?</strong> ${me?.can_upload ? 'Yes' : 'No'}</p>
+      <p style="margin-bottom:10px"><strong>Can you use the Telegram bot (including uploading source documents)?</strong> ${me?.can_upload ? 'Yes' : 'No'}</p>
       <div class="table-wrap"><table class="at-summary-table">
         <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
         ${rows || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No notifications are set up for you yet.</td></tr>'}
       </table></div>
-      ${mine.length ? `<div class="at-guide-label" style="margin-top:14px">What these messages are</div>${automationsMessageGuideHtml(mine)}` : ''}
+      ${mine.length ? `<div class="at-guide-label" style="margin-top:14px">What these messages are</div>${automationsMessageGuideHtml(mine, config)}` : ''}
     </div>`;
 }
 
@@ -20874,16 +20945,19 @@ function addAutomationPerson(){
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Title (used in messages)</label><input class="form-input at-p-title" value="" placeholder="e.g. Finance Officer"></div>
-      <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="" placeholder="e.g. Bro. David"></div>
+      <div class="form-group"><label class="form-label">Called in messages</label><input class="form-input at-p-called" value="" placeholder="e.g. Bro. Tunde"></div>
     </div>
     <div class="form-row" style="margin:6px 0 10px">
       <label class="at-inline-check"><input type="checkbox" class="at-p-pays"> Pays the RRR ("I've paid" button, /paid)</label>
       <label class="at-inline-check"><input type="checkbox" class="at-p-bot"> Can use the Telegram bot</label>
       <label class="at-inline-check"><input type="checkbox" class="at-p-mallp"> Can view other parishes' month (/month)</label>
+      <label class="at-inline-check"><input type="checkbox" class="at-p-admin"> Admin (full status)</label>
+      <label class="at-inline-check"><input type="checkbox" class="at-p-buttons"> Generate RRR / Refresh buttons</label>
     </div>
+    ${AUTOMATION_PERSON_TICKS_NOTE}
     <div class="table-wrap"><table class="at-routing-table">
       <tr><th>Message</th><th>Telegram</th><th>Email</th></tr>
-      ${AUTOMATION_MESSAGE_TYPES.map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
+      ${AUTOMATION_MESSAGE_TYPES.filter(mt=>!mt.fixed).map(mt=>`<tr><td>${esc(mt.label)}</td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}"></td><td><input type="checkbox" class="at-route" data-mt="${esc(mt.key)}" data-ch="email"></td></tr>`).join('')}
     </table></div>
     <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>`;
   // Before the "+ Add person" button (a direct child; the first button in the container is a card's Delete button).
@@ -20897,6 +20971,7 @@ function deleteAutomationPerson(btn){
   if(!confirm(`Remove this person? They will stop receiving any notifications from the box.${linked}`)) return;
   row.remove();
   atRefreshPicks();
+  atScheduleAutosave();
 }
 function addAutomationParish(){
   const container = document.getElementById('atParishRows');
@@ -20919,6 +20994,7 @@ function deleteAutomationParish(btn){
   if(!confirm(`Remove this parish from tracking?${extra}`)) return;
   row.remove();
   atRefreshPicks();
+  atScheduleAutosave();
 }
 
 // ── Parish cards: people, logins, Telegram invites, pick lists, portal password, overview ──
@@ -20950,20 +21026,28 @@ function atClearPortalPw(btn){
   const card = atCard(btn); if(!card) return;
   card.dataset.pwSealed = ''; card.dataset.pwSetAt = '';
   const st = card.querySelector('.at-par-pwstatus');
-  if(st) st.textContent = 'The saved password will be removed when you press Save changes.';
+  if(st) st.textContent = 'The saved password will be removed when the changes save.';
+  atScheduleAutosave();
 }
 async function atCopyText(text){
   try { await navigator.clipboard.writeText(text); return true; } catch(e){ return false; }
 }
-function atCopyInvite(btn){
+async function atCopyInvite(btn){
   const row = btn.closest('.at-par-person'); if(!row) return;
   let code = row.dataset.tgInvite;
   if(!code){ code = automationsInviteCode(); row.dataset.tgInvite = code; }
   const url = AUTOMATION_BOT_LINK + code;
-  atCopyText(url).then(ok=>{
-    showAlert(ok ? 'Invite link copied. Send it to them, and press Save changes so the box knows this invite.'
-                 : `Could not copy automatically. Send them this link, then press Save changes: ${url}`, ok ? 'success' : 'warn');
-  });
+  const isSaved = ()=>(state.automations?.config?.people || []).some(p=>p.tg_invite === code);
+  const copied = await atCopyText(url);   // copy first, while the click still counts as a user action
+  // The bot only accepts an invite the saved config knows, so save straight away (the normal Save changes path).
+  const saved = isSaved() || await atSaveNow();
+  if(saved && isSaved()){
+    showAlert(copied ? 'Invite link copied and saved. Send it to them; the box picks it up within a few minutes.'
+                     : `Invite saved, but it could not be copied automatically. Send them this link: ${url}`, copied ? 'success' : 'warn');
+  } else {
+    showAlert(copied ? 'Invite link copied, but it could not be saved, so it will not work yet. Fix the problem shown next to Save changes, then press Save changes (or Copy invite link again) before you send it.'
+                     : 'The invite could not be copied or saved. Fix the problem shown next to Save changes, then press Copy invite link again.', 'danger');
+  }
 }
 function atShowPin(name, pin, isReset){
   showModal(`
@@ -20972,7 +21056,7 @@ function atShowPin(name, pin, isReset){
     <p style="font-size:14px;margin-bottom:10px">PIN for <b>${esc(name)}</b>:</p>
     <div id="atPinValue" style="font-size:32px;font-weight:800;letter-spacing:6px;text-align:center;margin:8px 0 14px">${esc(pin)}</div>
     <p style="font-size:13px;color:var(--text2)">Send it to them on WhatsApp. They choose their own PIN the first time they sign in. This PIN is shown only now.</p>
-    <p style="font-size:12px;color:var(--text3);margin-top:8px">Press <b>Save changes</b> on this page as well so the app remembers the login.</p>
+    <p style="font-size:12px;color:var(--text3);margin-top:8px">The page saves the login automatically (see the status next to <b>Save changes</b>).</p>
     <div class="modal-footer"><button class="btn" onclick="App.atCopyPin(this)">Copy PIN</button><button class="btn btn-primary" onclick="closeModal()">Done</button></div>`);
 }
 async function atCopyPin(btn){
@@ -21002,6 +21086,7 @@ async function atCreateLogin(btn){
     if(Array.isArray(list)) list.push({ id:u.id, name, role:'satellite', email, parishCode:code });
     atRedrawLogin(row);
     atShowPin(name, pin, false);
+    atScheduleAutosave();
   } catch(e){
     restore();
     showAlert(`Could not create the login: ${e.message || 'Unknown error'}`, 'danger');
@@ -21033,7 +21118,8 @@ async function atRemoveLogin(btn){
     row.dataset.appUserId = '';
     if(Array.isArray(state.automations?.satUsers)) state.automations.satUsers = state.automations.satUsers.filter(u=>u.id !== id);
     atRedrawLogin(row);
-    showAlert('Login removed. Press Save changes so the app forgets it.', 'success');
+    showAlert('Login removed.', 'success');
+    atScheduleAutosave();
   } catch(e){
     restore();
     showAlert(`Could not remove the login: ${e.message || 'Unknown error'}`, 'danger');
@@ -21057,6 +21143,7 @@ function atAddParishPerson(btn){
   card.querySelector('.at-par-people')?.appendChild(wrap.firstElementChild);
   card.querySelectorAll('.at-new-name,.at-new-title,.at-new-called,.at-new-email,.at-new-tg').forEach(i=>{ i.value = ''; });
   atRefreshPicks();
+  atScheduleAutosave();
 }
 /** Encrypt any newly typed portal password (in the browser, with the box's public key) before the config is collected. */
 async function automationsSealPending(){
@@ -21163,6 +21250,7 @@ function collectAutomationsConfig(){
     const tg = row.querySelector('.at-p-tg')?.value.trim() || '';
     const email = row.querySelector('.at-p-email')?.value.trim() || '';
     const botBox = row.querySelector('.at-p-bot'), paysBox = row.querySelector('.at-p-pays'), mallBox = row.querySelector('.at-p-mallp');
+    const adminBox = row.querySelector('.at-p-admin'), buttonsBox = row.querySelector('.at-p-buttons');
     const person = {
       ...(existing || {}),   // keep any field this page doesn't show
       key,
@@ -21171,8 +21259,8 @@ function collectAutomationsConfig(){
       telegram_chat_id: tg || null,
       email: email || null,
       can_upload: botBox ? botBox.checked : (existing?.can_upload ?? false),
-      full_status: existing?.full_status ?? false,
-      buttons: existing?.buttons ?? false,
+      full_status: adminBox ? adminBox.checked : (existing?.full_status ?? false),
+      buttons: buttonsBox ? buttonsBox.checked : (existing?.buttons ?? false),
       title: row.querySelector('.at-p-title')?.value.trim() || '',
       called: row.querySelector('.at-p-called')?.value.trim() || '',
       pays_rrr: paysBox ? paysBox.checked : !!automationsPersonField(existing || { key }, 'pays_rrr'),
@@ -21190,6 +21278,12 @@ function collectAutomationsConfig(){
       if(row.dataset.tgInvite) person.tg_invite = row.dataset.tgInvite; else delete person.tg_invite;
     }
     people.push(person);
+    // Rows not shown for this person (fixed types; a parish person's unused types): keep the saved switches as they are.
+    const shown = new Set([...row.querySelectorAll('.at-route')].map(cb=>cb.dataset.mt));
+    AUTOMATION_MESSAGE_TYPES.filter(mt=>!shown.has(mt.key)).forEach(mt=>{
+      const v = (base.routing?.[mt.key] || {})[existingKey];
+      if(v && typeof v === 'object') routing[mt.key][key] = { telegram: !!v.telegram, email: !!v.email };
+    });
     row.querySelectorAll('.at-route').forEach(cb=>{
       const mtKey = cb.dataset.mt;
       const ch = cb.dataset.ch === 'email' ? 'email' : 'telegram';
@@ -21216,7 +21310,9 @@ function collectAutomationsConfig(){
     const existing = (base.parishes||[]).find(p=>String(p.code)===(orig || code));
     const flags = {};
     card.querySelectorAll('.at-par-flag').forEach(cb=>{ flags[cb.dataset.flag] = cb.checked; });
-    const parish = { ...(existing || {}), code, name, source_docs:!!flags.source_docs, attendance:!!flags.attendance, remittance:!!flags.remittance, statement:!!flags.statement };
+    // attendance / remittance / statement are no longer shown (nothing reads them): keep what was saved, false for a new parish.
+    const kept = (f)=> (f in flags) ? !!flags[f] : (typeof existing?.[f] === 'boolean' ? existing[f] : false);
+    const parish = { ...(existing || {}), code, name, source_docs:kept('source_docs'), attendance:kept('attendance'), remittance:kept('remittance'), statement:kept('statement') };
     if(automationsIsSatCode(code) && card.querySelector('.at-par-active')){
       const picks = (field)=>[...card.querySelectorAll(`.at-par-pick[data-field="${field}"]:checked`)]
         .map(cb=>keyMap[cb.dataset.key] || cb.dataset.key).filter(k=>savedKeys.has(k));
@@ -21285,6 +21381,10 @@ function collectAutomationsConfig(){
     }
     else{ obj[leaf] = el.value; }
   });
+  // The weekly Sunday-records message follows its ticks from now on (box followticks-20261003; see automationsEffectiveConfig).
+  if(config.automations.weekly_attendance_reminder && typeof config.automations.weekly_attendance_reminder === 'object'){
+    config.automations.weekly_attendance_reminder.follow_ticks = true;
+  }
   // Telegram bot menu: always saved complete and valid (a blank contact or out-of-range number can't reach the Worker).
   config.automations.telegram_bot = automationsTelegramBot(config.automations.telegram_bot);
   return config;
@@ -21338,47 +21438,125 @@ async function sendTestAlert(btn){
   }
 }
 
-async function saveAutomationsConfig(btn){
-  if(state.automations?.saving) return;
-  state.automations.saving = true;
+// ── Autosave: the Settings section saves itself through saveAutomationsConfig (same request and checks as the
+// Save changes button, which stays as a manual fallback). Only real user edits count: a 'change' event from the
+// form (text boxes fire it when you leave the box, not on every key) or an add/remove/login action. Rendering the
+// page, the 60s dashboard refresh and the area overview never fire 'change', and a save is skipped when the form
+// still matches what was last saved. One save at a time; an edit made during a save queues one more.
+const AT_AUTOSAVE_MS = 1500;
+let atUnloadHooked = false;
+function atSetSaveStatus(text, kind){
+  document.querySelectorAll('#atSettings .at-save-status').forEach(el=>{ el.textContent = text || ''; el.dataset.kind = kind || ''; });
+}
+function atHasPendingPw(){ return [...document.querySelectorAll('#atParishRows .at-par-pw')].some(i=>i.value); }
+function atSettingsOnScreen(){ return state.page === 'automations' && !!document.getElementById('atSettings') && !!state.automations?.configBaseline; }
+function atIsDirty(){
+  if(!atSettingsOnScreen()) return false;
+  return atHasPendingPw() || JSON.stringify(collectAutomationsConfig()) !== state.automations.configBaseline;
+}
+function atScheduleAutosave(){
+  const A = state.automations; if(!A?.configBaseline) return;   // settings not loaded (or not an IT admin)
+  clearTimeout(A.autosaveTimer);
+  A.autosaveTimer = setTimeout(atRunAutosave, AT_AUTOSAVE_MS);
+  if(!A.saving) atSetSaveStatus('Changes waiting to save…', 'pending');
+}
+function atRunAutosave(){
+  const A = state.automations; if(!A) return;
+  clearTimeout(A.autosaveTimer); A.autosaveTimer = null;
+  if(!atSettingsOnScreen()) return;          // never save a page that is no longer on screen
+  if(A.saving){ A.saveQueued = true; return; }
+  if(!atIsDirty()){ A.saveFailed = false; atSetSaveStatus('All changes saved', 'ok'); return; }
+  saveAutomationsConfig(null, { auto:true });
+}
+/** Leaving the page: send a waiting autosave now (the form is read before the page is replaced). */
+function atFlushAutosave(){ if(state.automations?.autosaveTimer) atRunAutosave(); }
+/** Save right away (after any save in flight); resolves true when the save went through. */
+async function atSaveNow(){
+  const A = state.automations; if(!A) return false;
+  while(A.saving && A.savePromise) await A.savePromise.catch(()=>{});
+  return (await saveAutomationsConfig(null, { auto:true })) === true;
+}
+function atWireAutosave(el){
+  el.addEventListener('change', ev=>{
+    if(!ev.isTrusted) return;
+    const t = ev.target;
+    // The "add a parish person" boxes are only a staging form (+ Add person saves the person itself).
+    if(t?.matches?.('.at-new-name,.at-new-title,.at-new-called,.at-new-email,.at-new-tg')) return;
+    atScheduleAutosave();
+  });
+  if(!atUnloadHooked){
+    atUnloadHooked = true;
+    window.addEventListener('beforeunload', ev=>{
+      const A = state.automations;
+      if(!A || state.page !== 'automations') return;
+      if(A.autosaveTimer || A.saving || A.saveQueued || atIsDirty()){ ev.preventDefault(); ev.returnValue = ''; return ''; }
+    });
+  }
+}
+
+function saveAutomationsConfig(btn, opts){
+  const A = state.automations;
+  if(!A) return Promise.resolve(false);
+  if(A.saving){ A.saveQueued = true; return A.savePromise || Promise.resolve(false); }
+  A.savePromise = atDoSave(btn, !!opts?.auto);
+  return A.savePromise;
+}
+async function atDoSave(btn, auto){
+  const A = state.automations;
+  clearTimeout(A.autosaveTimer); A.autosaveTimer = null;
+  A.saving = true; A.saveQueued = false;
   const origText = btn ? btn.textContent : '';
   if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  atSetSaveStatus('Saving…', 'pending');
   const errBox = document.getElementById('atSaveErrors');
   if(errBox) errBox.innerHTML = '';
+  let ok = false, reason = '';
+  const fail = (msg, why)=>{ reason = why || msg; if(!auto) showAlert(msg, 'danger'); };
   try{
-    await automationsSealPending();   // portal passwords are locked in the browser before anything is sent
+    if(atHasPendingPw()) await automationsSealPending();   // portal passwords are locked in the browser before anything is sent
+    if(!document.getElementById('atSettings')) throw new Error('You left the page before the changes were saved.');
     const config = collectAutomationsConfig();
     const res = await authFetch('/api/automations/config', {
       method:'PUT',
       headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ config, base_version: state.automations.configVersion })
+      body: JSON.stringify({ config, base_version: A.configVersion })
     });
     const data = await res.json().catch(()=>({}));
     if(res.ok && data.ok){
-      state.automations.configVersion = data.config_version;
-      state.automations.config = config;
-      state.automations.configBaseline = JSON.stringify(config);
-      state.automations.isDefault = false;
+      ok = true;
+      A.configVersion = data.config_version;
+      A.config = config;
+      A.configBaseline = JSON.stringify(config);
+      A.isDefault = false;
       // The app itself needs the parish list too (parish name, and refusing a paused parish's pastor).
       let listErr = null;
       try { await syncSatParishesSetting(config); } catch(e){ listErr = e; }
       if(listErr) showAlert(`Saved for the box, but the app's own parish list could not be updated (${listErr.message || 'unknown error'}). Press Save changes again.`, 'danger');
-      else showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
+      else if(!auto) showAlert('Saved. The box will pick up the change within 5 minutes.', 'success');
     } else if(res.status === 409){
+      reason = 'someone else saved a change first; the latest settings were reloaded, please make your change again';
       showAlert('Someone else saved a change just before you did. Reloading the latest settings — please make your change again.', 'danger');
-      await renderAutomations();
+      if(state.page === 'automations') await renderAutomations();
     } else if(res.status === 400 && Array.isArray(data.errors)){
+      reason = 'please fix the problems listed at the top of Settings';
       if(errBox) errBox.innerHTML = `<div class="at-error-list">Please fix the following:<ul>${data.errors.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></div>`;
-      errBox?.scrollIntoView({ behavior:'smooth', block:'center' });
+      if(!auto) errBox?.scrollIntoView({ behavior:'smooth', block:'center' });
     } else {
-      showAlert(data.error || 'Could not save changes. Please try again.', 'danger');
+      fail(data.error || 'Could not save changes. Please try again.', data.error || 'the server did not accept the save');
     }
   }catch(e){
-    showAlert(e?.message && !(e instanceof TypeError) ? e.message : 'Could not reach the server. Check your connection and try again.', 'danger');
+    fail(e?.message && !(e instanceof TypeError) ? e.message : 'Could not reach the server. Check your connection and try again.',
+      e?.message && !(e instanceof TypeError) ? e.message : 'could not reach the server');
   } finally {
-    state.automations.saving = false;
+    A.saving = false;
+    A.saveFailed = !ok;
     if(btn){ btn.disabled = false; btn.textContent = origText || 'Save changes'; }
+    if(ok && !A.saveQueued && atIsDirty()) A.saveQueued = true;   // edited while this save was on its way
+    if(ok) atSetSaveStatus(A.saveQueued ? 'Changes waiting to save…' : 'All changes saved', A.saveQueued ? 'pending' : 'ok');
+    else atSetSaveStatus(`Not saved – ${String(reason).replace(/\.$/, '')}`, 'error');
+    if(A.saveQueued){ A.saveQueued = false; atScheduleAutosave(); }
   }
+  return ok;
 }
 
 // ──────────────────────────────────────────
@@ -21418,7 +21596,7 @@ return {
   satQuotaCopyFirst, saveSatQuotas,
   _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
   _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
-  _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
+  _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _automationsEffectiveConfig: automationsEffectiveConfig, _automationsHelpText: automationsHelpText, _collectAutomationsConfig: (saved)=>{ state.automations = { ...(state.automations||{}), config: saved }; return collectAutomationsConfig(); }, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,
   _buildSundayWeekBounds: buildSundayWeekBounds, _getQuotaLinesForPeriod: getQuotaLinesForPeriod,
   _quotaPeriodKey: quotaPeriodKey,
