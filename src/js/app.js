@@ -12685,7 +12685,7 @@ async function renderBank(){
         date:e.date||e.createdAt
       })),
     ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.date||r.createdAt})),
-    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`Income deposit (bank transfer)`, txAmt: (r.bankTransferAmount||0)})),
+    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`${incomeBankLabel(r)} (bank transfer)`, txAmt: (r.bankTransferAmount||0), txNote: incomeBankNote(r)})),
     ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
@@ -12811,6 +12811,7 @@ function renderBankOverview(monthBankTx,bankBalance){
           <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
             <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
+            ${t.txNote?`<div>${esc(t.txNote)}</div>`:''}
             ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
             ${t._splitParts?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">Split across ${t._splitParts.length} income records: ${t._splitParts.map(p=>fmt(p.amount)).join(' + ')}</div>`:''}
             ${t.verificationStatus?`<div style="margin-top:4px">${depositActionButtons(t)}</div>`:''}
@@ -13291,6 +13292,21 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
     ${renderBankLedgerCard()}`;
 }
 
+// What an income bank deposit is, in words: "Sunday collection", "Donation – <donor>", …
+function incomeBankLabel(r){
+  if(!r.source || r.source==='sunday_collection') return 'Sunday collection';
+  const src = OTHER_INCOME_SOURCES.find(o=>o.key===r.source);
+  const base = r.source==='individual_donation' ? 'Donation' : (src ? src.label.replace(/\s*\(.*\)\s*$/,'') : String(r.source).replace(/_/g,' '));
+  return r.donorName ? `${base} – ${r.donorName}` : base;
+}
+// Extra line under it: the dated bank transfers it was entered as (when more than one), else its note.
+function incomeBankNote(r){
+  let parts = [];
+  try { const p = JSON.parse(r.bankTransferDetails||'[]'); if(Array.isArray(p)) parts = p.filter(x=>x && x.amount); } catch(_){ /* plain text details */ }
+  if(parts.length > 1) return `Entered as ${parts.length} transfers: ${parts.map(x=>`${fmt(Number(x.amount)||0)}${x.date?` (${fmtDate(x.date)})`:''}`).join(' + ')}`;
+  return r.notes || '';
+}
+
 // Ledger card for the Reconciliation tab: stacked rows (same look as the Overview list, no
 // wide table so nothing scrolls sideways on a phone). Defaults to the selected period's
 // transactions; "Show all months" widens it. Paged 20 at a time.
@@ -13318,6 +13334,7 @@ function renderBankLedgerCard(){
         <span class="badge ${isCredit?'badge-success':'badge-danger'}" style="font-size:10px">${esc(t.txType)}</span>
         ${chip}
         ${t.reference?`<span style="min-width:0;word-break:break-word">${esc(t.reference)}</span>`:''}
+        ${t.txNote?`<span style="min-width:0;word-break:break-word">${esc(t.txNote)}</span>`:''}
       </div>
     </div>`;
   }).join('');
@@ -13633,7 +13650,8 @@ function renderBankReconCard(entries, role){
     ? `<div style="font-size:12px;color:var(--text3);margin-bottom:8px">Statements on file cover ${fmtDate(stmtDates[0])} – ${fmtDate(stmtDates[stmtDates.length-1])}.</div>` : '';
   return `<div class="card" id="bankReconCard">
     <div class="card-header" style="flex-wrap:wrap;gap:8px">
-      <span class="card-title">Bank Reconciliation</span>${uploadBtn}
+      <span class="card-title">Bank Reconciliation</span>
+      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-sm" onclick="App.recheckBankRecon(this)">🔄 Re-check matches</button>${uploadBtn}</span>
     </div>
     ${renderLastStatementUpload()}
     <p style="font-size:13px;color:var(--text2);margin-bottom:12px">The box checks your real bank balance automatically and matches it against your own records. Only cases it can't resolve on its own need your attention.</p>
@@ -13677,6 +13695,26 @@ function renderLastStatementUpload(){
       <span style="flex:1;font-size:12.5px;line-height:1.5">${lines.map(l=>`<div>${l}</div>`).join('')}</span>
       <button onclick="App.dismissStatementUploadResult()" aria-label="Dismiss" style="background:transparent;border:none;font-size:16px;cursor:pointer;color:inherit;padding:0 2px">✕</button>
     </div>`;
+}
+
+// Ask the server to match open bank lines against the records again (it also does this on every load),
+// then redraw the card and say what changed.
+async function recheckBankRecon(btn){
+  const restore = setBtnLoading(btn, 'Checking…');
+  try {
+    const before = (state._bankReconEntries||[]).filter(isBankReconAction).length;
+    const fresh = await DB.getBankReconEntries();
+    state._bankReconEntries = fresh || [];
+    const after = state._bankReconEntries.filter(isBankReconAction).length;
+    const el = document.getElementById('bankReconCard');
+    if(el) el.outerHTML = renderBankReconCard(state._bankReconEntries, state.user?.role);
+    if(document.getElementById('bankLedgerCard')) rerenderBankLedger();
+    const done = before - after;
+    showAlert(done > 0 ? `Re-checked: ${done} bank line${done===1?'':'s'} matched.` : (after ? `Re-checked: ${after} still need${after===1?'s':''} action — no record fits yet.` : 'Re-checked: everything is matched.'), done > 0 || !after ? 'success' : 'warn');
+  } catch(err) {
+    restore();
+    showAlert(`Could not re-check: ${err.message||'Unknown error'}. Please try again.`,'danger');
+  }
 }
 
 function dismissStatementUploadResult(){
@@ -21578,7 +21616,7 @@ return {
   quickLogExpense, showExpenseForm, submitExpense, viewExpenseReceipt, viewCashPhoto, editExpense, submitEditExpense, deleteExpense, showExpenseDetail, onExpMethodChange, onExpSplitChange, onExpFundSourceChange, onExpPoolSplitChange, onExpAmountChange, setExpCatFilter, setExpSearch, setExpMethodFilter, setExpRecordedBy, setExpSort, clearExpFilters,
   showBankWithdrawal, submitBankWithdrawal, onWdDestChange, onWdAmtChange, onWdCatChange,
   setBankTab, showBankChargeForm, toggleBankLedgerAll, showMoreBankLedger, submitBankCharge, saveBankEmailAutomationSettings, ackChurchBankIngestAttention,
-  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, undoIgnoreBankReconEntry, unmatchBankReconEntry, unrecordBankReconCharge, setBankReconFilter, clearBankReconFilters, showBankReconMatch, showMoreBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
+  reviewBankReconEntry, chooseBankReconMatch, chooseBankReconGroupMatch, showBankLedgerMatch, viewBankReconEntry, resolveBankReconAddNew, recordBankReconEntry, ignoreBankReconEntry, undoIgnoreBankReconEntry, unmatchBankReconEntry, unrecordBankReconCharge, setBankReconFilter, clearBankReconFilters, showBankReconMatch, showMoreBankRecon, recheckBankRecon, dismissStatementUploadResult, linkPendingReconEntry, clearPendingReconLink, showBankStatementUploadForm, submitBankStatementUpload,
   refreshPortalBankBalance, goToBankReconciliation,
   editBankTx, submitEditBankTx, confirmDeleteBankTx, submitDeleteBankTx,
   setTxFilter, setTxPage, setTxPageSize, clearTxFilters, showExpenseCategoryTransactions, showTxDetail, exportTxCSV, exportTxPDF, saveTxView, loadTxView, deleteTxView,

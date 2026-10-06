@@ -6,7 +6,7 @@
 // engine, matched against income-type or expense-type ('in'/'out') candidates either way.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, verifyStatementRows, findManyToOneMatches, inferDirectionFromNarration, applyNarrationDirections } from '../functions/api/[[route]].js';
+import { findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, verifyStatementRows, findManyToOneMatches, findDetailPartGroups, inferDirectionFromNarration, applyNarrationDirections } from '../functions/api/[[route]].js';
 
 function cand(sourceTable, sourceId, date, amount, direction) {
   return { sourceTable, sourceId, date, amount, direction };
@@ -456,4 +456,27 @@ test('inferDirectionFromNarration: a transfer to the parish itself and a cheque 
   assert.equal(inferDirectionFromNarration('CHQ DEPOSIT 0045'), 'in');
   assert.equal(inferDirectionFromNarration('CHQ LODGEMENT 778'), 'in');
   assert.equal(inferDirectionFromNarration('CHQ 00123 REMITA'), 'out');
+});
+
+test('a record entered as two dated bank parts matches two bank lines even weeks apart', () => {
+  const lines = [
+    { id: 'l1', date: '2026-09-06', amount: 5000, direction: 'in' },
+    { id: 'l2', date: '2026-10-04', amount: 3000, direction: 'in' },
+    { id: 'l3', date: '2026-10-04', amount: 700, direction: 'in' },
+  ];
+  const records = [{ sourceTable: 'income', sourceId: 'i1', parts: [{ amount: 5000, date: '2026-09-06' }, { amount: 3000, date: '2026-10-04' }] }];
+  const groups = findDetailPartGroups(lines, records, 7);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].lineIds.sort(), ['l1', 'l2']);
+  assert.equal(groups[0].record.sourceId, 'i1');
+});
+
+test('part matching leaves a record alone when a part has no line or is ambiguous', () => {
+  const rec = { sourceTable: 'income', sourceId: 'i1', parts: [{ amount: 5000, date: '2026-09-06' }, { amount: 3000, date: '2026-10-04' }] };
+  assert.deepEqual(findDetailPartGroups([{ id: 'l1', date: '2026-09-06', amount: 5000, direction: 'in' }], [rec], 7), []);
+  const twin = [
+    { id: 'a', date: '2026-09-06', amount: 5000, direction: 'in' }, { id: 'b', date: '2026-09-06', amount: 5000, direction: 'in' },
+    { id: 'c', date: '2026-10-04', amount: 3000, direction: 'in' },
+  ];
+  assert.deepEqual(findDetailPartGroups(twin, [rec], 7), []);
 });
