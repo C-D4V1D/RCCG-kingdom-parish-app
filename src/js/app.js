@@ -3818,6 +3818,7 @@ async function calcChurchBalance(asOfDate, prefetched){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const pettyToBankDeposits = pettyF.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
     .reduce((s,h)=>s+(h.amount||0),0);
+  const bankIncomeSlices = incomeBankSlices(allIncome); // per-transfer lines, dated as the bank saw them
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRemsBank - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // --- CASH WITH ACCOUNTANT ---
@@ -12570,6 +12571,7 @@ async function renderBank(){
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)),0);
   const pettyToBankDeposits = pettyHistory.filter(h=>h.type==='petty_to_bank'&&(h.status==='approved'||h.status==='settled'))
     .reduce((s,h)=>s+(h.amount||0),0);
+  const bankIncomeSlices = incomeBankSlices(allIncome); // per-transfer lines, dated as the bank saw them
   const bankBalance = bankTransferIncome + cashDepositedToBank - bankExpenses - paidRemsBank - bankWithdrawals - pettyBankTopups + pettyToBankDeposits;
 
   // Cash with Accountant (mirrors calcChurchBalance, using data already fetched above)
@@ -12623,7 +12625,7 @@ async function renderBank(){
   const _prePeriod = raw => { const d = _ypd(raw); return d !== null && d < bankPeriodFrom; };
 
   const openingBankBalance =
-      allIncome.filter(r => _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
+      bankIncomeSlices.filter(r => _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
     + allCashTx.filter(t => t.type==='cash_deposit' && isDepositEffective(t) && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
     - allExpenses.filter(e => isLoggedExpense(e) && _prePeriod(e.date||e.createdAt)).reduce((sum,e) => {
         if(e.paymentMethod==='bank_transfer') return sum+(e.amount||0);
@@ -12637,7 +12639,7 @@ async function renderBank(){
         && _prePeriod(h.date||h.createdAt)).reduce((s,h) => s+(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0)), 0);
 
   const periodTotalInflows =
-      filterByCurrentPeriod(allIncome, bankPeriodFrom, bankPeriodTo).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
+      filterByCurrentPeriod(bankIncomeSlices, bankPeriodFrom, bankPeriodTo).reduce((s,r) => s+(r.bankTransferAmount||0), 0)
     + monthlyDeposits.reduce((s,t) => s+(t.amount||0), 0);
 
   const periodTotalOutflows =
@@ -12685,7 +12687,7 @@ async function renderBank(){
         date:e.date||e.createdAt
       })),
     ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.date||r.createdAt})),
-    ...allIncome.filter(r=>(r.bankTransferAmount||0)>0).map(r=>({...r, txType:'income', txLabel:`${incomeBankLabel(r)} (bank transfer)`, txAmt: (r.bankTransferAmount||0), txNote: incomeBankNote(r)})),
+    ...bankIncomeSlices.map(r=>({...r, txType:'income', txLabel:`${incomeBankLabel(r)} (bank transfer)`, txAmt: (r.bankTransferAmount||0), txNote: incomeBankNote(r)})),
     ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
   ].sort((a,b)=>new Date(b.date||b.createdAt||0)-new Date(a.date||a.createdAt||0));
@@ -12841,6 +12843,7 @@ const BANK_TX_LABELS = {
 
 function bankTxActionButtons(t){
   if(state.user?.role!=='it_admin') return '';
+  if(t._bankPart) return `<div style="margin-top:6px;font-size:10px;color:var(--text3)">This is one of ${t._bankPart.of} transfers entered on one income record — edit or delete it from the Income page.</div>`;
   const grouped = !!t._splitParts && t._splitParts.length>1;
   if(grouped){
     return `<div style="margin-top:6px;font-size:10px;color:var(--text3)">This deposit combines multiple income records — edit or delete the individual entries from the Income page.</div>`;
@@ -13292,6 +13295,25 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
     ${renderBankLedgerCard()}`;
 }
 
+// An income record's bank transfers as the bank saw them: when it was entered as several dated
+// transfers (bankTransferDetails, adding up to bankTransferAmount) each becomes its own line on its own
+// date, as if recorded individually; otherwise one line on the record's date. The record itself is untouched.
+function incomeBankSlices(incomeList){
+  const out = [];
+  for(const r of incomeList||[]){
+    const total = r.bankTransferAmount||0;
+    if(total <= 0) continue;
+    let parts = [];
+    try { const p = JSON.parse(r.bankTransferDetails||'[]'); if(Array.isArray(p)) parts = p; } catch(_){ /* plain text details */ }
+    parts = parts.map(x=>({ amount: Math.round((Number(x&&x.amount)||0)*100)/100, date: String((x&&x.date)||'').slice(0,10) }));
+    const ok = parts.length > 1 && parts.every(x=>x.amount>0 && /^\d{4}-\d{2}-\d{2}$/.test(x.date))
+      && Math.abs(parts.reduce((a,x)=>a+x.amount,0) - total) < 0.5;
+    if(!ok){ out.push(r); continue; }
+    parts.forEach((x,i)=>out.push({ ...r, date: x.date, bankTransferAmount: x.amount, _bankPart: { n:i+1, of:parts.length, recordDate: r.date } }));
+  }
+  return out;
+}
+
 // What an income bank deposit is, in words: "Sunday collection", "Donation – <donor>", …
 function incomeBankLabel(r){
   if(!r.source || r.source==='sunday_collection') return 'Sunday collection';
@@ -13301,6 +13323,7 @@ function incomeBankLabel(r){
 }
 // Extra line under it: the dated bank transfers it was entered as (when more than one), else its note.
 function incomeBankNote(r){
+  if(r._bankPart) return `Transfer ${r._bankPart.n} of ${r._bankPart.of}, entered with the ${fmtDate(r._bankPart.recordDate)} collection`;
   let parts = [];
   try { const p = JSON.parse(r.bankTransferDetails||'[]'); if(Array.isArray(p)) parts = p.filter(x=>x && x.amount); } catch(_){ /* plain text details */ }
   if(parts.length > 1) return `Entered as ${parts.length} transfers: ${parts.map(x=>`${fmt(Number(x.amount)||0)}${x.date?` (${fmtDate(x.date)})`:''}`).join(' + ')}`;
