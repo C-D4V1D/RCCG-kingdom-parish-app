@@ -8615,6 +8615,61 @@ function bankReconWindowIndex(items, windowDays) {
 }
 
 /**
+ * Income records whose bank transfer was typed in as several dated parts
+ * (income.bank_transfer_details = [{amount,date},…]) that add up to bank_transfer_amount.
+ * Returns [{ sourceTable:'income', sourceId, parts:[{amount,date}] }] — records with fewer than two
+ * parts, or parts that do not add up, are left out (the normal matcher handles those).
+ */
+async function fetchIncomeBankTransferParts(DB) {
+  const { results } = await DB.prepare(
+    `SELECT id, bank_transfer_amount, bank_transfer_details FROM income WHERE bank_transfer_details LIKE '[%'`
+  ).all();
+  const out = [];
+  for (const r of results || []) {
+    const raw = safeJsonParse(r.bank_transfer_details, []);
+    const parts = (Array.isArray(raw) ? raw : [])
+      .map(p => ({ amount: Number(p?.amount), date: String(p?.date || '').slice(0, 10) }))
+      .filter(p => Number.isFinite(p.amount) && p.amount > RECON_AMOUNT_EPSILON && /^\d{4}-\d{2}-\d{2}$/.test(p.date));
+    if (parts.length < 2 || parts.length !== (Array.isArray(raw) ? raw.length : 0)) continue;
+    const total = parts.reduce((s, p) => s + p.amount, 0);
+    if (Math.abs(total - Number(r.bank_transfer_amount || 0)) > RECON_AMOUNT_EPSILON) continue;
+    out.push({ sourceTable: 'income', sourceId: r.id, parts });
+  }
+  return out;
+}
+
+/**
+ * Pure: pairs each record's dated parts with open bank lines — same amount, 'in', within
+ * ±windowDays of the part's own date. A record is matched only when EVERY part has exactly one
+ * best line (closest date; a tie, or a line wanted by two parts/records, makes it ambiguous and the
+ * record is left alone). Returns [{ record:{sourceTable,sourceId}, lineIds }].
+ */
+function findDetailPartGroups(openLines, records, windowDays = BANK_RECON_DEFAULT_MATCH_WINDOW_DAYS) {
+  const lines = (openLines || []).filter(l => l && l.direction === 'in');
+  const dayDiff = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / BANK_RECON_DAY_MS;
+  const picks = [];
+  for (const rec of records || []) {
+    const rk = bankReconRefKey(rec);
+    const chosen = [];
+    let ok = true;
+    for (const part of rec.parts || []) {
+      const near = lines
+        .filter(l => !l.rejectedKeys?.has?.(rk) && Math.abs(Number(l.amount) - part.amount) <= RECON_AMOUNT_EPSILON
+          && dayDiff(l.date, part.date) <= windowDays && !chosen.includes(l.id))
+        .map(l => ({ l, d: dayDiff(l.date, part.date) }))
+        .sort((a, b) => a.d - b.d);
+      if (!near.length || (near.length > 1 && near[0].d === near[1].d)) { ok = false; break; }
+      chosen.push(near[0].l.id);
+    }
+    if (ok && chosen.length >= 2) picks.push({ record: { sourceTable: rec.sourceTable, sourceId: rec.sourceId }, lineIds: chosen });
+  }
+  // A line claimed by two records is ambiguous: drop all claimants.
+  const claims = new Map();
+  for (const p of picks) for (const id of p.lineIds) claims.set(id, (claims.get(id) || 0) + 1);
+  return picks.filter(p => p.lineIds.every(id => claims.get(id) === 1));
+}
+
+/**
  * Many-to-one matching: several bank lines that together are ONE app record (e.g. a ₦50,000
  * income that arrived as two transfers, ₦30,000 + ₦20,000). Pure and deterministic.
  *
@@ -8955,9 +9010,21 @@ async function rematchOpenBankReconEntries(DB, windowDays = BANK_RECON_DEFAULT_M
     if (!l.candidates.length) l.status = 'unrecorded';
   }
 
-  // (b) many-to-one over the lines still open.
+  // (b0) a Sunday/other record whose bank transfer was entered as several dated parts (e.g. a late
+  // ₦5,000 + today's ₦3,000): match each part to its own bank line, whatever the gap between dates.
   const byId = new Map(lines.map(l => [l.id, l]));
-  const m2o = findManyToOneMatches(pending, pool.filter(c => !used.has(bankReconRefKey(c))), windowDays);
+  let detailGroups = [];
+  try {
+    const partRecords = (await fetchIncomeBankTransferParts(DB)).filter(r => !used.has(bankReconRefKey(r)));
+    detailGroups = findDetailPartGroups(pending, partRecords, windowDays);
+  } catch (e) { console.error('[bank-recon] part matching failed:', e?.message || e); }
+  const detailLineIds = new Set(detailGroups.flatMap(g => g.lineIds));
+  const detailRecordKeys = new Set(detailGroups.map(g => bankReconRefKey(g.record)));
+  pending = pending.filter(l => !detailLineIds.has(l.id));
+
+  // (b) many-to-one over the lines still open.
+  const m2o = findManyToOneMatches(pending, pool.filter(c => !used.has(bankReconRefKey(c)) && !detailRecordKeys.has(bankReconRefKey(c))), windowDays);
+  m2o.groups = [...detailGroups, ...m2o.groups];
   for (const g of m2o.groups) {
     const groupId = 'grp_' + [...g.lineIds].sort()[0]; // deterministic: a line is in at most one group
     for (const id of g.lineIds) {
@@ -16510,4 +16577,4 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, inferDirectionFromNarration, applyNarrationDirections };
+export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, findDetailPartGroups, inferDirectionFromNarration, applyNarrationDirections };
