@@ -137,3 +137,116 @@ test('bad input is refused with a plain message', async () => {
   assert.equal((await record('acct', { amount: 'abc' })).status, 400);
   assert.equal((await record('acct', { direction: 'gift' })).status, 400);
 });
+
+// ── Thoroughness round: petty cash, reversals, who sees names, who is notified ──
+async function acknowledged(over = {}, by = 'pastor') {
+  const t = await setup();
+  const r = (await t.record('acct', over)).body;
+  assert.equal((await t.call(`loans/${r.id}/acknowledge`, { method: 'POST', headers: t.as[by], body: {} })).status, 200);
+  return { ...t, id: r.id };
+}
+const pettyRows = DB => DB.prepare(`SELECT type, status, amount, payment_method, date_needed FROM petty_cash`).all().then(r => r.results);
+
+test('petty cash loan: lending is a petty disbursement, borrowing is a petty refill paid by "loan"; no bank entry', async () => {
+  const lent = await acknowledged({ channel: 'petty', direction: 'lent', amount: 12000, date: '2026-10-05' });
+  assert.deepEqual((await pettyRows(lent.DB)).map(r => [r.type, r.status, r.amount, r.payment_method, r.date_needed]), [['disbursement', 'approved', 12000, '', '2026-10-05']]);
+  assert.equal(await lent.txCount(), 0);
+  const borrowed = await acknowledged({ channel: 'petty', direction: 'borrowed', amount: 7000, date: '2026-10-06' });
+  assert.deepEqual((await pettyRows(borrowed.DB)).map(r => [r.type, r.status, r.amount, r.payment_method]), [['refill', 'approved', 7000, 'loan']]);
+});
+
+test('petty cash loan: nothing moves until acknowledged, and a petty repayment mirrors the other way', async () => {
+  const t = await setup();
+  const r = (await t.record('acct', { channel: 'petty', direction: 'lent', amount: 10000 })).body;
+  assert.equal((await pettyRows(t.DB)).length, 0);
+  await t.call(`loans/${r.id}/acknowledge`, { method: 'POST', headers: t.as.pastor, body: {} });
+  const p = await (await t.call(`loans/${r.id}/repay`, { method: 'POST', headers: t.as.acct, body: { amount: 4000, channel: 'petty' } })).json();
+  assert.equal((await pettyRows(t.DB)).length, 1);   // still pending: no new entry
+  await t.call(`loan-repayments/${p.id}/acknowledge`, { method: 'POST', headers: t.as.officer, body: {} });
+  assert.deepEqual((await pettyRows(t.DB)).map(x => [x.type, x.amount, x.payment_method]), [['disbursement', 10000, ''], ['refill', 4000, 'loan']]);
+});
+
+test('an unknown channel falls back to cash with the accountant', async () => {
+  const { list, record } = await setup();
+  await record('acct', { channel: 'mystery' });
+  assert.equal((await list())[0].channel, 'cash');
+});
+
+test('only the IT admin can reverse; a reversal removes the ledger entry, keeps the loan visible and is audited', async () => {
+  const t = await acknowledged({ channel: 'bank', amount: 9000 });
+  assert.equal(await t.txCount(), 1);
+  for (const who of ['acct', 'officer', 'pastor']) {
+    assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: t.as[who], body: { reason: 'x' } })).status, 403, who);
+  }
+  assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: {} })).status, 400);
+  assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'Entered twice' } })).status, 200);
+  assert.equal(await t.txCount(), 0);
+  const l = (await t.list())[0];
+  assert.equal(l.status, 'reversed');
+  assert.equal(l.outstanding, 0);
+  assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'again' } })).status, 409);
+  const types = (await t.DB.prepare(`SELECT type FROM audit_log WHERE type='loan_reversed'`).all()).results;
+  assert.equal(types.length, 1);
+});
+
+test('a loan with a confirmed repayment cannot be reversed until the repayment is; reversing a repayment reopens a settled loan', async () => {
+  const t = await acknowledged({ channel: 'cash', amount: 5000 });
+  const p = await (await t.call(`loans/${t.id}/repay`, { method: 'POST', headers: t.as.acct, body: { amount: 5000 } })).json();
+  await t.call(`loan-repayments/${p.id}/acknowledge`, { method: 'POST', headers: t.as.officer, body: {} });
+  assert.equal((await t.list())[0].status, 'settled');
+  assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'x' } })).status, 409);
+  assert.equal((await t.call(`loan-repayments/${p.id}/reverse`, { method: 'POST', headers: t.as.pastor, body: { reason: 'x' } })).status, 403);
+  assert.equal((await t.call(`loan-repayments/${p.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'Wrong person' } })).status, 200);
+  const l = (await t.list())[0];
+  assert.equal(l.status, 'active');
+  assert.equal(l.outstanding, 5000);
+  assert.equal((await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'Now allowed' } })).status, 200);
+});
+
+test('reversing a loan removes the petty entry too', async () => {
+  const t = await acknowledged({ channel: 'petty', amount: 3000 });
+  assert.equal((await pettyRows(t.DB)).length, 1);
+  await t.call(`loans/${t.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'Mistake' } });
+  assert.equal((await pettyRows(t.DB)).length, 0);
+});
+
+test('people outside the four roles get amounts and status only: no names, purposes, notes or who recorded it', async () => {
+  const t = await setup();
+  await t.record('acct', { person: 'Bro Sam', purpose: 'Rent', note: 'secret note', reference: 'REF1' });
+  await t.record('acct', { person: 'Sis Ada', amount: 1000 });
+  await t.record('acct', { person: 'bro sam ', amount: 2000 });
+  const seen = await (await t.call('loans', { headers: t.as.usher })).json();
+  const text = JSON.stringify(seen);
+  for (const secret of ['Bro Sam', 'Sis Ada', 'Rent', 'secret note', 'REF1', 'Test acct']) assert.ok(!text.includes(secret), secret);
+  assert.equal(seen.length, 3);
+  assert.equal(new Set(seen.map(l => l.person)).size, 2);         // same person keeps the same label, so counts still work
+  assert.ok(seen.every(l => typeof l.amount === 'number' && l.status === 'pending'));
+  const full = await t.list();                                    // the accountant sees everything
+  assert.ok(JSON.stringify(full).includes('Bro Sam'));
+});
+
+test('notifications about loans reach only the four roles (IT admin sees all); others are untouched', async () => {
+  const t = await setup();
+  await t.record('acct');
+  const mine = role => t.call('notifications', { headers: role === 'it_admin' ? FINANCE_AUTH_HEADER : t.as[role] }).then(r => r.json());
+  assert.equal((await mine('pastor')).filter(n => /Loan/.test(n.title)).length, 1);
+  assert.equal((await mine('officer')).filter(n => /Loan/.test(n.title)).length, 1);
+  assert.equal((await mine('it_admin')).filter(n => /Loan/.test(n.title)).length, 1);
+  assert.equal((await mine('usher')).filter(n => /Loan/.test(n.title)).length, 0);
+  assert.equal((await mine('viewer')).filter(n => /Loan/.test(n.title)).length, 0);
+  // an ordinary notification (no roles) still reaches everyone
+  await t.call('notifications', { method: 'POST', headers: t.as.acct, body: { title: 'Hello all', body: 'x' } });
+  assert.equal((await mine('usher')).filter(n => n.title === 'Hello all').length, 1);
+});
+
+test('two repayments recorded side by side cannot both be confirmed if together they would repay more than the loan', async () => {
+  const t = await acknowledged({ channel: 'cash', amount: 10000 });
+  const a = await (await t.call(`loans/${t.id}/repay`, { method: 'POST', headers: t.as.acct, body: { amount: 6000 } })).json();
+  // a second repayment slipped in at the same moment as the first (the record-time check cannot see it): insert it directly
+  await t.DB.prepare(`INSERT INTO loan_repayments (id, loan_id, amount, date, channel, status, recorded_by_id, recorded_by_name) VALUES ('LR-race', ?, 6000, '2026-10-07', 'cash', 'pending', 'someone', 'X')`).bind(t.id).run();
+  assert.equal((await t.call(`loan-repayments/${a.id}/acknowledge`, { method: 'POST', headers: t.as.pastor, body: {} })).status, 200);
+  const second = await t.call('loan-repayments/LR-race/acknowledge', { method: 'POST', headers: t.as.pastor, body: {} });
+  assert.equal(second.status, 409);
+  assert.match((await second.json()).error, /more than the loan/);
+  assert.equal((await t.list())[0].outstanding, 4000);
+});
