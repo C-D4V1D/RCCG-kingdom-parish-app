@@ -18508,7 +18508,7 @@ function attFurtherClearLocal(periodEnd){ try { localStorage.removeItem(attFurth
 /**
  * Mirrors the server's attendanceLastWeekPeriod(): the week whose Sunday is the last one
  * on/before a configured cut-off date is the period's last week, submitted together with
- * the Monthly report. Returns { periodEnd, weekNo } or null.
+ * the Monthly attendance report. Returns { periodEnd, weekNo } or null.
  */
 function attCutoffInfoForWeek(settings, weekEnd){
   for(let off=0; off<7; off++){
@@ -18522,7 +18522,7 @@ function attCutoffInfoForWeek(settings, weekEnd){
   return null;
 }
 function attIsLastWeek(weekEnd){ return !!weekEnd && attState().lastWeekEnd===weekEnd; }
-/** The Monthly report is read-only once the last week is locked by its Sunday collection. */
+/** The Monthly attendance report is read-only once the last week is locked by its Sunday collection. */
 function attFurtherLocked(){
   const st = attState();
   return !!st.lastWeekEnd && st.records[st.lastWeekEnd]?.status==='locked';
@@ -18728,7 +18728,7 @@ function attWeekBodyHtml(w){
       <div class="att-foot-r"><span>Week total: <b id="atttotal_${w.weekEnd}">${attWeekSummary(data).total}</b> people</span>
         <span class="att-save" id="attsave_${w.weekEnd}" aria-live="polite">${attSaveLabel(saveState, rec)}</span></div>
       ${attIsLastWeek(w.weekEnd)
-        ? `<div class="att-note">This is the last week of the month. Fill in the Monthly report below, then submit week ${w.index} from there.</div>`
+        ? `<div class="att-note">This is the last week of the month. Fill in the Monthly attendance report below, then submit week ${w.index} from there.</div>`
         : `<button class="btn btn-primary att-submit" id="attsubmit_${w.weekEnd}" ${missing.length?'disabled':''} onclick="App.attConfirmSubmit('${w.weekEnd}')">Submit week ${w.index}</button>`}
     </div>`;
 }
@@ -18894,7 +18894,7 @@ function attFurtherCardHtml(){
     </div>` : ''}
   </div>`;
 }
-/** Bottom of the Monthly report: "Submit week N and monthly report", or who submitted it. */
+/** Bottom of the Monthly attendance report: "Submit week N and monthly attendance report", or who submitted it. */
 function attFurtherSubmitHtml(){
   const st = attState();
   const w = st.weeks.find(x=>x.weekEnd===st.lastWeekEnd);
@@ -18910,14 +18910,14 @@ function attFurtherSubmitHtml(){
     <div class="att-fr-submit">
       <div class="att-checks">${attChecksHtml(data)}</div>
       ${missing.length ? `<small class="att-fr-note">Complete week ${w.index}'s required services first.</small>` : ''}
-      <button class="btn btn-primary att-submit" ${missing.length?'disabled':''} onclick="App.attConfirmSubmitFurther()">Submit week ${w.index} and monthly report</button>
+      <button class="btn btn-primary att-submit" ${missing.length?'disabled':''} onclick="App.attConfirmSubmitFurther()">Submit week ${w.index} and monthly attendance report</button>
     </div>`;
 }
 function attRefreshFurtherSubmit(){
   const el = document.getElementById('att_fr_submit');
   if(el) el.innerHTML = attFurtherSubmitHtml();
 }
-/** Everything shown in the Monthly report, including standing counts carried from last month. */
+/** Everything shown in the Monthly attendance report, including standing counts carried from last month. */
 function attFurtherSubmitData(){
   const st = attState();
   const out = {};
@@ -18939,10 +18939,10 @@ function attConfirmSubmitFurther(){
   const blank = ATT_FURTHER_TYPED.length - filled.length;
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">Submit Week ${w.index} and the Monthly report?</div>
+    <div class="modal-title">Submit Week ${w.index} and the Monthly attendance report?</div>
     <p style="font-size:13px;color:var(--text2);margin-bottom:8px">${esc(attDayLabel(w.weekStart))} – ${esc(attDayLabel(w.weekEnd))}. Please check the numbers:</p>
     <ul class="att-confirm">${lines}</ul>
-    <p style="font-size:13px;font-weight:600;margin:10px 0 4px">Monthly report</p>
+    <p style="font-size:13px;font-weight:600;margin:10px 0 4px">Monthly attendance report</p>
     <ul class="att-confirm">${filled.map(f=>`<li>${esc(f.formLabel||f.label)}: <b>${data[f.key]}</b></li>`).join('') || '<li>No figures entered</li>'}</ul>
     ${blank ? `<p style="font-size:12px;color:var(--text3)">${blank} left blank.</p>` : ''}
     <p style="font-size:12px;color:var(--text3);margin-top:10px">It will be recorded as submitted by <b>${esc(state.user?.name||'')}</b>, with today's date and time.</p>
@@ -18970,7 +18970,7 @@ async function attSubmitFurther(btn=null){
     st.furtherSaveState = 'saved';
     closeModal();
     await renderAttendance();
-    showAlert('Week and monthly report submitted. Thank you!','success');
+    showAlert('Week and monthly attendance report submitted. Thank you!','success');
   } catch(e){
     restore();
     showAlert(e?.message || 'Could not submit. Your figures are saved on this phone — try again when you have network.','danger');
@@ -19013,7 +19013,7 @@ function attFurtherOnField(el){
   attFurtherChanged();
 }
 /**
- * The last week and the Monthly report are submitted together, so editing either one
+ * The last week and the Monthly attendance report are submitted together, so editing either one
  * sends a submitted last week back to draft (the server does the same on save).
  */
 function attReopenLastWeek(rerenderWeek=true){
@@ -19426,7 +19426,7 @@ async function refreshIncomeAttendance(){
     const data = attNormalizeWeekData(rec?.data, weekEnd);
     box.innerHTML = `
       <div class="att-inc att-inc-no">
-        <div class="t">⚠ ${lastInfo ? `Week ${lastInfo.weekNo}'s attendance and the Monthly report must be submitted first` : `Attendance for this week (${esc(weekLabel)}) hasn't been submitted`}</div>
+        <div class="t">⚠ ${lastInfo ? `Week ${lastInfo.weekNo}'s attendance and the Monthly attendance report must be submitted first` : `Attendance for this week (${esc(weekLabel)}) hasn't been submitted`}</div>
         <div class="att-checks">${attChecksHtml(data)}</div>
         ${canAction('attendance_record') ? `<button class="btn btn-primary" type="button" onclick="App.incGoToAttendance('${weekEnd}')">Fill attendance now →</button>` : '<small>Ask an usher or the admin officer to submit it.</small>'}
         <small>Your figures above are saved. They'll be here when you come back.</small>
@@ -19470,7 +19470,7 @@ function bindIncomeFormAutosave(){
 // A satellite parish's pastor sees two tabs only: Sunday records (this page) and the
 // ordinary Attendance page. Everything here reads and writes through apiFetch, which
 // sends it to /api/sat/… (the pastor's own parish database). The Kingdom rules — a
-// Sunday needs that week's attendance, the cut-off Sunday needs the Monthly report and
+// Sunday needs that week's attendance, the cut-off Sunday needs the Monthly attendance report and
 // every earlier Sunday — run on the server; the row hints below only explain them.
 const SAT_LINES = [
   { key:'membersTithe',          label:'General Tithe' },
@@ -19508,7 +19508,7 @@ function satSundayRec(income, date){
   return (income||[]).find(r=>String(r.date||'').slice(0,10)===date && (!r.source || r.source==='sunday_collection')) || null;
 }
 /**
- * 'saved' | 'cutoff' (needs the Monthly report and all earlier Sundays) | 'att' (needs that
+ * 'saved' | 'cutoff' (needs the Monthly attendance report and all earlier Sundays) | 'att' (needs that
  * week's attendance) | 'open'. `sundays` are the period's rows ({date, rec, isCutoff}).
  */
 function satRowState(s, sundays, attMap, further){
@@ -19521,7 +19521,7 @@ function satRowState(s, sundays, attMap, further){
 }
 const SAT_HINTS = {
   att:    '⚠️ attendance first',
-  cutoff: '⏳ needs the Monthly report and all earlier Sundays first',
+  cutoff: '⏳ needs the Monthly attendance report and all earlier Sundays first',
   open:   'Tap to record',
 };
 
@@ -19902,14 +19902,14 @@ const AUTOMATION_MESSAGE_GUIDE = {
     sample: '⏳ <b>Source-doc reminder</b>\nPortal closes Fri 7 Nov (3 days left)\n\nStill empty:\n• Kingdom Parish: Finance (October 2026)\n\nSend the page(s) to the bot and choose Admin, Finance or Both.',
   },
   weekly_attendance_reminder: {
-    what: 'The weekly message to {tg:weekly_attendance_reminder}: each past Sunday of the month that still needs its attendance and/or collection (a collection can only be saved once that week\'s attendance is in), and the Monthly report in the cut-off week. Nothing is sent when everything is in.',
+    what: 'The weekly message to {tg:weekly_attendance_reminder}: each past Sunday of the month that still needs its attendance and/or collection (a collection can only be saved once that week\'s attendance is in), and the Monthly attendance report in the cut-off week. Nothing is sent when everything is in.',
     when: 'Once a week, on the day and after the time set under Sunday records reminders (normally Monday).',
-    sample: 'Good morning {first:weekly_attendance_reminder},\n\n⏳ <b>Sunday records not complete</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 11 Oct: attendance, then collection\n• Sun 18 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.\n\nGod bless.',
+    sample: 'Good morning {first:weekly_attendance_reminder},\n\n⏳ <b>Sunday records not complete</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 11 Oct: attendance, then collection\n• Sun 18 Oct: collection (attendance ✅)\n• Monthly attendance report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.\n\nGod bless.',
   },
   collection_reminder: {
     what: 'Follow-ups while a Sunday record is still missing: a 2nd reminder to the people ticked here except {person:david}, then on the cut-off Sunday evening and every day after the cut-off, the same list to everyone ticked here ({tg:collection_reminder}), until the last collection is saved.',
     when: 'The 2nd reminder day (normally Thursday), the cut-off Sunday evening (normally 20:00), then daily after the cut-off for the number of days set (normally 5), only while something is missing.',
-    sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 25 Oct: collection (attendance ✅)\n• Monthly report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.',
+    sample: '⏳ <b>Today (25 Oct) is the last Sunday of the October 2026 remittance</b>\nKingdom Parish · October 2026 (cut-off Sun 25 Oct)\n\n• Sun 25 Oct: collection (attendance ✅)\n• Monthly attendance report: not submitted (needed before the 25 Oct collection)\n\nThe month-end filing starts by itself once the 25 Oct collection is saved.',
   },
   month_close: {
     what: 'After the RRR: who paid it (confirmed on Remita), the month-close checklist, the warning before the portal closes, and the "month-close complete" note.',
@@ -20809,7 +20809,7 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Attendance</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. The Monday reminder to ${esc(automationsHelpText('{tg:weekly_attendance_reminder}', config))} is under Sunday records reminders.</p>
+        <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly attendance report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. The Monday reminder to ${esc(automationsHelpText('{tg:weekly_attendance_reminder}', config))} is under Sunday records reminders.</p>
       </div>
     </details>
 
@@ -20828,9 +20828,9 @@ function renderAutomationsSettings(config, isDefault, health){
     <details class="at-details">
       <summary>Sunday records reminders (attendance &amp; collection)</summary>
       <div class="at-details-body">
-        <p class="at-note" style="margin-top:0">${esc(automationsHelpText('{role:accountant}', config))} enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
+        <p class="at-note" style="margin-top:0">${esc(automationsHelpText('{role:accountant}', config))} enters each Sunday's attendance and collection. A collection can only be saved once that week's attendance is in, and the last Sunday's collection also needs the Monthly attendance report and every earlier collection. These reminders list, for each past Sunday, exactly what is still needed. The month-end filing starts by itself once the last collection is saved.</p>
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Weekly message</div>
-        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message', automationsHelpText('To the people ticked for "Sunday records: weekly message" under People (now: {tg:weekly_attendance_reminder}). ', config) + "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly report in the cut-off week). Nothing is sent when everything is in. When turned off, the same list still goes out on Monday as a follow-up reminder, unless Follow-up reminders below is off too.")}
+        ${automationsBoolField('automations.weekly_attendance_reminder.enabled', war.enabled, 'Weekly message', automationsHelpText('To the people ticked for "Sunday records: weekly message" under People (now: {tg:weekly_attendance_reminder}). ', config) + "One message a week listing each past Sunday of the month that still needs its attendance and/or collection (and the Monthly attendance report in the cut-off week). Nothing is sent when everything is in. When turned off, the same list still goes out on Monday as a follow-up reminder, unless Follow-up reminders below is off too.")}
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label class="form-label">Day of week</label><select class="form-select at-field" data-path="automations.weekly_attendance_reminder.day" data-kind="str">${AUTOMATION_DAYS.map(d=>`<option value="${d.key}" ${war.day===d.key?'selected':''}>${d.label}</option>`).join('')}</select></div>
           ${automationsTimeField('automations.weekly_attendance_reminder.after_time', war.after_time, 'Send after (time)')}
@@ -21283,7 +21283,7 @@ async function atLoadArea(){
       <td>${atAreaCell(h?.month_end)}</td><td>${atAreaCell(h?.rrr)}</td><td>${atAreaCell(h?.paid)}</td></tr>`;
   }).join('');
   body.innerHTML = `<div class="table-wrap"><table class="at-summary-table at-area-table">
-      <tr><th>Parish</th><th>Sundays saved</th><th>Attendance weeks</th><th>Monthly report</th><th>Month-end</th><th>RRR</th><th>Paid</th></tr>${trs}
+      <tr><th>Parish</th><th>Sundays saved</th><th>Attendance weeks</th><th>Monthly attendance report</th><th>Month-end</th><th>RRR</th><th>Paid</th></tr>${trs}
     </table></div>
     <div class="at-subtitle">${esc(attDayLabel(range.from,false))} – ${esc(attDayLabel(range.to,false))} · ${total} Sunday${total===1?'':'s'}. Attendance counts weeks submitted or locked. <button type="button" class="btn btn-sm" onclick="App.atReloadArea()">Refresh</button></div>`;
 }
