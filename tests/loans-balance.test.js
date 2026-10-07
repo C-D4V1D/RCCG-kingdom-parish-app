@@ -152,3 +152,21 @@ test('callers that pass no loans keep working (nothing owed)', async () => {
   assert.equal(b.loansOwedToUs, 0);
   assert.equal(b.total, 100000);
 });
+
+test('dashboard card info: counts people (not loans), hides counts when nothing is owed, notes pending entries', () => {
+  const info = App._loanDashboardInfo;
+  const loans = [
+    { status: 'active', direction: 'lent', person: 'Bro Sam', outstanding: 5000, repayments: [] },
+    { status: 'active', direction: 'lent', person: 'bro sam ', outstanding: 2000, repayments: [] },
+    { status: 'active', direction: 'lent', person: 'Sis Ada', outstanding: 1000, repayments: [] },
+    { status: 'active', direction: 'borrowed', person: 'Bank X', outstanding: 9000, repayments: [{ status: 'pending' }] },
+    { status: 'pending', direction: 'lent', person: 'New', outstanding: 0, repayments: [] },
+  ];
+  const i = info(loans, { loansOwedToUs: 8000, loansWeOwe: 9000 }, false);
+  assert.equal(i.owedToUsCount, 2);
+  assert.equal(i.weOweCount, 1);
+  assert.match(i.pendingNote, /^2 more entries are awaiting acknowledgement\. Not counted until a second person confirms them\.$/);
+  const none = info([], { loansOwedToUs: 0, loansWeOwe: 0 }, false);
+  assert.deepEqual([none.owedToUsCount, none.weOweCount, none.pendingNote], [0, 0, '']);
+  assert.equal(info(loans, { loansOwedToUs: 8000, loansWeOwe: 9000 }, true).owedToUsCount, 0);   // past period: no counts
+});

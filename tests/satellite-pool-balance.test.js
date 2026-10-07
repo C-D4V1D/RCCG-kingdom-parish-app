@@ -239,23 +239,23 @@ test('permissions: Signatory and read-only Viewer can neither record, transfer, 
 // ── Negative-held display label (Tweak 2) — display-only, the sign of `held` itself
 // never changes anywhere in calcChurchBalance/summarizeSatelliteFunds.
 
-test('satelliteHeldDisplay: positive held shows "Held for satellites"', () => {
+test('satelliteHeldDisplay: positive held shows "Held for satellite pool"', () => {
   const d = App._satelliteHeldDisplay(5000);
-  assert.equal(d.label, 'Held for satellites');
+  assert.equal(d.label, 'Held for satellite pool');
   assert.equal(d.amount, '₦5,000');
   assert.match(d.suffix, /excluded from available funds/);
 });
 
-test('satelliteHeldDisplay: negative held shows "Owed by satellites" with the absolute amount', () => {
+test('satelliteHeldDisplay: negative held shows "Owed by satellite pool" with the absolute amount', () => {
   const d = App._satelliteHeldDisplay(-2000);
-  assert.equal(d.label, 'Owed by satellites');
+  assert.equal(d.label, 'Owed by satellite pool');
   assert.equal(d.amount, '₦2,000', 'amount must be the absolute value, not the raw negative number');
-  assert.match(d.suffix, /owe the pool/);
+  assert.match(d.suffix, /pool owes us/);
 });
 
 test('satelliteHeldDisplay: zero held is treated as the "Held" (non-owed) branch', () => {
   const d = App._satelliteHeldDisplay(0);
-  assert.equal(d.label, 'Held for satellites');
+  assert.equal(d.label, 'Held for satellite pool');
   assert.equal(d.amount, '₦0');
 });
 
