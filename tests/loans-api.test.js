@@ -238,3 +238,15 @@ test('notifications about loans reach only the four roles (IT admin sees all); o
   await t.call('notifications', { method: 'POST', headers: t.as.acct, body: { title: 'Hello all', body: 'x' } });
   assert.equal((await mine('usher')).filter(n => n.title === 'Hello all').length, 1);
 });
+
+test('two repayments recorded side by side cannot both be confirmed if together they would repay more than the loan', async () => {
+  const t = await acknowledged({ channel: 'cash', amount: 10000 });
+  const a = await (await t.call(`loans/${t.id}/repay`, { method: 'POST', headers: t.as.acct, body: { amount: 6000 } })).json();
+  // a second repayment slipped in at the same moment as the first (the record-time check cannot see it): insert it directly
+  await t.DB.prepare(`INSERT INTO loan_repayments (id, loan_id, amount, date, channel, status, recorded_by_id, recorded_by_name) VALUES ('LR-race', ?, 6000, '2026-10-07', 'cash', 'pending', 'someone', 'X')`).bind(t.id).run();
+  assert.equal((await t.call(`loan-repayments/${a.id}/acknowledge`, { method: 'POST', headers: t.as.pastor, body: {} })).status, 200);
+  const second = await t.call('loan-repayments/LR-race/acknowledge', { method: 'POST', headers: t.as.pastor, body: {} });
+  assert.equal(second.status, 409);
+  assert.match((await second.json()).error, /more than the loan/);
+  assert.equal((await t.list())[0].outstanding, 4000);
+});

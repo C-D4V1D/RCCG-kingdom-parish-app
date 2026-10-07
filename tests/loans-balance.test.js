@@ -249,3 +249,41 @@ test('reversed loans and repayments count for nothing', async () => {
   const l2 = loan({ repayments: [rep({ status: 'reversed' })] });
   assert.equal((await balance({ income, loans: [l2] })).loansOwedToUs, 30000);
 });
+
+// ── Cash breakdown pages must tie out to the balance ──
+test('cash pool breakdown: loan cash lines are listed and the balance equals Cash with Accountant', async () => {
+  const loans = [
+    loan({ id: 'A', amount: 30000, repayments: [rep({ amount: 10000 }), rep({ status: 'pending', amount: 999 })] }),
+    loan({ id: 'B', direction: 'borrowed', amount: 8000, date: '2026-10-02', repayments: [rep({ amount: 3000, date: '2026-10-09' })] }),
+    loan({ id: 'C', channel: 'bank', amount: 5000 }),     // bank loan: not cash
+    loan({ id: 'D', channel: 'petty', amount: 4000 }),    // petty loan: not cash
+    loan({ id: 'E', status: 'pending', amount: 7777 }),   // not acknowledged
+  ];
+  App._setLoansLatest(loans);
+  const pool = App._computeCashPoolBreakdown(income, [], [], [], [], [], {}, null);
+  assert.equal(pool.loanCashIn, 8000 + 10000);     // borrowed 8,000 + repayment received 10,000
+  assert.equal(pool.loanCashOut, 30000 + 3000);    // lent 30,000 + repayment we paid 3,000
+  const bal = await balance({ income, loans });
+  assert.equal(pool.balance, 100000 + 18000 - 33000);
+  assert.equal(pool.balance, bal.cashWithAccountant);
+  const lines = App._buildCashPoolDetailLines([], [], [], [], '', '');
+  assert.deepEqual(lines.loanOutLines.map(l => l.amount).sort((a, b) => a - b), [3000, 30000]);
+  assert.deepEqual(lines.loanInLines.map(l => l.amount).sort((a, b) => a - b), [8000, 10000]);
+  const html = App._renderCashPoolSectionHTML(pool, lines);
+  assert.match(html, /Loan money received/);
+  assert.match(html, /Loans paid out in cash/);
+  App._setLoansLatest([]);
+});
+
+test('cash pool as of a date and Sunday cash cycle both honour loan dates', () => {
+  App._setLoansLatest([loan({ amount: 30000, date: '2026-10-05' })]);
+  assert.equal(App._computeCashPoolBreakdown(income, [], [], [], [], [], {}, '2026-10-04').loanCashOut, 0);
+  assert.equal(App._computeCashPoolBreakdown(income, [], [], [], [], [], {}, '2026-10-05').loanCashOut, 30000);
+  const sunday = { id: 'S1', source: 'sunday_collection', date: '2026-10-04', totalCollection: 100000, bankTransferAmount: 0, directPettyCash: 0, childrenOffering: 0 };
+  const cycle = App._computeSundayCashCycle(sunday, [], [], [], [], [], {});
+  assert.equal(cycle.loanCashOut, 30000);              // the loan was made within the week of 4-10 Oct
+  assert.equal(cycle.netCashToDeposit, 70000);         // so only 70,000 is left to deposit from that Sunday
+  App._setLoansLatest([loan({ amount: 30000, date: '2026-10-12' })]);
+  assert.equal(App._computeSundayCashCycle(sunday, [], [], [], [], [], {}).netCashToDeposit, 100000);
+  App._setLoansLatest([]);
+});

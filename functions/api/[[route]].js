@@ -6069,6 +6069,12 @@ async function loanRepaymentAction(DB, id, action, data, authz) {
 
   if (action === 'acknowledge') {
     if (rep.recorded_by_id === actor.id) return err('A different person must acknowledge this repayment. You recorded it.', 403);
+    // Two repayments recorded side by side must not together exceed the loan: check against what is already confirmed.
+    const { results: done } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
+    const confirmedSoFar = (done || []).reduce((t, r) => t + (r.amount || 0), 0);
+    if (confirmedSoFar + (rep.amount || 0) > (loan.amount || 0) + LOAN_EPS) {
+      return err('Confirming this would repay more than the loan. Reject it or correct the earlier repayment first.', 409);
+    }
     const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=? WHERE id=? AND status='pending'`)
       .bind(actor.id, actor.name, now, id).run();
     if (!claim?.meta?.changes) return err('This repayment was already handled.', 409);

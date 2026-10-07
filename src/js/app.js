@@ -918,7 +918,7 @@ const DB = {
   getLoans(fresh)               {
     const c = DB._loansCache;
     if(!fresh && c && Date.now()-c.t < 5000) return c.p;
-    const p = Promise.resolve().then(()=>apiFetch('loans')).then(r=>Array.isArray(r)?r:[]).catch(()=>[]);
+    const p = Promise.resolve().then(()=>apiFetch('loans')).then(r=>{ const a = Array.isArray(r)?r:[]; DB._loansLatest = a; return a; }).catch(()=>[]);
     DB._loansCache = { t: Date.now(), p };
     return p;
   },
@@ -2035,7 +2035,28 @@ function buildExpenseCoveringMap(allIncome, allCashTx, remRates, allExpenses, al
 // snapshot; omit for the live balance. Unlike buildExpenseCoveringMap this does
 // NOT attribute any outflow to a specific collection — it deliberately avoids the
 // per-record slicing that makes a single ₦14,200 remittance look like ₦13,335.
-function computeCashPoolBreakdown(income, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, asOfDate){
+// Cash that moved in or out of the accountant's hands because of loans: acknowledged loans paid or received in cash,
+// and confirmed cash repayments. (Bank and petty cash loans move their own ledgers.) Used by calcChurchBalance and by
+// every cash-with-accountant breakdown so they always agree.
+function loanCashMovements(loans){
+  const moves = [];
+  for(const l of (Array.isArray(loans) ? loans : [])){
+    if(!l || (l.status !== 'active' && l.status !== 'settled')) continue;
+    const lent = l.direction === 'lent';
+    if((l.channel || 'cash') === 'cash'){
+      moves.push({ date: l.date, amount: l.amount||0, dir: lent ? 'out' : 'in', label: lent ? `Loan to ${l.person}` : `Loan from ${l.person}` });
+    }
+    for(const r of (l.repayments || [])){
+      if(r.status === 'confirmed' && (r.channel || 'cash') === 'cash'){
+        moves.push({ date: r.date, amount: r.amount||0, dir: lent ? 'in' : 'out', label: lent ? `Repayment from ${l.person}` : `Repayment to ${l.person}` });
+      }
+    }
+  }
+  return moves;
+}
+const sumLoanMoves = (moves, dir) => moves.filter(m => m.dir === dir).reduce((t,m) => t + (m.amount||0), 0);
+
+function computeCashPoolBreakdown(income, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, asOfDate, loanMoves){
   const recDate = r => String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
   const onOrBefore = r => !asOfDate || (function(){ const d=recDate(r); return !d || d <= asOfDate; })();
   const paidOnOrBefore = r => !asOfDate || (function(){ const d=String(r?.paidDate || r?.createdAt || '').slice(0,10); return !d || d <= asOfDate; })();
@@ -2051,7 +2072,9 @@ function computeCashPoolBreakdown(income, cashTx, expenses, pettyHistory, satell
   const cashFromCollections = inc.reduce((s,r) => s + getIncomeCashWithAccountant(r, remRates), 0);
   const bankToAccountant    = cashF.filter(t=>t.type==='withdrawal' && t.destination==='accountant_cash').reduce((s,t)=>s+(t.amount||0),0);
   const satelliteCashIn     = satF.filter(s=>s.direction==='in' && s.channel==='cash').reduce((s,r)=>s+(r.amount||0),0);
-  const totalIn = cashFromCollections + bankToAccountant + satelliteCashIn;
+  const moves = (loanMoves || loanCashMovements(DB._loansLatest)).filter(m => !asOfDate || !m.date || String(m.date).slice(0,10) <= asOfDate);
+  const loanCashIn = sumLoanMoves(moves, 'in');
+  const totalIn = cashFromCollections + bankToAccountant + satelliteCashIn + loanCashIn;
 
   // --- money OUT of the accountant's cash ---
   const cashDeposited  = cashF.filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough').reduce((s,t)=>s+(t.amount||0),0);
@@ -2064,11 +2087,12 @@ function computeCashPoolBreakdown(income, cashTx, expenses, pettyHistory, satell
     .reduce((s,h)=>s+(h.paymentMethod==='split'?(h.cashAmount||0):(h.amount||0)),0);
   const remittancesCash= remF.reduce((s,r)=>s+splitRemittancePaid(r).cash, 0);
   const poolPayoutsCash= satF.filter(s=>s.direction==='out' && s.channel==='cash_accountant').reduce((s,r)=>s+(r.amount||0),0);
-  const totalOut = cashDeposited + cashExpenses + pettyCashTopups + remittancesCash + poolPayoutsCash;
+  const loanCashOut = sumLoanMoves(moves, 'out');
+  const totalOut = cashDeposited + cashExpenses + pettyCashTopups + remittancesCash + poolPayoutsCash + loanCashOut;
 
   return {
-    cashFromCollections, bankToAccountant, satelliteCashIn, totalIn,
-    cashDeposited, cashExpenses, pettyCashTopups, remittancesCash, poolPayoutsCash, totalOut,
+    cashFromCollections, bankToAccountant, satelliteCashIn, loanCashIn, totalIn,
+    cashDeposited, cashExpenses, pettyCashTopups, remittancesCash, poolPayoutsCash, loanCashOut, totalOut,
     balance: totalIn - totalOut
   };
 }
@@ -2110,7 +2134,8 @@ function computeCashPoolPeriodSummary(income, cashTx, expenses, pettyHistory, sa
     (pettyHistory||[]).filter(r=>isDateKeyInRange(getCashLedgerDateKey(r), fromDate, toDate)),
     (satelliteFunds||[]).filter(r=>isDateKeyInRange(getCashLedgerDateKey(r), fromDate, toDate)),
     (remittances||[]).filter(r=>r.status==='paid' && isDateKeyInRange(getCashLedgerDateKey(r, true), fromDate, toDate)),
-    remRates
+    remRates, '',
+    loanCashMovements(DB._loansLatest).filter(m => isDateKeyInRange(String(m.date||'').slice(0,10), fromDate, toDate))
   );
   return {
     ...period,
@@ -2187,7 +2212,11 @@ function buildCashPoolDetailLines(cashTx, expenses, satelliteFunds, remittances,
   const depositLines = (cashTx||[]).filter(t=>t.type==='cash_deposit'&&isDepositEffective(t)&&t.destination!=='satellite_passthrough'&&(t.amount||0)>0&&(!fromDate && !toDate || isDateKeyInRange(getCashLedgerDateKey(t), fromDate, toDate))).map(t=>{
     return { icon:'✅', label:'Bank deposit'+(t.reference?' · '+t.reference:''), date:t.date||t.createdAt, amount:t.amount||0 };
   }).sort((a,b)=>new Date(b.date)-new Date(a.date));
-  return { expenseLines, remitLines, payoutLines, depositLines };
+  const loanMoves = loanCashMovements(DB._loansLatest).filter(m => !fromDate && !toDate || isDateKeyInRange(String(m.date||'').slice(0,10), fromDate, toDate));
+  const loanLine = m => ({ icon:'🤝', label:m.label, date:m.date, amount:m.amount });
+  const loanInLines  = loanMoves.filter(m=>m.dir==='in').map(loanLine).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const loanOutLines = loanMoves.filter(m=>m.dir==='out').map(loanLine).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  return { expenseLines, remitLines, payoutLines, depositLines, loanInLines, loanOutLines };
 }
 
 function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates){
@@ -2207,9 +2236,12 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
   const remittancesCash = (remittances||[]).filter(r=>r.status==='paid' && isDateKeyInRange(getCashLedgerDateKey(r, true), from, to)).reduce((s,r)=>s+splitRemittancePaid(r).cash,0);
   const poolPayoutsCash = (satelliteFunds||[]).filter(s=>s.direction==='out' && s.channel==='cash_accountant' && isDateKeyInRange(getCashLedgerDateKey(s), from, to)).reduce((s,r)=>s+(r.amount||0),0);
   const cashDeposited = (cashTx||[]).filter(t=>matchesSundayCashCycleDeposit(t, record?.id, from, to)).reduce((s,t)=>s+(t.amount||0),0);
-  const nonDepositOut = cashExpenses + pettyCashTopups + remittancesCash + poolPayoutsCash;
-  const earlierCashUsed = Math.max(0, nonDepositOut - (cashFromCollection + satelliteCashIn));
-  const netCashToDeposit = Math.max(0, cashFromCollection + satelliteCashIn - nonDepositOut);
+  const cycleLoanMoves = loanCashMovements(DB._loansLatest).filter(m => isDateKeyInRange(String(m.date||'').slice(0,10), from, to));
+  const loanCashIn = sumLoanMoves(cycleLoanMoves, 'in');
+  const loanCashOut = sumLoanMoves(cycleLoanMoves, 'out');
+  const nonDepositOut = cashExpenses + pettyCashTopups + remittancesCash + poolPayoutsCash + loanCashOut;
+  const earlierCashUsed = Math.max(0, nonDepositOut - (cashFromCollection + satelliteCashIn + loanCashIn));
+  const netCashToDeposit = Math.max(0, cashFromCollection + satelliteCashIn + loanCashIn - nonDepositOut);
   const stillWithAccountant = Math.max(0, netCashToDeposit - cashDeposited);
   return {
     fromDate: from,
@@ -2220,6 +2252,8 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
     pettyCashTopups,
     remittancesCash,
     poolPayoutsCash,
+    loanCashIn,
+    loanCashOut,
     earlierCashUsed,
     cashDeposited,
     netCashToDeposit,
@@ -2254,11 +2288,13 @@ function renderCashPoolSectionHTML(pool, lines){
     ${renderExpandableCashRow('💰','Cash received from collections', pool.cashFromCollections, null, '+')}
     ${pool.satelliteCashIn>0.5?renderExpandableCashRow('🛰️','Satellite/Zone cash received', pool.satelliteCashIn, null, '+'):''}
     ${pool.bankToAccountant>0.5?renderExpandableCashRow('🏦','Moved from bank to accountant', pool.bankToAccountant, null, '+'):''}
+    ${pool.loanCashIn>0.5?renderExpandableCashRow('🤝','Loan money received (borrowed or repaid to us)', pool.loanCashIn, L.loanInLines, '+'):''}
     <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Total cash received</div><div class="status-row-amt" style="font-weight:700;color:var(--success)">${fmt(pool.totalIn)}</div></div>
     ${pool.cashExpenses>0.5?renderExpandableCashRow('💸','Cash expenses', pool.cashExpenses, L.expenseLines, '-'):''}
     ${pool.remittancesCash>0.5?renderExpandableCashRow('📤','RCCG remittance paid (cash)', pool.remittancesCash, L.remitLines, '-'):''}
     ${pool.poolPayoutsCash>0.5?renderExpandableCashRow('🛰️','Satellite/Zone Pool payments (cash)', pool.poolPayoutsCash, L.payoutLines, '-'):''}
     ${pool.pettyCashTopups>0.5?renderExpandableCashRow('🏧','Petty cash top-ups (from cash)', pool.pettyCashTopups, null, '-'):''}
+    ${pool.loanCashOut>0.5?renderExpandableCashRow('🤝','Loans paid out in cash (lent or repaid)', pool.loanCashOut, L.loanOutLines, '-'):''}
     ${pool.cashDeposited>0.5?renderExpandableCashRow('✅','Deposited to bank', pool.cashDeposited, L.depositLines, '-'):''}
     <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Cash with Accountant now</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${pool.balance>0.5?'var(--amber)':'var(--primary)'}">${fmt(Math.max(0,pool.balance))}</div></div>
     ${pool.balance<-0.5?`<div style="font-size:11px;color:var(--danger);margin-top:6px;line-height:1.5">⚠️ The cash pool is over-drawn by ${fmt(Math.abs(pool.balance))} — recorded cash payments exceed recorded cash received. Check for a missing collection or a mis-recorded cash payment.</div>`:''}`;
@@ -3884,9 +3920,8 @@ async function calcChurchBalance(asOfDate, prefetched){
   const loansF = loansAll.filter(l => loanLive(l) && onOrBefore(l));
   const loanRepsF = loansAll.filter(loanLive).flatMap(l => (l.repayments || [])
     .filter(r => r.status === 'confirmed' && onOrBefore(r)).map(r => ({ ...r, direction: l.direction })));
-  const loanCashNet =
-      loansF.filter(l => (l.channel || 'cash') === 'cash').reduce((s,l) => s + (l.direction === 'lent' ? -1 : 1) * (l.amount||0), 0)
-    + loanRepsF.filter(r => (r.channel || 'cash') === 'cash').reduce((s,r) => s + (r.direction === 'lent' ? 1 : -1) * (r.amount||0), 0);
+  const cashMoves = loanCashMovements(loansAll).filter(onOrBefore);
+  const loanCashNet = sumLoanMoves(cashMoves, 'in') - sumLoanMoves(cashMoves, 'out');
   const loanOpen = dir => Math.max(0,
       loansF.filter(l => l.direction === dir).reduce((s,l) => s + (l.amount||0), 0)
     - loanRepsF.filter(r => r.direction === dir).reduce((s,r) => s + (r.amount||0), 0));
@@ -8244,6 +8279,8 @@ async function confirmDeposit(id){
   const expensesDeducted = sundayCycle ? sundayCycle.cashExpenses : (entryCD ? entryCD.expenseCovering : 0);
   const remittancesDeducted = sundayCycle ? sundayCycle.remittancesCash : 0;
   const poolPaymentsDeducted = sundayCycle ? sundayCycle.poolPayoutsCash : 0;
+  const loanOutDeducted = sundayCycle ? sundayCycle.loanCashOut : 0;
+  const loanInAdded = sundayCycle ? sundayCycle.loanCashIn : 0;
   const pettyDeducted = sundayCycle ? sundayCycle.pettyCashTopups : ((entryCD?.pettyAllocations||[]).reduce((s,a)=>s+(a.amount||0),0));
   const earlierCashUsed = sundayCycle ? sundayCycle.earlierCashUsed : 0;
   const otherCash = Math.max(0, totalCashWithAccountant - effectiveRemaining);
@@ -8272,6 +8309,8 @@ async function confirmDeposit(id){
       ${remittancesDeducted>0?`<div class="form-hint" style="color:var(--danger)">📤 ${fmt(remittancesDeducted)} already paid out as RCCG remittance from this Sunday's cash cycle.</div>`:''}
       ${poolPaymentsDeducted>0?`<div class="form-hint" style="color:var(--danger)">🛰️ ${fmt(poolPaymentsDeducted)} already paid out as pool payments from this Sunday's cash cycle.</div>`:''}
       ${pettyDeducted>0?`<div class="form-hint" style="color:var(--danger)">🏧 ${fmt(pettyDeducted)} already used for petty cash top-ups.</div>`:''}
+      ${loanOutDeducted>0?`<div class="form-hint" style="color:var(--danger)">🤝 ${fmt(loanOutDeducted)} already paid out in cash for loans from this Sunday's cash cycle.</div>`:''}
+      ${loanInAdded>0?`<div class="form-hint">🤝 ${fmt(loanInAdded)} of loan money received in cash is also in this cycle.</div>`:''}
       ${earlierCashUsed>0?`<div class="form-hint">↩️ ${fmt(earlierCashUsed)} of earlier cash was needed to cover this week's cash payments.</div>`:''}
       ${childrenTeacherHeld?`<div class="form-hint">Children Teacher hold (${fmt(childrenTeacherHeld)}) is excluded from bank deposits.</div>`:''}
     </div>
@@ -22047,6 +22086,10 @@ return {
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
   _loanDashboardInfo: loanDashboardInfo,
+  _loanCashMovements: loanCashMovements,
+  _buildCashPoolDetailLines: buildCashPoolDetailLines,
+  _renderCashPoolSectionHTML: renderCashPoolSectionHTML,
+  _setLoansLatest: a => { DB._loansLatest = a; },
   _renderDashBudgetBreakdown: renderDashBudgetBreakdown,
   _calcRemittancesFromRecords: calcRemittancesFromRecords,
   _getQuotaList: getQuotaList,
