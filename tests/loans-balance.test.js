@@ -193,19 +193,21 @@ test('budget block: nothing owed leaves the block exactly as before', () => {
 test('budget block: money owed is taken from savings, then known bills, so new spending is not affected', () => {
   const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 20000));
   assert.match(t, /Held back for savings ₦0/);
-  assert.match(t, /Known bills saved ₦5,000/);
+  assert.match(t, /Known bills saved \(target: ₦10,000\) ₦5,000/);
+  assert.match(t, /₦5,000 is lent out or owed to us, not in hand yet/);
+  assert.match(t, /₦15,000 is lent out or owed to us, not in hand yet/);
   assert.match(t, /Available for new spending .*₦55,000/);
-  assert.match(t, /₦20,000 owed to us is taken from savings and known bills saved\. New spending is not affected\./);
+  assert.match(t, /₦20,000 owed to us is taken from savings, then known bills saved\. New spending is not affected\./);
   assert.match(t, /Could rise to ₦60,000/);
 });
 
 test('budget block: only what spills past savings and known bills reduces new spending and "could rise to"', () => {
   const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 40000));
   assert.match(t, /Held back for savings ₦0/);
-  assert.match(t, /Known bills saved ₦0/);
+  assert.match(t, /Known bills saved \(target: ₦10,000\) ₦0/);
   assert.match(t, /Available for new spending .*₦40,000/);
   assert.match(t, /Could rise to ₦45,000/);
-  assert.match(t, /₦40,000 owed to us is taken from savings, known bills saved and new spending\./);
+  assert.match(t, /₦40,000 owed to us is taken from savings, then known bills saved, then new spending\./);
   assert.doesNotMatch(t, /New spending is not affected/);
 });
 
