@@ -911,6 +911,9 @@ const DB = {
   // behalf of satellite parishes. Excluded from income/expense totals; every
   // In/Out is mirrored into a bank movement server-side (see satellite-funds API).
   getSatelliteFunds()           { return apiFetch('satellite-funds'); },
+  addLoan(d)                    { DB._loansCache = null; return apiFetch('loans','POST',d); },
+  loanAction(id, action, d)     { DB._loansCache = null; return apiFetch(`loans/${id}/${action}`,'POST',d||{}); },
+  loanRepaymentAction(id, action, d) { DB._loansCache = null; return apiFetch(`loan-repayments/${id}/${action}`,'POST',d||{}); },
   // Loans are read by every church-balance calculation, so share one request for a few seconds.
   getLoans(fresh)               {
     const c = DB._loansCache;
@@ -1231,6 +1234,7 @@ const ACCESS_RULES = {
     // pool money into parish income is a separate, more sensitive action — see
     // satellite_fund_transfer below — and is deliberately NOT granted here.
     satellite_fund_record: ['remittances', 'expenses'],
+  loan_manage: { roles:['it_admin','accountant','admin_officer','pastor'] },
     // Reclassifying held satellite money as parish income — Accountant/Pastor/IT only.
     satellite_fund_transfer: ['remittances'],
     satellite_fund_delete: ['remittances'],
@@ -5254,15 +5258,16 @@ async function renderDashboard(){
             </div>
             <div style="font-size:10.5px;color:var(--text3);line-height:1.4;margin:0 0 4px 16px">${dashSatHeldDisp.note}</div>
           </a>`:''}
-          <div style="display:flex;align-items:center;justify-content:space-between">
+          <div onclick="App.showLoans()" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between">
             <span><span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:8px"></span>Loans owed to us${dashLoanInfo.owedToUsCount?` (${dashLoanInfo.owedToUsCount})`:''}</span>
             <span style="font-weight:600;color:${churchBal.loansOwedToUs>0?'#1D9E75':'var(--text3)'}">${churchBal.loansOwedToUs>0?'+':''}${fmt(churchBal.loansOwedToUs||0)}</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between">
+          <div onclick="App.showLoans()" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between">
             <span><span style="display:inline-block;width:8px;height:8px;background:#D85A30;border-radius:50%;margin-right:8px"></span>Loans we owe${dashLoanInfo.weOweCount?` (${dashLoanInfo.weOweCount})`:''}</span>
             <span style="font-weight:600;color:${churchBal.loansWeOwe>0?'var(--danger)':'var(--text3)'}">${churchBal.loansWeOwe>0?'−':''}${fmt(churchBal.loansWeOwe||0)}</span>
           </div>
         </div>
+        <div style="margin-top:8px;text-align:right"><a href="#" onclick="event.preventDefault();App.showLoans()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">${canAction('loan_manage')?'Record or view loans ›':'View loans ›'}</a></div>
         ${dashLoanInfo.pendingNote?`<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--amber);line-height:1.5">${dashLoanInfo.pendingNote}</div>`:''}
       </div>
 
@@ -9287,6 +9292,203 @@ async function renderRemittances(){
 // straight to the Satellite/Zone pool panel — the last card on the Record Income
 // page. Navigation is async (renderIncome fetches over the network), so the scroll
 // happens via a one-shot flag renderIncome honors after it paints — not a timer.
+
+// ── LOANS: money lent out / borrowed ──────────────────────────────────────────────────────────────────
+// Opened from the dashboard's Satellites & Loans card. One person records a loan, a DIFFERENT person
+// acknowledges it; nothing changes any balance until then (the server enforces both rules).
+function loanWho(l){ return l.direction === 'lent' ? `Lent to ${esc(l.person)}` : `Borrowed from ${esc(l.person)}`; }
+
+function loanRepaymentLine(r, canDo, me){
+  const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ confirmed' : '✕ rejected';
+  const acts = (r.status === 'pending' && canDo && r.recordedById !== me)
+    ? `<div style="margin-top:4px;display:flex;gap:6px">
+         <button class="btn btn-primary btn-sm" onclick="App.acknowledgeLoanRepayment('${esc(r.id)}', this)">Acknowledge</button>
+         <button class="btn btn-sm" onclick="App.showRejectLoan('repayment','${esc(r.id)}')">Reject</button>
+       </div>`
+    : (r.status === 'pending' && r.recordedById === me ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">You recorded this, so someone else must acknowledge it.</div>' : '');
+  return `<div style="font-size:12px;color:var(--text2);padding:6px 0;border-top:1px dashed var(--border)">
+    Repayment ${fmt(r.amount)} · ${esc(fmtDateShort(r.date))} · ${r.channel === 'bank' ? 'bank' : 'cash'} <span style="color:var(--text3)">${st}</span>
+    ${r.status === 'rejected' && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${acts}</div>`;
+}
+
+function loanCard(l, canDo, me){
+  const mine = l.recordedById === me;
+  let status = '', actions = '';
+  if(l.status === 'pending'){
+    status = '<span style="color:var(--amber);font-weight:600">⏳ Waiting for a second person to acknowledge</span>';
+    if(canDo && !mine){
+      actions = `<button class="btn btn-primary btn-sm" onclick="App.acknowledgeLoan('${esc(l.id)}', this)">Acknowledge</button>
+                 <button class="btn btn-sm" onclick="App.showRejectLoan('loan','${esc(l.id)}')">Reject</button>`;
+    } else if(mine){
+      actions = `<span style="font-size:11px;color:var(--text3)">You recorded this, so someone else must acknowledge it.</span>
+                 <button class="btn btn-sm" onclick="App.showRejectLoan('loan','${esc(l.id)}')">Cancel it</button>`;
+    }
+  } else if(l.status === 'active'){
+    status = `<span style="color:var(--text3)">${fmt(l.repaid || 0)} repaid · <strong style="color:var(--text)">${fmt(l.outstanding)} still ${l.direction === 'lent' ? 'owed to us' : 'to pay'}</strong></span>`;
+    if(canDo) actions = `<button class="btn btn-sm" onclick="App.showLoanRepaymentForm('${esc(l.id)}')">Record a repayment</button>`;
+  } else if(l.status === 'settled'){
+    status = '<span style="color:var(--success);font-weight:600">✓ Fully repaid</span>';
+  } else if(l.status === 'rejected'){
+    status = `<span style="color:var(--danger)">✕ Not accepted${l.rejectedReason ? ': ' + esc(l.rejectedReason) : ''}</span>`;
+  }
+  const reps = (l.repayments || []).map(r => loanRepaymentLine(r, canDo, me)).join('');
+  return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+    <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">${loanWho(l)}</strong><strong style="font-size:14px">${fmt(l.amount)}</strong>
+    </div>
+    <div style="font-size:11.5px;color:var(--text3);margin-top:2px">${esc(fmtDateShort(l.date))} · ${l.channel === 'bank' ? 'bank' : 'cash'}${l.purpose ? ' · ' + esc(l.purpose) : ''}${l.dueDate ? ' · due ' + esc(fmtDateShort(l.dueDate)) : ''} · recorded by ${esc(l.recordedByName || '')}</div>
+    <div style="font-size:12px;margin-top:4px">${status}</div>
+    ${actions ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${actions}</div>` : ''}
+    ${reps}
+  </div>`;
+}
+
+async function showLoans(){
+  let loans = [];
+  try { loans = await DB.getLoans(true); } catch(e) { loans = []; }
+  const me = String(state.user?.id || '');
+  const canDo = canAction('loan_manage');
+  const section = (title, list) => list.length
+    ? `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin:14px 0 2px">${title}</div>${list.map(l => loanCard(l, canDo, me)).join('')}` : '';
+  const waiting = loans.filter(l => l.status === 'pending' || (l.repayments || []).some(r => r.status === 'pending'));
+  const active  = loans.filter(l => l.status === 'active' && !waiting.includes(l));
+  const done    = loans.filter(l => l.status === 'settled' || l.status === 'rejected').slice(0, 15);
+  closeModal();
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🤝 Loans</div>
+    <div style="font-size:12px;color:var(--text3);line-height:1.5">Money we lent out or borrowed. One person records it and a different person acknowledges it. Nothing changes the balance until then.</div>
+    ${canDo ? `<div style="margin:12px 0"><button class="btn btn-primary" onclick="App.showLoanForm()">+ Record a loan</button></div>` : ''}
+    ${section('Waiting for acknowledgement', waiting)}
+    ${section('Active loans', active)}
+    ${section('Finished', done)}
+    ${loans.length ? '' : '<div style="padding:24px 0;text-align:center;color:var(--text3);font-size:13px">No loans recorded yet.</div>'}
+    <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+function showLoanForm(){
+  if(!canAction('loan_manage')){ showAlert('You do not have permission to record loans.','danger'); return; }
+  const today = new Date().toISOString().split('T')[0];
+  closeModal();
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">🤝 Record a loan</div>
+    <div class="form-group"><label class="form-label">What happened?</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="ln_dir" value="lent" checked /> We lent money to someone</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="ln_dir" value="borrowed" /> We borrowed money from someone</label></div>
+    <div class="form-group"><label class="form-label">Person or group</label><input id="ln_person" class="form-input" maxlength="100" placeholder="Name" /></div>
+    <div class="form-group"><label class="form-label">Amount (₦)</label><input id="ln_amount" type="number" min="0" step="0.01" class="form-input" inputmode="decimal" /></div>
+    <div class="form-group"><label class="form-label">Date</label><input id="ln_date" type="date" class="form-input" value="${today}" max="${today}" /></div>
+    <div class="form-group"><label class="form-label">How was the money handed over?</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="ln_channel" value="cash" checked /> Cash</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="ln_channel" value="bank" /> Through the bank</label></div>
+    <div class="form-group"><label class="form-label">What is it for?</label><input id="ln_purpose" class="form-input" maxlength="200" /></div>
+    <div class="form-group"><label class="form-label">Due date (optional)</label><input id="ln_due" type="date" class="form-input" /></div>
+    <div class="form-group"><label class="form-label">Reference (optional)</label><input id="ln_ref" class="form-input" maxlength="100" /></div>
+    <div class="alert alert-warn"><span class="alert-icon">ℹ</span><span>A different person (Accountant, Admin Officer, Pastor or IT Admin) must acknowledge this before it counts.</span></div>
+    <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
+      <button class="btn btn-primary" onclick="App.submitLoan(this)">Save</button></div>`);
+}
+
+async function submitLoan(btn=null){
+  if(!canAction('loan_manage')){ showAlert('You do not have permission to record loans.','danger'); return; }
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  const direction = document.querySelector('input[name="ln_dir"]:checked')?.value || 'lent';
+  const channel = document.querySelector('input[name="ln_channel"]:checked')?.value || 'cash';
+  const person = val('ln_person'), amount = parseFloat(val('ln_amount')) || 0;
+  if(!person){ showAlert('Enter the name of the person or group.','danger'); return; }
+  if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.addLoan({ direction, channel, person, amount, date: val('ln_date'), purpose: val('ln_purpose'), dueDate: val('ln_due'), reference: val('ln_ref') });
+  } catch(err) {
+    restore();
+    showAlert(`Could not save the loan: ${err.message}`,'danger');
+    return;
+  }
+  showAlert(`Loan of ${fmt(amount)} recorded. A different person must acknowledge it.`,'success');
+  await showLoans();
+  if(state.page === 'dashboard') renderDashboard();
+}
+
+async function acknowledgeLoan(id, btn=null){
+  const restore = setBtnLoading(btn, 'Saving…');
+  try { await DB.loanAction(id, 'acknowledge', {}); }
+  catch(err){ restore(); showAlert(err.message,'danger'); return; }
+  showAlert('Loan acknowledged.','success');
+  await showLoans();
+  if(state.page === 'dashboard') renderDashboard();
+}
+
+async function acknowledgeLoanRepayment(id, btn=null){
+  const restore = setBtnLoading(btn, 'Saving…');
+  try { await DB.loanRepaymentAction(id, 'acknowledge', {}); }
+  catch(err){ restore(); showAlert(err.message,'danger'); return; }
+  showAlert('Repayment acknowledged.','success');
+  await showLoans();
+  if(state.page === 'dashboard') renderDashboard();
+}
+
+function showRejectLoan(kind, id){
+  closeModal();
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">${kind === 'loan' ? 'Reject or cancel this loan' : 'Reject this repayment'}</div>
+    <div class="form-group"><label class="form-label">Reason</label><input id="ln_reason" class="form-input" maxlength="300" placeholder="Why?" /></div>
+    <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
+      <button class="btn btn-danger" onclick="App.submitRejectLoan('${kind === 'loan' ? 'loan' : 'repayment'}','${esc(id)}', this)">Confirm</button></div>`);
+  setTimeout(() => document.getElementById('ln_reason')?.focus(), 100);
+}
+
+async function submitRejectLoan(kind, id, btn=null){
+  const reason = (document.getElementById('ln_reason')?.value || '').trim();
+  if(!reason){ showAlert('Give a reason.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    if(kind === 'loan') await DB.loanAction(id, 'reject', { reason });
+    else await DB.loanRepaymentAction(id, 'reject', { reason });
+  } catch(err){ restore(); showAlert(err.message,'danger'); return; }
+  showAlert('Done.','success');
+  await showLoans();
+  if(state.page === 'dashboard') renderDashboard();
+}
+
+async function showLoanRepaymentForm(loanId){
+  if(!canAction('loan_manage')){ showAlert('You do not have permission to record repayments.','danger'); return; }
+  const loans = await DB.getLoans();
+  const l = loans.find(x => x.id === loanId);
+  if(!l){ showAlert('Loan not found.','danger'); return; }
+  const today = new Date().toISOString().split('T')[0];
+  closeModal();
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">Record a repayment</div>
+    <div style="font-size:12.5px;color:var(--text2);margin-bottom:10px">${loanWho(l)} · ${fmt(l.outstanding)} still ${l.direction === 'lent' ? 'owed to us' : 'to pay'}</div>
+    <div class="form-group"><label class="form-label">Amount paid (₦)</label><input id="lr_amount" type="number" min="0" step="0.01" class="form-input" inputmode="decimal" value="${l.outstanding}" /></div>
+    <div class="form-group"><label class="form-label">Date</label><input id="lr_date" type="date" class="form-input" value="${today}" max="${today}" /></div>
+    <div class="form-group"><label class="form-label">How was it paid?</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="lr_channel" value="cash" checked /> Cash</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="lr_channel" value="bank" /> Through the bank</label></div>
+    <div class="form-group"><label class="form-label">Reference (optional)</label><input id="lr_ref" class="form-input" maxlength="100" /></div>
+    <div class="alert alert-warn"><span class="alert-icon">ℹ</span><span>A different person must acknowledge this repayment before it counts.</span></div>
+    <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
+      <button class="btn btn-primary" onclick="App.submitLoanRepayment('${esc(loanId)}', this)">Save</button></div>`);
+}
+
+async function submitLoanRepayment(loanId, btn=null){
+  const amount = parseFloat(document.getElementById('lr_amount')?.value) || 0;
+  if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
+  const restore = setBtnLoading(btn, 'Saving…');
+  try {
+    await DB.loanAction(loanId, 'repay', {
+      amount, date: document.getElementById('lr_date')?.value || '',
+      channel: document.querySelector('input[name="lr_channel"]:checked')?.value || 'cash',
+      reference: (document.getElementById('lr_ref')?.value || '').trim() });
+  } catch(err){ restore(); showAlert(err.message,'danger'); return; }
+  showAlert('Repayment recorded. A different person must acknowledge it.','success');
+  await showLoans();
+}
+
 function gotoSatellitePool(){
   state._scrollToSatPool = true;
   navigate('income');
@@ -21737,6 +21939,7 @@ return {
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,
