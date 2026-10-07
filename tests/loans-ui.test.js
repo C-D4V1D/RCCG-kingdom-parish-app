@@ -75,13 +75,12 @@ test('the accountant can record, acknowledge other people\'s entries, and cancel
   assert.match(html, /Borrowed from Sis Ada/);
 });
 
-test('a viewer sees the loans but no buttons that change anything', async () => {
-  const html = await open('viewer', 'u9');
-  assert.match(html, /Lent to Bro Sam/);
-  assert.doesNotMatch(html, /\+ Record a loan/);
-  assert.doesNotMatch(html, /acknowledgeLoan\(/);
-  assert.doesNotMatch(html, /acknowledgeLoanRepayment\(/);
-  assert.doesNotMatch(html, /showLoanRepaymentForm\(/);
+test('a viewer cannot open the loans list at all', async () => {
+  App._setTestUser({ id: 'u9', name: 'V', role: 'viewer' });
+  loans = sample();
+  lastOverlay = null;
+  await App.showLoans();
+  assert.ok(!lastOverlay || !lastOverlay.innerHTML.includes('Lent to'), 'names must not be shown to a viewer');
 });
 
 test('an usher cannot open the record form', async () => {
