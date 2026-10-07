@@ -4074,7 +4074,7 @@ function renderDashboardErrorState(failed){
 // with cascading waterfall logic.  `avail` is a computeAvailableForNewSpending()
 // result; `rangeTo` is the period's end date; `fund` is dashSpendable (available fund
 // after all deductions); `color` is the petty-health colour for the card.
-function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
+function renderDashBudgetBreakdown(avail, rangeTo, fund, color, owedToUs){
   const budgetRemaining = avail.budgetTotal - avail.budgetSpent;
   const totalNextPeriod = avail.parts.nextPeriodFloat + avail.parts.cushion;
 
@@ -4123,18 +4123,47 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
     }
   }
 
+  // ── Money owed to us (loans lent out, or the satellite pool owing us) ──
+  // It is not in hand, so it cannot be spent. We lent it from our own money, so it is taken in this order:
+  // savings (held back) -> known bills saved -> available for new spending -> set aside for next budget.
+  // Lending therefore eats savings and known bills first and may not touch new spending at all.
+  const absorbed = { heldBack: 0, knownBills: 0, avail: 0, setAside: 0 };
+  let owedLeft = Math.max(0, owedToUs || 0);
+  const takeOwed = (key, cur) => { const t = Math.min(Math.max(0, cur), owedLeft); owedLeft -= t; absorbed[key] = t; return cur - t; };
+  if (owedLeft > 0) {
+    dispHeldBack   = takeOwed('heldBack', dispHeldBack);
+    dispKnownBills = takeOwed('knownBills', dispKnownBills);
+    dispAvail      = takeOwed('avail', dispAvail);
+    dispSetAside   = takeOwed('setAside', dispSetAside);
+  }
+  const owedSpill = absorbed.avail + absorbed.setAside;   // the part that reaches new spending or the set-aside
+
   // ── Status badge for "Available for new spending" ──
   const statusMap = {
     yes:   { icon:'✅', label:'Yes',           sColor:'var(--success)' },
     none:  { icon:'🟡', label:'Nothing spare', sColor:'#B8860B' },
     short: { icon:'🔴', label:'Nothing spare', sColor:'var(--danger)' },
   };
-  const st = statusMap[avail.status] || statusMap.short;
+  const st = (owedSpill > 0.5 && dispAvail <= 0.5 && avail.status === 'yes') ? statusMap.none : (statusMap[avail.status] || statusMap.short);
 
   // "Could rise to …" note
-  const riseLine = (avail.freeEnd > avail.free && avail.freeEnd > 0)
-    ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(avail.freeEnd)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
+  const freeEndShown = Math.max(0, avail.freeEnd - owedSpill);
+  const riseLine = (avail.freeEnd > avail.free && freeEndShown > 0)
+    ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(freeEndShown)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
     : '';
+
+  // Plain note on where the money owed to us came from (shown right after "could rise to").
+  let owedNote = '';
+  const owedTotal = absorbed.heldBack + absorbed.knownBills + absorbed.avail + absorbed.setAside;
+  if (owedTotal > 0.5) {
+    const bits = [];
+    if (absorbed.heldBack > 0.5)   bits.push('savings');
+    if (absorbed.knownBills > 0.5) bits.push('known bills saved');
+    if (absorbed.avail > 0.5)      bits.push('new spending');
+    if (absorbed.setAside > 0.5)   bits.push(`the ${esc(nextMo)} set-aside`);
+    const list = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0];
+    owedNote = `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">${fmt(owedTotal)} owed to us is taken from ${list}.${owedSpill < 0.5 ? ' New spending is not affected.' : ''}</div>`;
+  }
 
   // ── Warning lines ──
   let warningHtml = '';
@@ -4219,6 +4248,7 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
           <span style="font-size:16px;font-weight:800;color:${st.sColor}">${dispAvail > 0 ? fmt(dispAvail) : '₦0'}</span>
         </div>
         ${riseLine}
+        ${owedNote}
         ${warningHtml}
       </div>
       <div style="margin-top:6px;text-align:center"><a href="#" onclick="event.preventDefault();App.openBudgetBreakdown()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">See full breakdown ›</a></div>
@@ -4252,7 +4282,7 @@ async function renderDashboard(){
   // Derived from settings, which loadDashboardData has already cached — no fetch.
   // satellite-funds is not part of the dashboard batch payload; fetched in parallel
   // here so calcChurchBalance below never has to self-fetch it (cached 60s either way).
-  const [remRatesDash, allSatFundsDash, dashPortalBalance] = await Promise.all([getRemRates(), DB.getSatelliteFunds(), fetchPortalBankBalanceQuiet()]);
+  const [remRatesDash, allSatFundsDash, dashPortalBalance, allLoansDash] = await Promise.all([getRemRates(), DB.getSatelliteFunds(), fetchPortalBankBalanceQuiet(), DB.getLoans()]);
   const settings = settingsDash;
   // Budget contract-v2 section 6: the first visit (Budget or Dashboard) on or after day 3
   // past the previous period's cut-off creates that period's plan automatically. Kicked
@@ -4408,10 +4438,13 @@ async function renderDashboard(){
   const churchBal = await calcChurchBalance(dashIsPastPeriod ? dashAsOfDate : null, {
     income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
     cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
-    satelliteFunds: allSatFundsDash,
+    satelliteFunds: allSatFundsDash, loans: allLoansDash,
     remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
   });
   const dashSatHeldDisp = satelliteHeldDisplay(churchBal.heldForSatellites);
+  const dashLoanInfo = loanDashboardInfo(allLoansDash, churchBal, dashIsPastPeriod);
+  // Money owed to us: loans lent out plus any money the satellite pool owes us. Not in hand, so not spendable.
+  const dashOwedToUs = Math.max(0, -(churchBal.heldForSatellites||0)) + (churchBal.loansOwedToUs||0);
   const pendingPetty = (pettyHistDash||[]).filter(h=>h.status==='pending_approval').length;
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
@@ -4495,7 +4528,7 @@ async function renderDashboard(){
   const dashOpeningBal = await calcChurchBalance(dashPriorCloseDate, {
     income: allIncomeDash, expenses: allExpensesDash, remittances: allRemsDash,
     cashTx: cashTxDash, pettyHistory: pettyHistDash, pettyConfig: pettyConfigDash,
-    satelliteFunds: allSatFundsDash,
+    satelliteFunds: allSatFundsDash, loans: allLoansDash,
     remRates: (remRatesDash.rates || DEFAULT_REMITTANCE_RATES)
   });
   // dashCarriedForward is the opening amount shown on the card.
@@ -5151,7 +5184,7 @@ async function renderDashboard(){
         <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px">
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Total Church Balance${dashIsPastPeriod?` <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span>`:''}</div>
-            <div style="font-size:24px;font-weight:800;color:${churchBal.total<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.total)}</div>
+            <div style="font-size:24px;font-weight:800;color:${churchBal.onHand<0?'var(--danger)':'#185FA5'};letter-spacing:-0.5px;line-height:1.15">${fmt(churchBal.onHand)}</div>
             <div style="font-size:12px;color:var(--text3);margin-top:5px">${dashIsPastPeriod?`Snapshot at end of period`:`Actual money on hand right now`}</div>
           </div>
           <div style="width:44px;height:44px;border-radius:12px;background:#EAF3DE;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">🏛️</div>
@@ -5170,12 +5203,6 @@ async function renderDashboard(){
             <span><span style="display:inline-block;width:8px;height:8px;background:${churchBal.pettyFloat<0?'var(--danger)':'#1D9E75'};border-radius:50%;margin-right:8px"></span>${churchBal.pettyFloat<0?`<span style="color:var(--danger);font-weight:600;text-decoration:underline dotted var(--danger);text-underline-offset:3px">Petty Cash ⚠ Owes Admin Officer</span>`:`<span style="text-decoration:underline dotted #1D9E75;text-underline-offset:3px">Petty Cash</span>`}</span>
             <span style="font-weight:600;color:${churchBal.pettyFloat<0?'var(--danger)':'inherit'}">${fmt(churchBal.pettyFloat)}</span>
           </a>
-          ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
-          <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:none;color:inherit;display:flex;align-items:center;justify-content:space-between;border-top:1px dashed var(--border);margin-top:6px;padding-top:6px">
-            <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
-            <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
-          </a>
-          <div style="font-size:10.5px;color:var(--text3);margin-top:2px">${dashSatHeldDisp.label}: ${dashSatHeldDisp.amount} (${dashSatHeldDisp.suffix}${churchBal.heldForSatellites>0?' — already inside Bank or Cash with Accountant above':''})</div>`:''}
         </div>
       </div>
 
@@ -5208,6 +5235,37 @@ async function renderDashboard(){
         </div>`:''}
       </div>
 
+      <!-- ± connector -->
+      <div style="display:flex;justify-content:center;align-items:center;height:30px;position:relative">
+        <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
+        <div style="width:32px;height:32px;border-radius:50%;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:var(--text2);z-index:1;flex-shrink:0;position:relative">±</div>
+      </div>
+
+      <!-- 5b. Satellites & Loans -->
+      <div class="flow-card" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;position:relative;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:#8B4513"></div>
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:10px">Satellites &amp; Loans</div>
+        <div style="font-size:12.5px;color:var(--text2);line-height:1.9">
+          ${Math.abs(churchBal.heldForSatellites||0)>=0.5?`
+          <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:none;color:inherit;display:block">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span><span style="display:inline-block;width:8px;height:8px;background:#8B4513;border-radius:50%;margin-right:8px"></span><span style="text-decoration:underline dotted #8B4513;text-underline-offset:3px">${dashSatHeldDisp.label}</span></span>
+              <span style="font-weight:600;color:#8B4513">${churchBal.heldForSatellites>0?'−':'+'}${dashSatHeldDisp.amount}</span>
+            </div>
+            <div style="font-size:10.5px;color:var(--text3);line-height:1.4;margin:0 0 4px 16px">${dashSatHeldDisp.note}</div>
+          </a>`:''}
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span><span style="display:inline-block;width:8px;height:8px;background:#1D9E75;border-radius:50%;margin-right:8px"></span>Loans owed to us${dashLoanInfo.owedToUsCount?` (${dashLoanInfo.owedToUsCount})`:''}</span>
+            <span style="font-weight:600;color:${churchBal.loansOwedToUs>0?'#1D9E75':'var(--text3)'}">${churchBal.loansOwedToUs>0?'+':''}${fmt(churchBal.loansOwedToUs||0)}</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span><span style="display:inline-block;width:8px;height:8px;background:#D85A30;border-radius:50%;margin-right:8px"></span>Loans we owe${dashLoanInfo.weOweCount?` (${dashLoanInfo.weOweCount})`:''}</span>
+            <span style="font-weight:600;color:${churchBal.loansWeOwe>0?'var(--danger)':'var(--text3)'}">${churchBal.loansWeOwe>0?'−':''}${fmt(churchBal.loansWeOwe||0)}</span>
+          </div>
+        </div>
+        ${dashLoanInfo.pendingNote?`<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--amber);line-height:1.5">${dashLoanInfo.pendingNote}</div>`:''}
+      </div>
+
       <!-- = connector to Final -->
       <div style="display:flex;justify-content:center;align-items:center;height:36px;position:relative">
         <div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border);transform:translateX(-50%)"></div>
@@ -5223,6 +5281,7 @@ async function renderDashboard(){
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions${dashIsPastPeriod?` <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span>`:''}</div>
             <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
+            ${dashOwedToUs>0.5?`<div style="font-size:11.5px;color:var(--text3);margin-top:6px;line-height:1.6">Of this: ${fmt(dashSpendable-dashOwedToUs)} in hand · ${fmt(dashOwedToUs)} owed to us</div>`:''}
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
             <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px">${_pettyIcon}</div>
@@ -5231,7 +5290,7 @@ async function renderDashboard(){
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <!-- Petty Cash Sustainability -->
-          ${(!dashIsPastPeriod && dashAvailable) ? renderDashBudgetBreakdown(dashAvailable, dashAvailableRangeTo, dashSpendable, dashSpendColor) : `
+          ${(!dashIsPastPeriod && dashAvailable) ? renderDashBudgetBreakdown(dashAvailable, dashAvailableRangeTo, dashSpendable, dashSpendColor, dashOwedToUs) : `
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px">
             <span style="color:var(--text3)">Petty cash (committed)</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyCurrentFloat)}</span>
@@ -9242,8 +9301,23 @@ function gotoSatellitePool(){
 function satelliteHeldDisplay(held){
   const h = held || 0;
   return h < 0
-    ? { label:'Owed by satellites', amount:fmt(Math.abs(h)), suffix:'money the satellites owe the pool' }
-    : { label:'Held for satellites', amount:fmt(h), suffix:'excluded from available funds' };
+    ? { label:'Owed by satellite pool', amount:fmt(Math.abs(h)), suffix:'money the satellite pool owes us', note:'Our money used to top up the satellite pool. The pool owes it back.' }
+    : { label:'Held for satellite pool', amount:fmt(h), suffix:'excluded from available funds', note:'Money in our accounts that belongs to the satellite pool.' };
+}
+
+// What the dashboard's Satellites & Loans card needs from the loans list: how many people owe us / we owe
+// (acknowledged loans with something left to pay) and a plain note about loans waiting for a second person.
+function loanDashboardInfo(loans, churchBal, isPast){
+  const list = Array.isArray(loans) ? loans : [];
+  const people = dir => new Set(list.filter(l => l.status === 'active' && l.direction === dir && (l.outstanding||0) > 0)
+    .map(l => String(l.person||'').trim().toLowerCase())).size;
+  const pending = list.filter(l => l.status === 'pending').length + list.reduce((n,l) => n + (l.status === 'active' ? (l.repayments||[]).filter(r => r.status === 'pending').length : 0), 0);
+  return {
+    owedToUsCount: isPast || !(churchBal.loansOwedToUs > 0) ? 0 : people('lent'),
+    weOweCount: isPast || !(churchBal.loansWeOwe > 0) ? 0 : people('borrowed'),
+    pendingNote: !isPast && pending > 0
+      ? `${pending} more ${pending === 1 ? 'entry is' : 'entries are'} awaiting acknowledgement. Not counted until a second person confirms ${pending === 1 ? 'it' : 'them'}.` : ''
+  };
 }
 
 // ── Satellite / Zone Pass-Through Fund panel (lives on the Remittances page) ──
@@ -21721,6 +21795,8 @@ return {
   _calcAvailableFundFromOpening: calcAvailableFundFromOpening,
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
+  _loanDashboardInfo: loanDashboardInfo,
+  _renderDashBudgetBreakdown: renderDashBudgetBreakdown,
   _calcRemittancesFromRecords: calcRemittancesFromRecords,
   _getQuotaList: getQuotaList,
   _accumQuotasAcrossPeriods: accumQuotasAcrossPeriods,
