@@ -4074,7 +4074,7 @@ function renderDashboardErrorState(failed){
 // with cascading waterfall logic.  `avail` is a computeAvailableForNewSpending()
 // result; `rangeTo` is the period's end date; `fund` is dashSpendable (available fund
 // after all deductions); `color` is the petty-health colour for the card.
-function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
+function renderDashBudgetBreakdown(avail, rangeTo, fund, color, owedToUs){
   const budgetRemaining = avail.budgetTotal - avail.budgetSpent;
   const totalNextPeriod = avail.parts.nextPeriodFloat + avail.parts.cushion;
 
@@ -4123,18 +4123,47 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
     }
   }
 
+  // ── Money owed to us (loans lent out, or the satellite pool owing us) ──
+  // It is not in hand, so it cannot be spent. We lent it from our own money, so it is taken in this order:
+  // savings (held back) -> known bills saved -> available for new spending -> set aside for next budget.
+  // Lending therefore eats savings and known bills first and may not touch new spending at all.
+  const absorbed = { heldBack: 0, knownBills: 0, avail: 0, setAside: 0 };
+  let owedLeft = Math.max(0, owedToUs || 0);
+  const takeOwed = (key, cur) => { const t = Math.min(Math.max(0, cur), owedLeft); owedLeft -= t; absorbed[key] = t; return cur - t; };
+  if (owedLeft > 0) {
+    dispHeldBack   = takeOwed('heldBack', dispHeldBack);
+    dispKnownBills = takeOwed('knownBills', dispKnownBills);
+    dispAvail      = takeOwed('avail', dispAvail);
+    dispSetAside   = takeOwed('setAside', dispSetAside);
+  }
+  const owedSpill = absorbed.avail + absorbed.setAside;   // the part that reaches new spending or the set-aside
+
   // ── Status badge for "Available for new spending" ──
   const statusMap = {
     yes:   { icon:'✅', label:'Yes',           sColor:'var(--success)' },
     none:  { icon:'🟡', label:'Nothing spare', sColor:'#B8860B' },
     short: { icon:'🔴', label:'Nothing spare', sColor:'var(--danger)' },
   };
-  const st = statusMap[avail.status] || statusMap.short;
+  const st = (owedSpill > 0.5 && dispAvail <= 0.5 && avail.status === 'yes') ? statusMap.none : (statusMap[avail.status] || statusMap.short);
 
   // "Could rise to …" note
-  const riseLine = (avail.freeEnd > avail.free && avail.freeEnd > 0)
-    ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(avail.freeEnd)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
+  const freeEndShown = Math.max(0, avail.freeEnd - owedSpill);
+  const riseLine = (avail.freeEnd > avail.free && freeEndShown > 0)
+    ? `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">Could rise to ${fmt(freeEndShown)} by ${esc(fmtDateShort(rangeTo))} if Sundays come in as usual.</div>`
     : '';
+
+  // Plain note on where the money owed to us came from (shown right after "could rise to").
+  let owedNote = '';
+  const owedTotal = absorbed.heldBack + absorbed.knownBills + absorbed.avail + absorbed.setAside;
+  if (owedTotal > 0.5) {
+    const bits = [];
+    if (absorbed.heldBack > 0.5)   bits.push('savings');
+    if (absorbed.knownBills > 0.5) bits.push('known bills saved');
+    if (absorbed.avail > 0.5)      bits.push('new spending');
+    if (absorbed.setAside > 0.5)   bits.push(`the ${esc(nextMo)} set-aside`);
+    const list = bits.length > 1 ? bits.slice(0, -1).join(', ') + ' and ' + bits[bits.length - 1] : bits[0];
+    owedNote = `<div style="font-size:11.5px;color:var(--text3);margin-top:2px">${fmt(owedTotal)} owed to us is taken from ${list}.${owedSpill < 0.5 ? ' New spending is not affected.' : ''}</div>`;
+  }
 
   // ── Warning lines ──
   let warningHtml = '';
@@ -4219,6 +4248,7 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color){
           <span style="font-size:16px;font-weight:800;color:${st.sColor}">${dispAvail > 0 ? fmt(dispAvail) : '₦0'}</span>
         </div>
         ${riseLine}
+        ${owedNote}
         ${warningHtml}
       </div>
       <div style="margin-top:6px;text-align:center"><a href="#" onclick="event.preventDefault();App.openBudgetBreakdown()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">See full breakdown ›</a></div>
@@ -4413,6 +4443,8 @@ async function renderDashboard(){
   });
   const dashSatHeldDisp = satelliteHeldDisplay(churchBal.heldForSatellites);
   const dashLoanInfo = loanDashboardInfo(allLoansDash, churchBal, dashIsPastPeriod);
+  // Money owed to us: loans lent out plus any money the satellite pool owes us. Not in hand, so not spendable.
+  const dashOwedToUs = Math.max(0, -(churchBal.heldForSatellites||0)) + (churchBal.loansOwedToUs||0);
   const pendingPetty = (pettyHistDash||[]).filter(h=>h.status==='pending_approval').length;
   const overdueRems = allRemsDash.filter(r=>r.status==='overdue').length;
 
@@ -5249,6 +5281,7 @@ async function renderDashboard(){
           <div style="flex:1;min-width:0">
             <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin-bottom:6px">Available Fund After All Deductions${dashIsPastPeriod?` <span style="text-transform:none;letter-spacing:0;font-weight:600">(As of ${dashAsOfLabel})</span>`:''}</div>
             <div style="font-size:26px;font-weight:800;color:${dashSpendColor};letter-spacing:-0.8px;line-height:1.1">${fmt(dashSpendable)}</div>
+            ${dashOwedToUs>0.5?`<div style="font-size:11.5px;color:var(--text3);margin-top:6px;line-height:1.6">Of this: ${fmt(dashSpendable-dashOwedToUs)} in hand · ${fmt(dashOwedToUs)} owed to us</div>`:''}
           </div>
           <div style="display:flex;flex-direction:column;align-items:center;gap:8px;flex-shrink:0">
             <div style="width:44px;height:44px;border-radius:12px;background:${dashSpendColor}22;display:flex;align-items:center;justify-content:center;font-size:22px">${_pettyIcon}</div>
@@ -5257,7 +5290,7 @@ async function renderDashboard(){
         </div>
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed ${dashSpendColor}33">
           <!-- Petty Cash Sustainability -->
-          ${(!dashIsPastPeriod && dashAvailable) ? renderDashBudgetBreakdown(dashAvailable, dashAvailableRangeTo, dashSpendable, dashSpendColor) : `
+          ${(!dashIsPastPeriod && dashAvailable) ? renderDashBudgetBreakdown(dashAvailable, dashAvailableRangeTo, dashSpendable, dashSpendColor, dashOwedToUs) : `
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px">
             <span style="color:var(--text3)">Petty cash (committed)</span>
             <span style="font-weight:600;color:var(--text)">${fmt(_pettyCurrentFloat)}</span>
@@ -21763,6 +21796,7 @@ return {
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
   _loanDashboardInfo: loanDashboardInfo,
+  _renderDashBudgetBreakdown: renderDashBudgetBreakdown,
   _calcRemittancesFromRecords: calcRemittancesFromRecords,
   _getQuotaList: getQuotaList,
   _accumQuotasAcrossPeriods: accumQuotasAcrossPeriods,

@@ -170,3 +170,53 @@ test('dashboard card info: counts people (not loans), hides counts when nothing 
   assert.deepEqual([none.owedToUsCount, none.weOweCount, none.pendingNote], [0, 0, '']);
   assert.equal(info(loans, { loansOwedToUs: 8000, loansWeOwe: 9000 }, true).owedToUsCount, 0);   // past period: no counts
 });
+
+// ── Budget block: how money owed to us is absorbed ──
+// Order: savings (held back) -> known bills saved -> available for new spending -> set aside for next budget.
+const budgetAvail = (over = {}) => ({
+  monthKey: '2026-10', budgetTotal: 0, budgetSpent: 0, status: 'yes', free: 55000, freeEnd: 60000,
+  progress: { pct: 0 },
+  parts: { currentFloat: 0, nextPeriodFloat: 20000, cushion: 0, knownBillsSaved: 10000, heldBack: 15000 },
+  ...over
+});
+const strip = html => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+test('budget block: nothing owed leaves the block exactly as before', () => {
+  const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 0));
+  assert.match(t, /Held back for savings ₦15,000/);
+  assert.match(t, /Known bills saved ₦10,000/);
+  assert.match(t, /Available for new spending .*₦55,000/);
+  assert.doesNotMatch(t, /owed to us/);
+  assert.match(t, /Could rise to ₦60,000/);
+});
+
+test('budget block: money owed is taken from savings, then known bills, so new spending is not affected', () => {
+  const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 20000));
+  assert.match(t, /Held back for savings ₦0/);
+  assert.match(t, /Known bills saved ₦5,000/);
+  assert.match(t, /Available for new spending .*₦55,000/);
+  assert.match(t, /₦20,000 owed to us is taken from savings and known bills saved\. New spending is not affected\./);
+  assert.match(t, /Could rise to ₦60,000/);
+});
+
+test('budget block: only what spills past savings and known bills reduces new spending and "could rise to"', () => {
+  const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 40000));
+  assert.match(t, /Held back for savings ₦0/);
+  assert.match(t, /Known bills saved ₦0/);
+  assert.match(t, /Available for new spending .*₦40,000/);
+  assert.match(t, /Could rise to ₦45,000/);
+  assert.match(t, /₦40,000 owed to us is taken from savings, known bills saved and new spending\./);
+  assert.doesNotMatch(t, /New spending is not affected/);
+});
+
+test('budget block: order of the sentences is "could rise", then the owed note, then the red warning', () => {
+  const t = strip(App._renderDashBudgetBreakdown(budgetAvail({ parts: { currentFloat: 0, nextPeriodFloat: 20000, cushion: 0, knownBillsSaved: 10000, heldBack: 15000 } }), '2026-10-25', 30000, '#000', 10000));
+  const rise = t.indexOf('Could rise to'), owed = t.indexOf('owed to us is taken'), warn = t.indexOf('underfunded');
+  assert.ok(rise >= 0 && owed > rise, `${rise} ${owed}`);
+  assert.ok(warn === -1 || warn > owed);
+});
+
+test('budget block: when new spending is used up by money owed, the badge no longer says Yes', () => {
+  const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 90000));
+  assert.match(t, /Nothing spare/);
+});
