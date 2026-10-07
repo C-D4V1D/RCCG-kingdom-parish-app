@@ -2557,6 +2557,17 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'DELETE' &&  param) return await deleteSatelliteFund(DB, param);
     }
 
+    // ── /api/loans, /api/loan-repayments ───────────────────────────
+    // Money lent out or borrowed. Recorded by one person, acknowledged by a different one.
+    if (route === 'loans') {
+      if (method === 'GET'  && !param) return await getLoans(DB);
+      if (method === 'POST' && !param) return await createLoan(DB, body, authz);
+      if (method === 'POST' &&  param && parts[2]) return await loanAction(DB, param, parts[2], body, authz);
+    }
+    if (route === 'loan-repayments' && method === 'POST' && param && parts[2]) {
+      return await loanRepaymentAction(DB, param, parts[2], body, authz);
+    }
+
     // ── /api/cash-transactions ─────────────────────────────────
     if (route === 'cash-transactions') {
       if (method === 'GET'  && !param) return await getCashTransactions(DB, url.searchParams.get('full') === '1');
@@ -4115,6 +4126,21 @@ async function handleInit(DB) {
     // expected = amount to preserve that meaning. Without this, any partner whose
     // pledge was raised since would silently flip to "partial" across their history.
     `UPDATE kpsc_partner_payments SET expected_amount = amount WHERE COALESCE(expected_amount,0) = 0`,
+    // Loans (money lent out / borrowed). Never income: see the Loans section further down.
+    `CREATE TABLE IF NOT EXISTS loans (
+      id TEXT PRIMARY KEY, person TEXT NOT NULL DEFAULT '', direction TEXT NOT NULL DEFAULT 'lent',
+      amount REAL DEFAULT 0, date TEXT DEFAULT '', due_date TEXT DEFAULT '', purpose TEXT DEFAULT '',
+      note TEXT DEFAULT '', reference TEXT DEFAULT '', channel TEXT DEFAULT 'cash', status TEXT DEFAULT 'pending',
+      recorded_by_id TEXT DEFAULT '', recorded_by_name TEXT DEFAULT '', recorded_by_role TEXT DEFAULT '',
+      acknowledged_by_id TEXT DEFAULT '', acknowledged_by_name TEXT DEFAULT '', acknowledged_at TEXT DEFAULT '',
+      rejected_reason TEXT DEFAULT '', bank_ref TEXT DEFAULT '', settled_at TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')))`,
+    `CREATE TABLE IF NOT EXISTS loan_repayments (
+      id TEXT PRIMARY KEY, loan_id TEXT NOT NULL DEFAULT '', amount REAL DEFAULT 0, date TEXT DEFAULT '',
+      channel TEXT DEFAULT 'cash', reference TEXT DEFAULT '', note TEXT DEFAULT '', status TEXT DEFAULT 'pending',
+      recorded_by_id TEXT DEFAULT '', recorded_by_name TEXT DEFAULT '',
+      acknowledged_by_id TEXT DEFAULT '', acknowledged_by_name TEXT DEFAULT '', acknowledged_at TEXT DEFAULT '',
+      rejected_reason TEXT DEFAULT '', bank_ref TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -5791,6 +5817,215 @@ async function deleteSatelliteFund(DB, id) {
   }
   await DB.prepare(`DELETE FROM satellite_funds WHERE id=?`).bind(id).run();
   return ok({ id, deleted: true, direction: row.direction, amount: row.amount });
+}
+
+// ── LOANS (money lent out / borrowed) ─────────────────────────────────
+// A loan is never income and never part of a remittance: it only moves money between
+// "in hand" and "owed" (see calcChurchBalance in src/js/app.js). One person records it,
+// a DIFFERENT person acknowledges it, and only then does it change any balance.
+// Bank-channel loans mirror into the bank ledger the same way satellite pass-through
+// money does (destination 'satellite_passthrough' keeps it out of collection deposits);
+// cash-channel loans have no mirror and are counted on the accountant's cash line.
+const LOAN_ROLES = ['it_admin', 'accountant', 'admin_officer', 'pastor'];
+const LOAN_EPS = 0.005;
+
+async function loanActor(DB, authz) {
+  const u = authz?.finance;
+  if (!u) return err('Sign in to use Loans.', 401);
+  if (!LOAN_ROLES.includes(u.role)) return err(`Role '${u.role}' may not record or acknowledge loans.`, 403);
+  let name = u.name;
+  if (!name) {
+    const row = await DB.prepare(`SELECT name FROM users WHERE id=?`).bind(u.id).first();
+    name = row?.name || String(u.id);
+  }
+  return { id: String(u.id), role: u.role, name };
+}
+
+function loanDateOrToday(v) {
+  const d = String(v || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : new Date().toISOString().split('T')[0];
+}
+
+function mapRepayment(r) {
+  return {
+    id: r.id, loanId: r.loan_id, amount: r.amount, date: r.date, channel: r.channel || 'cash',
+    reference: r.reference || '', note: r.note || '', status: r.status,
+    recordedById: r.recorded_by_id || '', recordedByName: r.recorded_by_name || '',
+    acknowledgedByName: r.acknowledged_by_name || '', acknowledgedAt: r.acknowledged_at || '',
+    rejectedReason: r.rejected_reason || '', bankRef: r.bank_ref || '', createdAt: r.created_at,
+  };
+}
+
+function mapLoan(row, repayments) {
+  const mine = repayments.filter(r => r.loan_id === row.id).map(mapRepayment);
+  const repaid = mine.filter(r => r.status === 'confirmed').reduce((s, r) => s + (r.amount || 0), 0);
+  return {
+    id: row.id, person: row.person, direction: row.direction, amount: row.amount, date: row.date,
+    dueDate: row.due_date || '', purpose: row.purpose || '', note: row.note || '', reference: row.reference || '',
+    channel: row.channel || 'cash', status: row.status,
+    recordedById: row.recorded_by_id || '', recordedByName: row.recorded_by_name || '', recordedByRole: row.recorded_by_role || '',
+    acknowledgedByName: row.acknowledged_by_name || '', acknowledgedAt: row.acknowledged_at || '',
+    rejectedReason: row.rejected_reason || '', bankRef: row.bank_ref || '', settledAt: row.settled_at || '',
+    createdAt: row.created_at, repayments: mine, repaid,
+    outstanding: row.status === 'active' ? Math.max(0, (row.amount || 0) - repaid) : 0,
+  };
+}
+
+async function getLoans(DB) {
+  const [{ results: loans }, { results: reps }] = await Promise.all([
+    DB.prepare(`SELECT * FROM loans ORDER BY date DESC, created_at DESC`).all(),
+    DB.prepare(`SELECT * FROM loan_repayments ORDER BY date ASC, created_at ASC`).all(),
+  ]);
+  return ok((loans || []).map(l => mapLoan(l, reps || [])));
+}
+
+async function createLoan(DB, data, authz) {
+  const actor = await loanActor(DB, authz);
+  if (actor instanceof Response) return actor;
+  const person = String(data.person || '').trim().slice(0, 100);
+  const direction = data.direction === 'borrowed' ? 'borrowed' : data.direction === 'lent' ? 'lent' : '';
+  const amount = Number(data.amount);
+  const channel = data.channel === 'bank' ? 'bank' : 'cash';
+  if (!person) return err('Who is the loan with? Enter a name.', 400);
+  if (!direction) return err("Choose whether we lent the money or borrowed it.", 400);
+  if (!Number.isFinite(amount) || amount <= 0) return err('Enter an amount greater than zero.', 400);
+  const id = newId('LN-');
+  const date = loanDateOrToday(data.date);
+  const dueRaw = String(data.dueDate || '').slice(0, 10);
+  const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(dueRaw) ? dueRaw : '';
+  await DB.prepare(`
+    INSERT INTO loans (id, person, direction, amount, date, due_date, purpose, note, reference, channel, status,
+                       recorded_by_id, recorded_by_name, recorded_by_role)
+    VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?,?,?)
+  `).bind(id, person, direction, amount, date, dueDate, String(data.purpose || '').slice(0, 200),
+    String(data.note || '').slice(0, 500), String(data.reference || '').slice(0, 100), channel,
+    actor.id, actor.name, actor.role).run();
+  await writeAuditLog(DB, 'loan_recorded',
+    `${actor.name} (${actor.role}) recorded a loan ${direction === 'lent' ? 'to' : 'from'} ${person} of ₦${amount.toLocaleString('en-NG')} (${channel}). Awaiting acknowledgement.`, actor.name);
+  await createNotification(DB, { title: 'Loan awaiting acknowledgement',
+    body: `${actor.name} recorded a loan ${direction === 'lent' ? 'to' : 'from'} ${person}. A different person must acknowledge it.`, type: 'info' });
+  return ok({ id, status: 'pending' });
+}
+
+// Mirror a bank-channel loan or repayment into the bank ledger. `moneyIn` = money enters the bank.
+async function loanBankMirror(DB, { moneyIn, date, amount, description, reference, actor }) {
+  const id = newId('CTX-');
+  const tx = moneyIn
+    ? { id, type: 'cash_deposit', date, amount, description, reference, recordedBy: actor.name, depositMethod: 'bank_transfer', incomeRef: '', destination: 'satellite_passthrough' }
+    : { id, type: 'withdrawal', date, amount, description, reference, recordedBy: actor.name, authorizedBy: actor.name, destination: 'satellite_passthrough' };
+  await createCashTransaction(DB, tx);
+  return id;
+}
+
+async function loanAction(DB, id, action, data, authz) {
+  const actor = await loanActor(DB, authz);
+  if (actor instanceof Response) return actor;
+  const loan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(id).first();
+  if (!loan) return err('Loan not found', 404);
+  const now = new Date().toISOString();
+  const where = loan.direction === 'lent' ? `to ${loan.person}` : `from ${loan.person}`;
+
+  if (action === 'acknowledge') {
+    if (loan.status !== 'pending') return err('This loan is not waiting for acknowledgement.', 409);
+    if (loan.recorded_by_id === actor.id) return err('A different person must acknowledge this loan. You recorded it.', 403);
+    const claim = await DB.prepare(`UPDATE loans SET status='active', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=? WHERE id=? AND status='pending'`)
+      .bind(actor.id, actor.name, now, id).run();
+    if (!claim?.meta?.changes) return err('This loan was already handled.', 409);
+    let bankRef = '';
+    if (loan.channel === 'bank') {
+      try {
+        bankRef = await loanBankMirror(DB, {
+          moneyIn: loan.direction === 'borrowed', date: loan.date, amount: loan.amount,
+          description: `Loan ${where}${loan.purpose ? ': ' + loan.purpose : ''}`, reference: loan.reference, actor });
+        await DB.prepare(`UPDATE loans SET bank_ref=? WHERE id=?`).bind(bankRef, id).run();
+      } catch (e) {
+        await DB.prepare(`UPDATE loans SET status='pending', acknowledged_by_id='', acknowledged_by_name='', acknowledged_at='' WHERE id=?`).bind(id).run();
+        return err('Could not record the bank entry. Nothing was changed. Try again.', 500);
+      }
+    }
+    await writeAuditLog(DB, 'loan_acknowledged', `${actor.name} (${actor.role}) acknowledged the loan ${where} of ₦${Number(loan.amount).toLocaleString('en-NG')} recorded by ${loan.recorded_by_name}.`, actor.name);
+    return ok({ id, status: 'active', bankRef });
+  }
+
+  if (action === 'reject') {
+    if (loan.status !== 'pending') return err('Only a loan waiting for acknowledgement can be rejected.', 409);
+    const reason = String(data.reason || '').trim().slice(0, 300);
+    if (!reason) return err('Give a reason.', 400);
+    const claim = await DB.prepare(`UPDATE loans SET status='rejected', rejected_reason=?, acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=? WHERE id=? AND status='pending'`)
+      .bind(reason, actor.id, actor.name, now, id).run();
+    if (!claim?.meta?.changes) return err('This loan was already handled.', 409);
+    await writeAuditLog(DB, 'loan_rejected', `${actor.name} (${actor.role}) rejected the loan ${where} of ₦${Number(loan.amount).toLocaleString('en-NG')}: ${reason}`, actor.name);
+    return ok({ id, status: 'rejected' });
+  }
+
+  if (action === 'repay') {
+    if (loan.status !== 'active') return err('Repayments can only be added to an active loan.', 409);
+    const amount = Number(data.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return err('Enter an amount greater than zero.', 400);
+    const { results: reps } = await DB.prepare(`SELECT amount, status FROM loan_repayments WHERE loan_id=?`).bind(id).all();
+    const taken = (reps || []).filter(r => r.status === 'confirmed' || r.status === 'pending').reduce((s, r) => s + (r.amount || 0), 0);
+    if (amount > (loan.amount || 0) - taken + LOAN_EPS) {
+      return err(`That is more than is still owed (₦${Math.max(0, (loan.amount || 0) - taken).toLocaleString('en-NG')}, counting repayments waiting for acknowledgement).`, 400);
+    }
+    const rid = newId('LR-');
+    await DB.prepare(`
+      INSERT INTO loan_repayments (id, loan_id, amount, date, channel, reference, note, status, recorded_by_id, recorded_by_name)
+      VALUES (?,?,?,?,?,?,?, 'pending', ?,?)
+    `).bind(rid, id, amount, loanDateOrToday(data.date), data.channel === 'bank' ? 'bank' : 'cash',
+      String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name).run();
+    await writeAuditLog(DB, 'loan_repayment_recorded', `${actor.name} (${actor.role}) recorded a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${where}. Awaiting acknowledgement.`, actor.name);
+    await createNotification(DB, { title: 'Loan repayment awaiting acknowledgement', body: `${actor.name} recorded a repayment on the loan ${where}.`, type: 'info' });
+    return ok({ id: rid, status: 'pending' });
+  }
+
+  return err('Unknown loan action', 404);
+}
+
+async function loanRepaymentAction(DB, id, action, data, authz) {
+  const actor = await loanActor(DB, authz);
+  if (actor instanceof Response) return actor;
+  const rep = await DB.prepare(`SELECT * FROM loan_repayments WHERE id=?`).bind(id).first();
+  if (!rep) return err('Repayment not found', 404);
+  const loan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(rep.loan_id).first();
+  if (!loan) return err('Loan not found', 404);
+  const now = new Date().toISOString();
+  const where = loan.direction === 'lent' ? `to ${loan.person}` : `from ${loan.person}`;
+  if (rep.status !== 'pending') return err('This repayment was already handled.', 409);
+
+  if (action === 'acknowledge') {
+    if (rep.recorded_by_id === actor.id) return err('A different person must acknowledge this repayment. You recorded it.', 403);
+    const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=? WHERE id=? AND status='pending'`)
+      .bind(actor.id, actor.name, now, id).run();
+    if (!claim?.meta?.changes) return err('This repayment was already handled.', 409);
+    if (rep.channel === 'bank') {
+      try {
+        const ref = await loanBankMirror(DB, {
+          moneyIn: loan.direction === 'lent', date: rep.date, amount: rep.amount,
+          description: `Loan repayment ${loan.direction === 'lent' ? 'from' : 'to'} ${loan.person}`, reference: rep.reference, actor });
+        await DB.prepare(`UPDATE loan_repayments SET bank_ref=? WHERE id=?`).bind(ref, id).run();
+      } catch (e) {
+        await DB.prepare(`UPDATE loan_repayments SET status='pending', acknowledged_by_id='', acknowledged_by_name='', acknowledged_at='' WHERE id=?`).bind(id).run();
+        return err('Could not record the bank entry. Nothing was changed. Try again.', 500);
+      }
+    }
+    const { results: reps } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
+    const repaid = (reps || []).reduce((s, r) => s + (r.amount || 0), 0);
+    const settled = repaid >= (loan.amount || 0) - LOAN_EPS;
+    if (settled) await DB.prepare(`UPDATE loans SET status='settled', settled_at=? WHERE id=?`).bind(now, loan.id).run();
+    await writeAuditLog(DB, 'loan_repayment_acknowledged', `${actor.name} (${actor.role}) acknowledged a repayment of ₦${Number(rep.amount).toLocaleString('en-NG')} on the loan ${where}${settled ? '. The loan is now settled.' : '.'}`, actor.name);
+    return ok({ id, status: 'confirmed', loanSettled: settled });
+  }
+
+  if (action === 'reject') {
+    const reason = String(data.reason || '').trim().slice(0, 300);
+    if (!reason) return err('Give a reason.', 400);
+    const claim = await DB.prepare(`UPDATE loan_repayments SET status='rejected', rejected_reason=?, acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=? WHERE id=? AND status='pending'`)
+      .bind(reason, actor.id, actor.name, now, id).run();
+    if (!claim?.meta?.changes) return err('This repayment was already handled.', 409);
+    await writeAuditLog(DB, 'loan_repayment_rejected', `${actor.name} (${actor.role}) rejected a repayment on the loan ${where}: ${reason}`, actor.name);
+    return ok({ id, status: 'rejected' });
+  }
+  return err('Unknown repayment action', 404);
 }
 
 // ── CASH TRANSACTIONS ─────────────────────────────────────────────

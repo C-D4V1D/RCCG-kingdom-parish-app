@@ -911,6 +911,14 @@ const DB = {
   // behalf of satellite parishes. Excluded from income/expense totals; every
   // In/Out is mirrored into a bank movement server-side (see satellite-funds API).
   getSatelliteFunds()           { return apiFetch('satellite-funds'); },
+  // Loans are read by every church-balance calculation, so share one request for a few seconds.
+  getLoans(fresh)               {
+    const c = DB._loansCache;
+    if(!fresh && c && Date.now()-c.t < 5000) return c.p;
+    const p = Promise.resolve().then(()=>apiFetch('loans')).then(r=>Array.isArray(r)?r:[]).catch(()=>[]);
+    DB._loansCache = { t: Date.now(), p };
+    return p;
+  },
   addSatelliteFund(d)           { return apiFetch('satellite-funds','POST',d); },
   deleteSatelliteFund(id)       { return apiFetch(`satellite-funds/${id}`,'DELETE'); },
 
@@ -3772,6 +3780,7 @@ async function calcChurchBalance(asOfDate, prefetched){
     pf.cashTx || DB.getCashTransactions(), pf.pettyHistory || DB.getPetty(), pf.satelliteFunds || DB.getSatelliteFunds()
   ]);
   const remRates = pf.remRates || (await getRemRates()).rates || DEFAULT_REMITTANCE_RATES;
+  const loansAll = (pf.loans !== undefined ? pf.loans : await DB.getLoans()) || [];
 
   const recDate = r => String(r?.date || r?.dateNeeded || r?.createdAt || '').slice(0,10);
   const onOrBefore = r => !asOfDate || (function(){ const d=recDate(r); return !d || d <= asOfDate; })();
@@ -3861,7 +3870,23 @@ async function calcChurchBalance(asOfDate, prefetched){
   // Remittances paid out of the accountant's own cash (see paidRemsCash above) really did
   // leave their hand — must reduce this balance the same way a cash expense does, or the
   // accountant appears to be holding money they already paid to RCCG.
-  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut - paidRemsCash;
+  // Loans (lent out / borrowed). Only acknowledged loans count (status active or settled), and only
+  // repayments a second person confirmed. A loan or repayment made in cash has no bank mirror, so it is
+  // counted here on the accountant's cash line; bank ones already moved bankBalance through their mirror.
+  // Lending only moves money from "in hand" to "owed" (loansOwedToUs below), so the total is unchanged.
+  const loanLive = l => l && (l.status === 'active' || l.status === 'settled');
+  const loansF = loansAll.filter(l => loanLive(l) && onOrBefore(l));
+  const loanRepsF = loansAll.filter(loanLive).flatMap(l => (l.repayments || [])
+    .filter(r => r.status === 'confirmed' && onOrBefore(r)).map(r => ({ ...r, direction: l.direction })));
+  const loanCashNet =
+      loansF.filter(l => l.channel !== 'bank').reduce((s,l) => s + (l.direction === 'lent' ? -1 : 1) * (l.amount||0), 0)
+    + loanRepsF.filter(r => r.channel !== 'bank').reduce((s,r) => s + (r.direction === 'lent' ? 1 : -1) * (r.amount||0), 0);
+  const loanOpen = dir => Math.max(0,
+      loansF.filter(l => l.direction === dir).reduce((s,l) => s + (l.amount||0), 0)
+    - loanRepsF.filter(r => r.direction === dir).reduce((s,r) => s + (r.amount||0), 0));
+  const loansOwedToUs = loanOpen('lent');
+  const loansWeOwe = loanOpen('borrowed');
+  const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut - paidRemsCash + loanCashNet;
 
   // --- PETTY CASH (with Admin Officer) ---
   // Rebuild the float from raw ledger movements each time so historical snapshots stay
@@ -3887,11 +3912,16 @@ async function calcChurchBalance(asOfDate, prefetched){
     bankBalance,
     pettyFloat,
     heldForSatellites,
+    loansOwedToUs,
+    loansWeOwe,
+    // Money physically on hand: bank + cash with the accountant + petty cash. No satellite or loan balances.
+    onHand: cashWithAccountantRaw + bankBalance + pettyFloat,
     // total EXCLUDES heldForSatellites: it sits inside bankBalance (real bank money) but
     // is not the parish's own to spend. A 'transfer_out' entry reduces heldForSatellites
     // and — with no other change — raises `total` by the same amount, which is the
     // correct and complete balance effect of reclassifying held money as parish money.
-    total: cashWithAccountantRaw + bankBalance + pettyFloat - heldForSatellites
+    // Loans owed to us are added back and loans we owe taken off, so lending or borrowing never changes total.
+    total: cashWithAccountantRaw + bankBalance + pettyFloat - heldForSatellites + loansOwedToUs - loansWeOwe
   };
 }
 
