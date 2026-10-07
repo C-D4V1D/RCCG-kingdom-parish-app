@@ -3875,16 +3875,17 @@ async function calcChurchBalance(asOfDate, prefetched){
   // leave their hand — must reduce this balance the same way a cash expense does, or the
   // accountant appears to be holding money they already paid to RCCG.
   // Loans (lent out / borrowed). Only acknowledged loans count (status active or settled), and only
-  // repayments a second person confirmed. A loan or repayment made in cash has no bank mirror, so it is
-  // counted here on the accountant's cash line; bank ones already moved bankBalance through their mirror.
+  // repayments a second person confirmed. A loan or repayment made from the accountant's cash has no ledger
+  // mirror, so it is counted here on the accountant's cash line. Bank ones already moved bankBalance through
+  // their bank mirror, and petty cash ones moved the petty float through their petty entry.
   // Lending only moves money from "in hand" to "owed" (loansOwedToUs below), so the total is unchanged.
   const loanLive = l => l && (l.status === 'active' || l.status === 'settled');
   const loansF = loansAll.filter(l => loanLive(l) && onOrBefore(l));
   const loanRepsF = loansAll.filter(loanLive).flatMap(l => (l.repayments || [])
     .filter(r => r.status === 'confirmed' && onOrBefore(r)).map(r => ({ ...r, direction: l.direction })));
   const loanCashNet =
-      loansF.filter(l => l.channel !== 'bank').reduce((s,l) => s + (l.direction === 'lent' ? -1 : 1) * (l.amount||0), 0)
-    + loanRepsF.filter(r => r.channel !== 'bank').reduce((s,r) => s + (r.direction === 'lent' ? 1 : -1) * (r.amount||0), 0);
+      loansF.filter(l => (l.channel || 'cash') === 'cash').reduce((s,l) => s + (l.direction === 'lent' ? -1 : 1) * (l.amount||0), 0)
+    + loanRepsF.filter(r => (r.channel || 'cash') === 'cash').reduce((s,r) => s + (r.direction === 'lent' ? 1 : -1) * (r.amount||0), 0);
   const loanOpen = dir => Math.max(0,
       loansF.filter(l => l.direction === dir).reduce((s,l) => s + (l.amount||0), 0)
     - loanRepsF.filter(r => r.direction === dir).reduce((s,r) => s + (r.amount||0), 0));
@@ -9296,19 +9297,26 @@ async function renderRemittances(){
 // ── LOANS: money lent out / borrowed ──────────────────────────────────────────────────────────────────
 // Opened from the dashboard's Satellites & Loans card. One person records a loan, a DIFFERENT person
 // acknowledges it; nothing changes any balance until then (the server enforces both rules).
+function loanChannelLabel(c){ return c === 'bank' ? 'bank' : c === 'petty' ? 'petty cash' : 'accountant\'s cash'; }
+function loanChannelPicker(name){
+  return `<label style="display:block;margin:4px 0"><input type="radio" name="${name}" value="cash" checked /> Cash with the Accountant</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="${name}" value="petty" /> Petty cash (with the Admin Officer)</label>
+      <label style="display:block;margin:4px 0"><input type="radio" name="${name}" value="bank" /> Through the bank</label>`;
+}
 function loanWho(l){ return l.direction === 'lent' ? `Lent to ${esc(l.person)}` : `Borrowed from ${esc(l.person)}`; }
 
 function loanRepaymentLine(r, canDo, me){
-  const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ confirmed' : '✕ rejected';
+  const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ confirmed' : r.status === 'reversed' ? '↩ reversed' : '✕ rejected';
   const acts = (r.status === 'pending' && canDo && r.recordedById !== me)
     ? `<div style="margin-top:4px;display:flex;gap:6px">
          <button class="btn btn-primary btn-sm" onclick="App.acknowledgeLoanRepayment('${esc(r.id)}', this)">Acknowledge</button>
          <button class="btn btn-sm" onclick="App.showRejectLoan('repayment','${esc(r.id)}')">Reject</button>
        </div>`
-    : (r.status === 'pending' && r.recordedById === me ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">You recorded this, so someone else must acknowledge it.</div>' : '');
+    : (r.status === 'pending' && r.recordedById === me ? '<div style="font-size:11px;color:var(--text3);margin-top:2px">You recorded this, so someone else must acknowledge it.</div>'
+    : (r.status === 'confirmed' && state.user?.role === 'it_admin' ? `<div style="margin-top:4px"><button class="btn btn-sm" onclick="App.showRejectLoan('repayment_reverse','${esc(r.id)}')">Reverse</button></div>` : ''));
   return `<div style="font-size:12px;color:var(--text2);padding:6px 0;border-top:1px dashed var(--border)">
-    Repayment ${fmt(r.amount)} · ${esc(fmtDateShort(r.date))} · ${r.channel === 'bank' ? 'bank' : 'cash'} <span style="color:var(--text3)">${st}</span>
-    ${r.status === 'rejected' && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${acts}</div>`;
+    Repayment ${fmt(r.amount)} · ${esc(fmtDateShort(r.date))} · ${loanChannelLabel(r.channel)} <span style="color:var(--text3)">${st}</span>
+    ${(r.status === 'rejected' || r.status === 'reversed') && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${acts}</div>`;
 }
 
 function loanCard(l, canDo, me){
@@ -9330,13 +9338,18 @@ function loanCard(l, canDo, me){
     status = '<span style="color:var(--success);font-weight:600">✓ Fully repaid</span>';
   } else if(l.status === 'rejected'){
     status = `<span style="color:var(--danger)">✕ Not accepted${l.rejectedReason ? ': ' + esc(l.rejectedReason) : ''}</span>`;
+  } else if(l.status === 'reversed'){
+    status = `<span style="color:var(--text3)">↩ Reversed${l.rejectedReason ? ': ' + esc(l.rejectedReason) : ''}</span>`;
+  }
+  if((l.status === 'active' || l.status === 'settled') && state.user?.role === 'it_admin'){
+    actions += ` <button class="btn btn-sm" onclick="App.showRejectLoan('loan_reverse','${esc(l.id)}')">Reverse</button>`;
   }
   const reps = (l.repayments || []).map(r => loanRepaymentLine(r, canDo, me)).join('');
   return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">${loanWho(l)}</strong><strong style="font-size:14px">${fmt(l.amount)}</strong>
     </div>
-    <div style="font-size:11.5px;color:var(--text3);margin-top:2px">${esc(fmtDateShort(l.date))} · ${l.channel === 'bank' ? 'bank' : 'cash'}${l.purpose ? ' · ' + esc(l.purpose) : ''}${l.dueDate ? ' · due ' + esc(fmtDateShort(l.dueDate)) : ''} · recorded by ${esc(l.recordedByName || '')}</div>
+    <div style="font-size:11.5px;color:var(--text3);margin-top:2px">${esc(fmtDateShort(l.date))} · ${loanChannelLabel(l.channel)}${l.purpose ? ' · ' + esc(l.purpose) : ''}${l.dueDate ? ' · due ' + esc(fmtDateShort(l.dueDate)) : ''} · recorded by ${esc(l.recordedByName || '')}</div>
     <div style="font-size:12px;margin-top:4px">${status}</div>
     ${actions ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${actions}</div>` : ''}
     ${reps}
@@ -9352,7 +9365,7 @@ async function showLoans(){
     ? `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin:14px 0 2px">${title}</div>${list.map(l => loanCard(l, canDo, me)).join('')}` : '';
   const waiting = loans.filter(l => l.status === 'pending' || (l.repayments || []).some(r => r.status === 'pending'));
   const active  = loans.filter(l => l.status === 'active' && !waiting.includes(l));
-  const done    = loans.filter(l => l.status === 'settled' || l.status === 'rejected').slice(0, 15);
+  const done    = loans.filter(l => l.status === 'settled' || l.status === 'rejected' || l.status === 'reversed').slice(0, 15);
   closeModal();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -9379,9 +9392,9 @@ function showLoanForm(){
     <div class="form-group"><label class="form-label">Person or group</label><input id="ln_person" class="form-input" maxlength="100" placeholder="Name" /></div>
     <div class="form-group"><label class="form-label">Amount (₦)</label><input id="ln_amount" type="number" min="0" step="0.01" class="form-input" inputmode="decimal" /></div>
     <div class="form-group"><label class="form-label">Date</label><input id="ln_date" type="date" class="form-input" value="${today}" max="${today}" /></div>
-    <div class="form-group"><label class="form-label">How was the money handed over?</label>
-      <label style="display:block;margin:4px 0"><input type="radio" name="ln_channel" value="cash" checked /> Cash</label>
-      <label style="display:block;margin:4px 0"><input type="radio" name="ln_channel" value="bank" /> Through the bank</label></div>
+    <div class="form-group"><label class="form-label">Which money was used?</label>
+      ${loanChannelPicker('ln_channel')}
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Taken out of it when we lend, put into it when we borrow.</div></div>
     <div class="form-group"><label class="form-label">What is it for?</label><input id="ln_purpose" class="form-input" maxlength="200" /></div>
     <div class="form-group"><label class="form-label">Due date (optional)</label><input id="ln_due" type="date" class="form-input" /></div>
     <div class="form-group"><label class="form-label">Reference (optional)</label><input id="ln_ref" class="form-input" maxlength="100" /></div>
@@ -9433,10 +9446,11 @@ function showRejectLoan(kind, id){
   closeModal();
   showModal(`
     <button class="modal-close" onclick="closeModal()">✕</button>
-    <div class="modal-title">${kind === 'loan' ? 'Reject or cancel this loan' : 'Reject this repayment'}</div>
+    <div class="modal-title">${{ loan:'Reject or cancel this loan', repayment:'Reject this repayment', loan_reverse:'Reverse this loan', repayment_reverse:'Reverse this repayment' }[kind] || 'Reason'}</div>
+    ${kind.endsWith('_reverse') ? '<div class="alert alert-warn"><span class="alert-icon">⚠</span><span>This undoes the money movement. The entry stays in the list as reversed, with your reason, and is written to the audit log.</span></div>' : ''}
     <div class="form-group"><label class="form-label">Reason</label><input id="ln_reason" class="form-input" maxlength="300" placeholder="Why?" /></div>
     <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
-      <button class="btn btn-danger" onclick="App.submitRejectLoan('${kind === 'loan' ? 'loan' : 'repayment'}','${esc(id)}', this)">Confirm</button></div>`);
+      <button class="btn btn-danger" onclick="App.submitRejectLoan('${esc(kind)}','${esc(id)}', this)">Confirm</button></div>`);
   setTimeout(() => document.getElementById('ln_reason')?.focus(), 100);
 }
 
@@ -9445,8 +9459,9 @@ async function submitRejectLoan(kind, id, btn=null){
   if(!reason){ showAlert('Give a reason.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
   try {
-    if(kind === 'loan') await DB.loanAction(id, 'reject', { reason });
-    else await DB.loanRepaymentAction(id, 'reject', { reason });
+    const action = kind.endsWith('_reverse') ? 'reverse' : 'reject';
+    if(kind.startsWith('loan')) await DB.loanAction(id, action, { reason });
+    else await DB.loanRepaymentAction(id, action, { reason });
   } catch(err){ restore(); showAlert(err.message,'danger'); return; }
   showAlert('Done.','success');
   await showLoans();
@@ -9466,9 +9481,9 @@ async function showLoanRepaymentForm(loanId){
     <div style="font-size:12.5px;color:var(--text2);margin-bottom:10px">${loanWho(l)} · ${fmt(l.outstanding)} still ${l.direction === 'lent' ? 'owed to us' : 'to pay'}</div>
     <div class="form-group"><label class="form-label">Amount paid (₦)</label><input id="lr_amount" type="number" min="0" step="0.01" class="form-input" inputmode="decimal" value="${l.outstanding}" /></div>
     <div class="form-group"><label class="form-label">Date</label><input id="lr_date" type="date" class="form-input" value="${today}" max="${today}" /></div>
-    <div class="form-group"><label class="form-label">How was it paid?</label>
-      <label style="display:block;margin:4px 0"><input type="radio" name="lr_channel" value="cash" checked /> Cash</label>
-      <label style="display:block;margin:4px 0"><input type="radio" name="lr_channel" value="bank" /> Through the bank</label></div>
+    <div class="form-group"><label class="form-label">Which money was used?</label>
+      ${loanChannelPicker('lr_channel')}
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">${l.direction === 'lent' ? 'The repayment is put into it.' : 'The repayment is taken out of it.'}</div></div>
     <div class="form-group"><label class="form-label">Reference (optional)</label><input id="lr_ref" class="form-input" maxlength="100" /></div>
     <div class="alert alert-warn"><span class="alert-icon">ℹ</span><span>A different person must acknowledge this repayment before it counts.</span></div>
     <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>

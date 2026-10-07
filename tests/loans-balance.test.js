@@ -220,3 +220,30 @@ test('budget block: when new spending is used up by money owed, the badge no lon
   const t = strip(App._renderDashBudgetBreakdown(budgetAvail(), '2026-10-25', 100000, '#000', 90000));
   assert.match(t, /Nothing spare/);
 });
+
+test('petty cash loans: moved through the petty ledger, never double counted on the accountant\'s cash line', async () => {
+  // lent 12,000 from petty: petty disbursement mirror; total unchanged
+  const pettyHistory = [{ type: 'disbursement', status: 'approved', amount: 12000, date: '2026-10-05', dateNeeded: '2026-10-05' }];
+  const b = await balance({ income, pettyHistory, loans: [loan({ channel: 'petty', amount: 12000 })] });
+  assert.equal(b.cashWithAccountant, 100000);   // untouched
+  assert.equal(b.pettyFloat, -12000);
+  assert.equal(b.loansOwedToUs, 12000);
+  assert.equal(b.total, 100000);
+  // borrowed into petty: petty refill paid by 'loan'
+  const refill = [{ type: 'refill', status: 'approved', amount: 7000, paymentMethod: 'loan', date: '2026-10-06', dateNeeded: '2026-10-06' }];
+  const b2 = await balance({ income, pettyHistory: refill, loans: [loan({ channel: 'petty', direction: 'borrowed', amount: 7000, date: '2026-10-06' })] });
+  assert.equal(b2.cashWithAccountant, 100000);
+  assert.equal(b2.bankBalance, 0);               // a 'loan' refill is not taken from the bank
+  assert.equal(b2.pettyFloat, 7000);
+  assert.equal(b2.loansWeOwe, 7000);
+  assert.equal(b2.total, 100000);
+});
+
+test('reversed loans and repayments count for nothing', async () => {
+  const l = loan({ status: 'reversed', repayments: [rep()] });
+  const b = await balance({ income, loans: [l] });
+  assert.equal(b.cashWithAccountant, 100000);
+  assert.equal(b.loansOwedToUs, 0);
+  const l2 = loan({ repayments: [rep({ status: 'reversed' })] });
+  assert.equal((await balance({ income, loans: [l2] })).loansOwedToUs, 30000);
+});

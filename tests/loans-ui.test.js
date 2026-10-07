@@ -145,3 +145,36 @@ test('a repayment is sent to the loan with the amount typed', async () => {
   assert.equal(posts[0].body.amount, 4000);
   assert.equal(posts[0].body.channel, 'cash');
 });
+
+test('the record form offers the three kinds of money; the IT admin alone gets Reverse buttons', async () => {
+  App._setTestUser({ id: 'u1', name: 'Me', role: 'accountant' });
+  await App.showLoanForm();
+  const form = lastOverlay.innerHTML;
+  assert.match(form, /Cash with the Accountant/);
+  assert.match(form, /Petty cash \(with the Admin Officer\)/);
+  assert.match(form, /Through the bank/);
+
+  loans = sample();
+  loans[2].repayments = [{ id: 'R-ok', status: 'confirmed', amount: 2000, date: '2026-10-06', channel: 'petty', recordedById: 'u2' }];
+  App._setTestUser({ id: 'u1', name: 'Me', role: 'accountant' });
+  await App.showLoans();
+  assert.doesNotMatch(lastOverlay.innerHTML, /_reverse/);
+  assert.match(lastOverlay.innerHTML, /petty cash/);                       // the channel is named in plain words
+  App._setTestUser({ id: 'u7', name: 'Admin', role: 'it_admin' });
+  await App.showLoans();
+  assert.match(lastOverlay.innerHTML, /showRejectLoan\('loan_reverse','A-1'\)/);
+  assert.match(lastOverlay.innerHTML, /showRejectLoan\('repayment_reverse','R-ok'\)/);
+});
+
+test('reversing needs a reason and goes to the reverse endpoints', async () => {
+  App._setTestUser({ id: 'u7', name: 'Admin', role: 'it_admin' });
+  loans = sample();
+  posts.length = 0;
+  els.ln_reason = Object.assign(makeElement('ln_reason'), { value: '' });
+  await App.submitRejectLoan('loan_reverse', 'A-1', null);
+  assert.equal(posts.length, 0);
+  els.ln_reason.value = 'Entered twice';
+  await App.submitRejectLoan('loan_reverse', 'A-1', null);
+  await App.submitRejectLoan('repayment_reverse', 'R-ok', null);
+  assert.deepEqual(posts.map(p => [p.path, p.body.reason]), [['loans/A-1/reverse', 'Entered twice'], ['loan-repayments/R-ok/reverse', 'Entered twice']]);
+});
