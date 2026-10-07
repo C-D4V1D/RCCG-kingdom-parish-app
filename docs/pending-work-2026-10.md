@@ -15,7 +15,10 @@ No real figures, names with contact details, addresses or keys belong here (this
 | WhatsApp small fixes (clerk-box PR 5) and reminder ladder (PR 6) | Done, merged 7 Oct |
 | Deposit post shows the app's real total Cash with Accountant | Not started. The app has no endpoint for it, so it needs a new read-only figure from the app |
 | Whole box on Nigerian time, remaining smaller items (loose name matching, state growth, rebuild-every-10-min efficiency) | Not started |
-| Dashboard rework and Loans | Designed, mockup approved, not built |
+| Loans: server, balance maths, dashboard rework, loan screens (app PRs 399, 400, 401) | Done and merged 7 Oct. Needs a real two-login trial by the owner |
+| Loans: optional receipt upload with the advisory AI check | Not started |
+| Loans: loan lines in the detailed cash ledger views (Cash Pool modal, Sunday cash cycles, Bank page) | Not started. The balance is correct; only those breakdown lists omit cash loan movements |
+| Loans: reminders for due dates, per-role notifications | Later, not version 1 |
 
 ## 1. Wording: "Monthly report" becomes "Monthly attendance report"
 
