@@ -8,10 +8,13 @@ No real figures, names with contact details, addresses or keys belong here (this
 | Item | State |
 |---|---|
 | WhatsApp wording, Saturday week, Nigerian time, dry runs (clerk-box PR 1) | Done and live on the box |
-| WhatsApp retry of failed sends, outbox (clerk-box PR 2) | Open, waiting for the owner's OK to merge |
+| WhatsApp retry of failed sends, outbox (clerk-box PR 2) | Merged 7 Oct |
 | Box update check blocked by "dirty tree" | Fixed on the box (see "Box operations") |
-| Monthly attendance report wording | Not started |
-| WhatsApp cash amounts match the app's Cash with Accountant | Not started |
+| Monthly attendance report wording (app PR 397, clerk-box PR 3) | Done, merged 7 Oct |
+| WhatsApp cash amounts match the app (clerk-box PR 4) | Done, merged 7 Oct. Box subtracts the children's teacher share using the app's rate from settings. The rule now lives in two places |
+| WhatsApp small fixes (clerk-box PR 5) and reminder ladder (PR 6) | Done, merged 7 Oct |
+| Deposit post shows the app's real total Cash with Accountant | Not started. The app has no endpoint for it, so it needs a new read-only figure from the app |
+| Whole box on Nigerian time, remaining smaller items (loose name matching, state growth, rebuild-every-10-min efficiency) | Not started |
 | Dashboard rework and Loans | Designed, mockup approved, not built |
 
 ## 1. Wording: "Monthly report" becomes "Monthly attendance report"
