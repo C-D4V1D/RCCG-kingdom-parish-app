@@ -2427,6 +2427,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
 
     // ── /api/dashboard — batched first-load payload ────────────
     if (route === 'dashboard' && method === 'GET' && !param) return await getDashboardBatch(DB);
+    if (route === 'whatsapp-finance-events' && method === 'GET' && !param) return await getWhatsappFinanceEvents(DB, authz);
     if (route === 'accountant-cash-pool' && method === 'GET' && !param) return await getAccountantCashPool(DB);
 
     // ── /api/income ────────────────────────────────────────────
@@ -6162,6 +6163,22 @@ async function getCashPhoto(DB, id) {
 // and reparse their JSON, so the batch can never drift from the individual
 // endpoints. getRemRates is derived from settings on the client, so it needs
 // no entry here.
+// Scoped read feed for the authorized church WhatsApp loan/deposit notices. No purpose, notes or credentials.
+async function getWhatsappFinanceEvents(DB, authz) {
+  if (!authz?.automation && !LOAN_ROLES.includes(authz?.finance?.role)) return err('Finance access required.', 403);
+  const [loanRes, cashRes, poolRes] = await Promise.all([getLoans(DB, {finance:{role:'it_admin'}}), getCashTransactions(DB), getAccountantCashPool(DB)]);
+  if (![loanRes,cashRes,poolRes].every(r=>r.ok)) throw new Error('WhatsApp finance source unavailable');
+  const [loans,cash,pool] = await Promise.all([loanRes.json(),cashRes.json(),poolRes.json()]);
+  const response = ok({
+    loans:loans.map(l=>({id:l.id,person:l.person,direction:l.direction,amount:l.amount,date:l.date,channel:l.channel,status:l.status,
+      repayments:l.repayments.map(r=>({id:r.id,amount:r.amount,date:r.date,channel:r.channel,status:r.status}))})),
+    deposits:cash.filter(t=>t.type==='cash_deposit'&&t.destination!=='satellite_passthrough').map(t=>({id:t.id,groupId:t.groupId,date:t.date,amount:t.amount,recordedBy:t.recordedBy,verificationStatus:t.verificationStatus})),
+    pool
+  });
+  response.headers.set('Cache-Control','no-store');
+  return response;
+}
+
 async function getAccountantCashPool(DB) {
   const [income, expenses, petty, settings, remittances, cashTx, satelliteFunds, loans] = await Promise.all([
     getIncome(DB), getExpenses(DB), getPetty(DB), getSettings(DB), getRemittances(DB), getCashTransactions(DB),

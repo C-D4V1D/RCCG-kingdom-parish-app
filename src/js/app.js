@@ -20515,6 +20515,39 @@ function automationsTelegramBot(saved){
     unknown_contact: contact || d.unknown_contact,
   };
 }
+const AUTOMATION_WHATSAPP_SAMPLES = [
+  {key:'cash',label:'Cash not yet deposited',when:'Daily at the configured morning time while cash remains. Fresh app total, no guess on fetch failure.',sample:'*Cash not yet deposited*\n\nTotal cash with {role:accountant}: N44,170.70\n\nPlease deposit the outstanding cash into the church bank account and record it in the app. God bless.\n\nRCCG KP AI Clerk'},
+  ...['CREDIT','DEBIT'].map(kind=>({key:'bank-'+kind,label:'Bank NET '+kind,when:'When a new bank balance check differs from the previous check. This is a net change, not an individual transaction.',sample:`Kingdom Parish · Access Bank\n\n*NET ${kind}*\n\nAmount: ₦47\nTime: Wed 7 Oct, 9:49 PM - Thu 8 Oct, 6:02 AM\nBalance: ₦34,441.73\n\nRCCG KP AI Clerk`})),
+  ...[false,true].map(full=>({key:'deposit-'+full,label:full?'Deposit recorded - no cash remaining':'Deposit recorded - partial',when:'Once an effective parish deposit is recorded. Grouped deposit entries produce one post. Fresh total cash remaining.',sample:`✅ Cash deposit recorded\n\n{role:accountant} deposited ${full?'₦44,170.70':'₦20,000'} into the church bank account.\nDeposit date: Thu 8 Oct\nTotal cash still with Accountant: ${full?'₦0':'₦24,170.70'}\n\n${full?'No cash remains with the Accountant. God bless.':'Please deposit the remaining cash and record it in the app. God bless.'}\n\nRCCG KP AI Clerk`})),
+];
+function automationsWhatsappSamplesHtml(config){
+  const samples=[...AUTOMATION_WHATSAPP_SAMPLES];
+  for(const channel of ['Cash with Accountant','Church bank account','Petty cash']){
+    for(const [key,title,person,amountLabel,direction,status] of [
+      ['given','🤝 LOAN GIVEN','Borrower','Amount lent','Paid from','Loan status: Acknowledged'],
+      ['received','✅ LOAN REPAYMENT RECEIVED','Borrower','Amount repaid','Received into','Repayment status: Confirmed'],
+      ['borrowed','📥 LOAN RECEIVED BY CHURCH','Lender','Amount borrowed','Received into','Loan status: Acknowledged'],
+      ['paid','📤 LOAN REPAYMENT PAID','Lender','Amount repaid','Paid from','Repayment status: Confirmed']]){
+      const repayment=key==='received'||key==='paid';
+      samples.push({key:key+'-'+channel,label:title+' · '+channel,when:'After acknowledgement or confirmation. Names included; existing loans are not posted when enabled. Repayment samples show a partial repayment. The final repayment adds "Loan fully repaid."',sample:`Kingdom Parish · Loans\n\n*${title}*\n\n${person}: Bro. John\n${amountLabel}: ${repayment?'₦5,000':'₦10,000'}\nDate: Thu 8 Oct\n${direction}: ${channel}\n${repayment?'Loan balance remaining: ₦5,000\n':''}${status}\nTotal cash with Accountant: ₦44,170.70\n${channel==='Cash with Accountant'?'':'\nThis '+(channel==='Church bank account'?'bank':'petty cash')+' payment does not change cash with the Accountant.\n'}\nRCCG KP AI Clerk`});
+    }
+  }
+  for(const [key,label,when,sample] of AUTOMATION_WHATSAPP_EXISTING_SAMPLES) samples.push({key,label,when,sample});
+  return `<details class="at-details"><summary>WhatsApp message samples</summary><div class="at-details-body"><p class="at-note">Read-only examples, not live transactions. Names, amounts and dates are illustrative. Opening a sample sends nothing and does not change settings.</p>${samples.map(g=>`<details class="at-guide-item"><summary>${esc(g.label)}</summary><p><b>When it's sent:</b> ${esc(g.when)}</p><div class="at-guide-label">Example (WhatsApp) · Approved</div><div class="at-guide-sample">${esc(automationsHelpText(g.sample,config))}</div></details>`).join('')}</div></details>`;
+}
+const AUTOMATION_WHATSAPP_EXISTING_SAMPLES = [
+ ['collection','Sunday collection recorded','When a Sunday collection is saved.',"✅ {role:accountant} recorded the Sun 4 Oct collection.\n\n**Collection for Sun 4 Oct: ₦35,200 • Cash: ₦27,200 • Bank: ₦8,000**\n\nNext step: deposit the cash into the church bank account and record it in the app.\n\nRCCG KP AI Clerk"],
+ ['attendance','Sunday attendance recorded','When Sunday attendance is saved.',"✅ Head Usher (example) filled the attendance for Sun 4 Oct.\n\n**Total attendance: 100 • Men: 30 • Women: 40 • Children: 30**\n\nRCCG KP AI Clerk"],
+ ['missing','Sunday collection missing','Morning reminder for an earlier Sunday with attendance in but no collection.',"⚠️ Sunday collection not yet recorded\n\n**Sun 4 Oct**\n\n{role:accountant}, remember to record it in the app as soon as possible. God bless.\n\nRCCG KP AI Clerk"],
+ ['missing-attendance','Sunday attendance and collection missing','Morning reminder when attendance must be entered first.',"⚠️ Sunday attendance and collection not yet recorded\n\n**Sun 4 Oct**\n\nAttendance first, then the collection. Please record them in the app as soon as possible. God bless.\n\nRCCG KP AI Clerk"],
+ ['memo','New memo','Alongside the memo email; attachment claim reflects whether the file exists.',"New RCCG memo\n\n**Special Thanksgiving Service**\n\nFrom: RCCG Region 25\nDate: Thu 8 Oct\nRef: RCCG/REG/2026/114\n\nThe memo PDF is attached.\n\nRCCG KP AI Clerk"],
+ ['memo-failed','Memo not forwarded','When memo forwarding reports a failure.',"❌ Memo not forwarded\n\n**Special Thanksgiving Service**\n\nRef: RCCG/REG/2026/114\n\nRCCG KP AI Clerk"],
+ ['statement','Monthly financial statement','Alongside the monthly statement email; includes its actual link and available PDF.',"📄 Kingdom Parish monthly financial statement\n\n**Period 24 Aug to 20 Sep 2026**\n\nOpen the statement (PDF attached). Same as the email.\n[statement link]\n\nRCCG KP AI Clerk"],
+ ['statement-failed','Statement not sent','When the statement workflow reports a failure.',"❌ Monthly financial statement was not sent\n\n**Period 24 Aug to 20 Sep 2026**\n\nRCCG KP AI Clerk"],
+ ['refresh','Refresh requested','When a user presses Refresh in the clerk workflow.',"🔄 {role:david} pressed Refresh. The check is being rebuilt."],
+ ['saturday','Saturday spending note','Weekly at the configured Saturday time.',"Kingdom Parish · Saturday\n\n**Week 3**\n\nSpent this week: ₦20,000\n\n₦50,000 (50%) of the ₦100,000 October budget spent so far.\n\nOctober remittance month ends in 2 Sundays.\n\nRCCG KP AI Clerk"],
+ ['checklist','Remittance checklist / unpaid RRR reminder','On remittance day and while the RRR remains unpaid. Each check reflects actual completion evidence.',"Kingdom Parish · October remittance\n\n**Today, Sun 18 Oct, is remittance day.**\n\n⏳ Sun attendance filled\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
+];
 function automationsWhatsappSectionHtml(saved, saveBar){
   const s = saved || {};
   const wa = { ...AUTOMATION_WHATSAPP_DEFAULTS, ...s };
@@ -20546,7 +20579,7 @@ function automationsWhatsappSectionHtml(saved, saveBar){
         <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">When something happens</div>
         ${automationsBoolField('automations.whatsapp.sunday_records.enabled', sr.enabled, 'Sunday attendance and collection', "Posted the moment attendance or a collection is saved in the app — the app tells the box straight away. The safety look below only catches a signal that went missing.")}
         <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.sunday_records.every_minutes', sr.every_minutes, 'Safety look for new records every (minutes)', 5, 720)}</div>
-        ${automationsBoolField('automations.whatsapp.bank_movements.enabled', bm.enabled, 'Bank movements', 'A CREDIT or DEBIT note when the church bank balance moves, with the new balance. The portal only gives the balance, so there is no sender or recipient.')}
+        ${automationsBoolField('automations.whatsapp.bank_movements.enabled', bm.enabled, 'Bank movements', 'A NET CREDIT or NET DEBIT note when the church bank balance moves, with the new balance. The portal only gives the balance, so there is no sender or recipient.')}
         ${automationsBoolField('automations.whatsapp.memo.enabled', mm.enabled, 'New memos', 'A new RCCG memo is posted with its PDF attached, at the same time as it is emailed.')}
         ${automationsBoolField('automations.whatsapp.statement.enabled', st.enabled, 'Monthly statement', 'The monthly statement is posted with its PDF and a link to view it, at the same time as it is emailed.')}
         ${saveBar}
@@ -21274,6 +21307,8 @@ function renderAutomationsSettings(config, isDefault, health){
     </details>
 
     ${automationsWhatsappSectionHtml(a.whatsapp, saveBar)}
+
+    ${automationsWhatsappSamplesHtml(config)}
 
     ${automationsTelegramBotSectionHtml(a.telegram_bot, saveBar)}
 
