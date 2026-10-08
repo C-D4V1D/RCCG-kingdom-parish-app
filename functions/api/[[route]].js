@@ -13320,6 +13320,31 @@ const CHURCH_BANK_CHARGE_SUBCATS = [
   'Other bank charges',
 ];
 
+function parseFirstBankAlert(t) {
+  const dt = t.match(/Date\/Time\s+(\d{2}-[A-Za-z]{3}-\d{2,4})\s+\d{1,2}:\d{2}\s*[AP]M/i);
+  const acct = t.match(/Account Number\s+([0-9Xx*]+)/i);
+  const amt = t.match(/Amount\s+([0-9,]+\.\d{2})\s*(DR|CR)/i);
+  const narr = t.match(/Narration\s+(.+?)(?:Cleared Balance|Uncleared Balance|Please click|$)/i);
+  const bal = t.match(/Cleared Balance\s+(?:NGN)?\s*([0-9,]+\.\d{2})\s*(CR|DR)/i);
+  if (!dt || !acct || !amt) return null;
+  const dm = dt[1].match(/^(\d{2})-([A-Za-z]{3})-(\d{2,4})$/);
+  const MON = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
+  if (!dm || !MON[dm[2].toLowerCase()]) return null;
+  const yr = dm[3].length === 2 ? '20' + dm[3] : dm[3];
+  const isoDate = `${yr}-${MON[dm[2].toLowerCase()]}-${dm[1]}`;
+  const narration = (narr ? narr[1].trim() : '').slice(0, 200);
+  const CHARGE = /stamp duty|sms alert charge|\bcharges?\b|\bvat\b|maintenance|commission on turnover|\bcot\b|cheque book|card (?:fee|maintenance)|pos charge|sms charge/i;
+  return {
+    isBankCharge: amt[2].toUpperCase() === 'DR' && CHARGE.test(narration),
+    date: isoDate,
+    amount: parseFloat(amt[1].replace(/,/g, '')),
+    reference: narration,
+    narration,
+    accountNumber: acct[1],
+    availableBalance: bal ? parseFloat(bal[1].replace(/,/g, '')) : null,
+  };
+}
+
 function buildBankChargeClassifierPrompt(subject, bodyText) {
   return `You are a bank transaction email classifier. Analyze this email and determine if it is a bank-initiated charge/fee (NOT a regular transfer, deposit, or withdrawal by the account holder).
 
@@ -13470,14 +13495,22 @@ async function ingestBankChargeEmail(DB, env, request, body) {
     }
   }
 
+  // Deterministic FirstBank template parse first; AI only as fallback for
+  // non-template mail. Keeps the charge path working when AI keys are down.
   let aiResult, aiProvider;
-  try {
-    const classified = await classifyBankChargeEmail(DB, env, subject, bodyText);
-    aiResult = classified.result;
-    aiProvider = classified.provider;
-  } catch (e) {
-    await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail=? WHERE id=?`).bind(String(e.message).slice(0, 500), logId).run();
-    return err(`AI classification failed: ${e.message}`, 502);
+  const parsed = parseFirstBankAlert(bodyText);
+  if (parsed) {
+    aiResult = parsed;
+    aiProvider = 'deterministic';
+  } else {
+    try {
+      const classified = await classifyBankChargeEmail(DB, env, subject, bodyText);
+      aiResult = classified.result;
+      aiProvider = classified.provider;
+    } catch (e) {
+      await DB.prepare(`UPDATE email_ingest_log SET outcome='error', error_detail=? WHERE id=?`).bind(String(e.message).slice(0, 500), logId).run();
+      return err(`AI classification failed: ${e.message}`, 502);
+    }
   }
 
   await DB.prepare(`UPDATE email_ingest_log SET ai_response=? WHERE id=?`)
@@ -13516,9 +13549,21 @@ async function ingestBankChargeEmail(DB, env, request, body) {
     return err('AI extracted incomplete data (missing date or amount)', 502);
   }
 
-  const dupFinance = await DB.prepare(
-    `SELECT id FROM kpsc_finance_entries WHERE entry_type='expense' AND date=? AND amount=? AND narration=? AND (deleted_at IS NULL OR deleted_at='')`
+  // Duplicate guard, two tiers (box-ops review):
+  // 1) Manual entries (recorded_by != 'AI Email Ingest') often have EMPTY
+  //    narration, so a same-day same-amount manual bank charge means a human
+  //    already recorded it - skip regardless of the alert's narration.
+  // 2) Ingested rows keep exact date+amount+narration matching, so genuinely
+  //    distinct same-day same-amount charges (e.g. two FIP fees) both record
+  //    as long as their narrations differ; identical-narration repeats are
+  //    treated as re-deliveries and skipped.
+  const dupManual = await DB.prepare(
+    `SELECT id FROM kpsc_finance_entries WHERE entry_type='expense' AND category='bank_charges' AND date=? AND amount=? AND recorded_by != 'AI Email Ingest' AND (narration IS NULL OR narration='') AND (deleted_at IS NULL OR deleted_at='')`
+  ).bind(date, amount).first();
+  const dupIngest = await DB.prepare(
+    `SELECT id FROM kpsc_finance_entries WHERE entry_type='expense' AND category='bank_charges' AND date=? AND amount=? AND narration=? AND recorded_by = 'AI Email Ingest' AND (deleted_at IS NULL OR deleted_at='')`
   ).bind(date, amount, narration).first();
+  const dupFinance = dupManual || dupIngest;
   if (dupFinance) {
     await DB.prepare(`UPDATE email_ingest_log SET outcome='skipped_duplicate', finance_entry_id=? WHERE id=?`).bind(dupFinance.id, logId).run();
     return ok({ skipped: true, reason: 'duplicate_entry' });
@@ -16899,3 +16944,4 @@ async function getSharedReport(DB, token) {
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
 export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, findDetailPartGroups, inferDirectionFromNarration, applyNarrationDirections };
+
