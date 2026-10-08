@@ -8630,7 +8630,7 @@ async function refineAgendaSms(DB, body) {
     });
     if (!resp.ok) return ok({ refined: '', error: `DeepSeek API error: ${resp.status}` });
     const data = await resp.json();
-    const refined = (data.choices?.[0]?.message?.content || '').trim();
+    const refined = whatsappDraftMarkup((data.choices?.[0]?.message?.content || '').trim());
     return ok({ refined });
   } catch (e) {
     return ok({ refined: '', error: `Refinement failed: ${e.message}` });
@@ -15443,7 +15443,7 @@ ${lastMeetingContext ? `## Context from Last Meeting\n${lastMeetingContext}` : '
     });
     if (!resp.ok) throw new Error(`DeepSeek error ${resp.status}`);
     const data = await resp.json();
-    const messageText = (data.choices?.[0]?.message?.content || '').trim() || fallbackMessage;
+    const messageText = whatsappDraftMarkup((data.choices?.[0]?.message?.content || '').trim() || fallbackMessage);
     await DB.prepare(`UPDATE kpsc_whatsapp_drafts SET message_text=?, updated_at=? WHERE id=?`)
       .bind(messageText, new Date().toISOString(), id).run();
     return ok({ messageText, source: 'ai' });
@@ -15454,10 +15454,17 @@ ${lastMeetingContext ? `## Context from Last Meeting\n${lastMeetingContext}` : '
   }
 }
 
+function whatsappLiteral(value) {
+  return String(value || '').replace(/([*_~`])/g, '\u200b$1\u200b');
+}
+function whatsappDraftMarkup(value) {
+  return String(value || '').replace(/\*\*([^*]+)\*\*/g, (_,t)=>t.split('\n').map(l=>l?'*'+l+'*':'').join('\n'));
+}
+
 function buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, venue, urgency, tagAll, agendaList, urgencyNote, tagLine }) {
   const agendaLines = agendaItems.map((item, i) => {
     const label = typeof item === 'string' ? item : (item.topic || String(item));
-    return `${EMOJI_NUMS[i] || `${i+1}.`} ${label}`;
+    return `${EMOJI_NUMS[i] || `${i+1}.`} ${whatsappLiteral(label)}`;
   }).join('\n');
 
   const urgencyHeader = urgency === 'urgent'
@@ -15466,7 +15473,7 @@ function buildFallbackWhatsappMessage({ agendaItems, dateDisplay, meetingTime, v
     ? '📢 *EXTRAORDINARY MEETING NOTICE* 📢\n\n'
     : '';
 
-  return `${urgencyHeader}${tagAll ? '@all\n\n' : ''}*KPSC Meeting Notice*\n\nDear Committee Members,\n\nYou are cordially invited to our next committee meeting.\n\n📅 *Date:* ${dateDisplay || 'To be confirmed'}\n🕐 *Time:* ${meetingTime}\n📍 *Venue:* ${venue}\n\n*Agenda:*\n${agendaLines || '(Agenda to be confirmed)'}\n\n_Please make every effort to attend. Kindly notify the secretary if you are unable to attend._\n\n_"As iron sharpens iron, so one person sharpens another." — Prov 27:17_\n\n— KPSC Secretariat`;
+  return `${urgencyHeader}${tagAll ? '@all\n\n' : ''}*KPSC Meeting Notice*\n\nDear Committee Members,\n\nYou are cordially invited to our next committee meeting.\n\n📅 *Date:* ${dateDisplay || 'To be confirmed'}\n🕐 *Time:* ${whatsappLiteral(meetingTime)}\n📍 *Venue:* ${whatsappLiteral(venue)}\n\n*Agenda:*\n${agendaLines || '(Agenda to be confirmed)'}\n\n_Please make every effort to attend. Kindly notify the secretary if you are unable to attend._\n\n_"As iron sharpens iron, so one person sharpens another." — Prov 27:17_\n\n— KPSC Secretariat`;
 }
 
 async function refineWhatsappMessage(DB, env, id, body) {
@@ -15505,7 +15512,7 @@ async function refineWhatsappMessage(DB, env, id, body) {
   });
   if (!resp.ok) return err(`AI service error: ${resp.status}`, 502);
   const data = await resp.json();
-  const refined = (data.choices?.[0]?.message?.content || '').trim();
+  const refined = whatsappDraftMarkup((data.choices?.[0]?.message?.content || '').trim());
   if (!refined) return err('AI returned an empty response. Please try again.', 502);
   return ok({ messageText: refined });
 }

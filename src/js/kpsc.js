@@ -11871,6 +11871,8 @@ function exportActionItemsMd() {
 
 // ── WhatsApp notifications ─────────────────────────────────────────
 
+function whatsappLiteral(value) { return String(value || '').replace(/([*_~`])/g, '\u200b$1\u200b'); }
+
 function notifyAllPendingActionItems() {
   const all = buildActionItems(S.meetings, S.actionItems);
   const pending = all.filter(e => e.status !== 'done' && e.status !== 'cancelled');
@@ -11882,11 +11884,11 @@ function notifyAllPendingActionItems() {
   }
   const lines = [`*KPSC Action Items — ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}*\n`];
   for (const [assignee, items] of [...byAssignee.entries()].sort(([a],[b])=>a.localeCompare(b))) {
-    lines.push(`\n*${assignee}:*`);
+    lines.push(`\n*${whatsappLiteral(assignee)}:*`);
     items.forEach((e, i) => {
       const due = e.dueDate ? ` (due ${e.dueDate})` : '';
       const flag = e.isOverdue ? ' ⏰' : '';
-      lines.push(`${i+1}. ${e.task}${due}${flag}`);
+      lines.push(`${i+1}. ${whatsappLiteral(e.task)}${due}${flag}`);
     });
   }
   window.open(`https://wa.me/?text=${encodeURIComponent(lines.join('\n'))}`, '_blank');
@@ -12748,7 +12750,7 @@ function shareInsightActions() {
   }
   const lines = [`*KPSC Action Items — ${new Date().toLocaleDateString('en-NG',{dateStyle:'long'})}*\n`];
   for (const [assignee, items] of [...byAssignee.entries()].sort(([a],[b])=>a.localeCompare(b))) {
-    lines.push(`\n*${assignee}:*`);
+    lines.push(`\n*${whatsappLiteral(assignee)}:*`);
     items.forEach((e, i) => {
       const due = e.dueDate ? ` (due ${e.dueDate})` : '';
       lines.push(`${i+1}. ${e.text}${due}`);
@@ -16901,8 +16903,8 @@ function renderWaPreview(text) {
   if (!text) return '';
   // Convert WhatsApp *bold* and _italic_ to HTML
   return esc(text)
-    .replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>')
-    .replace(/_([^_\n]+)_/g, '<em>$1</em>');
+    .replace(/(^|[\s>])\*([^*\n]+)\*(?=$|[\s<.,!?;:])/g, '$1<strong>$2</strong>')
+    .replace(/(^|[\s>])_([^_\n]+)_(?=$|[\s<.,!?;:])/g, '$1<em>$2</em>');
 }
 
 // ── Agenda Builder Actions ────────────────────────────────────────
