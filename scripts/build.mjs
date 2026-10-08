@@ -55,7 +55,7 @@ function classicBudgetEngine(src) {
     .replace(/^export default api;\n?/m, '');
 }
 
-async function buildJS(rel) {
+export async function prepareJS(rel) {
   let src = await readFile(join(ROOT, rel), 'utf8');
   if (rel.endsWith('budget-engine.js')) src = classicBudgetEngine(src);
   if (rel.endsWith('app.js')) {
@@ -65,6 +65,11 @@ async function buildJS(rel) {
     src = "const {computeAccountantCashPool, accountantLoanCashMovements} = (() => {\n" + pool + "\nreturn {computeAccountantCashPool, accountantLoanCashMovements};})();\n" + src;
   }
 
+  return src;
+}
+
+async function buildJS(rel) {
+  const src = await prepareJS(rel);
   const out = await minifyJS(src);
   const dest = rel.replace(/^src\//, 'dist/');
   await mkdir(join(ROOT, dirname(dest)), { recursive: true });

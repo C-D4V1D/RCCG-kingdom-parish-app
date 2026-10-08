@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { minifyJS, minifyCSS } from '../scripts/build.mjs';
+import { minifyJS, minifyCSS, prepareJS } from '../scripts/build.mjs';
 
 const JS_FILES = [
   ['src/js/budget-engine.js',        'dist/js/budget-engine.js'],
@@ -31,7 +31,7 @@ for (const [src, dest] of JS_FILES) {
       assert.match(sourceCode, /export function monthKey/);
       return;
     }
-    const expected = await minifyJS(sourceCode);
+    const expected = await minifyJS(await prepareJS(src));
     assert.equal(
       committed,
       expected,
