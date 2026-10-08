@@ -23,3 +23,18 @@ test('WhatsApp samples are read-only and cover approved finance posts and existi
  assert.doesNotMatch(samples,/onclick=|authFetch|at-field|<input|<textarea/);
  assert.ok(s.includes('${automationsWhatsappSamplesHtml(config)}'));
 });
+
+test('WhatsApp samples use single-star bold and cover each existing unpaid RRR follow-up',()=>{
+ const s=readFileSync(new URL('../src/js/app.js',import.meta.url),'utf8');
+ const samples=s.slice(s.indexOf('const AUTOMATION_WHATSAPP_SAMPLES'),s.indexOf('function automationsWhatsappSectionHtml'));
+ assert.doesNotMatch(samples,/\*\*/);
+ for(const key of ['followup','tomorrow','today','closed','unknown'])assert.ok(samples.includes("'checklist-"+key+"'"));
+ assert.ok(samples.includes('📋 Kingdom Parish · October remittance\\n\\n*Today, Sun 18 Oct, is remittance day.*'));
+});
+
+test('WhatsApp sample groups have plain labels and previews render supported bold',()=>{
+ const s=readFileSync(new URL('../src/js/app.js',import.meta.url),'utf8');
+ for(const title of ['Daily / Reminders','Collections & Attendance','Bank','Deposits','Loans','Memos & Statements','Other'])assert.ok(s.includes("['"+title+"',"));
+ assert.ok(s.includes("label:title.replace(/^[^A-Z]+/, '')"));
+ assert.ok(s.includes('automationsWhatsappPreview(automationsHelpText(g.sample,config))'));
+});
