@@ -14,3 +14,12 @@ test('message guide covers every message type', () => {
     for (const f of ['what', 'when', 'sample']) assert.match(block, new RegExp(`${f}: '`), `${k}.${f}`);
   }
 });
+
+test('WhatsApp samples are read-only and cover approved finance posts and existing messages',()=>{
+ const s=readFileSync(new URL('../src/js/app.js',import.meta.url),'utf8');
+ const samples=s.slice(s.indexOf('const AUTOMATION_WHATSAPP_SAMPLES'),s.indexOf('function automationsWhatsappSectionHtml'));
+ for(const text of ['Cash not yet deposited','NET ${kind}','Cash deposit recorded','🤝 LOAN GIVEN','✅ LOAN REPAYMENT RECEIVED','📥 LOAN RECEIVED BY CHURCH','📤 LOAN REPAYMENT PAID','Church bank account','Petty cash','Sunday collection recorded','Sunday attendance recorded','New memo','Monthly financial statement','Saturday spending note','Remittance checklist'])assert.ok(samples.includes(text),text);
+ assert.match(samples,/Read-only examples, not live transactions/);
+ assert.doesNotMatch(samples,/onclick=|authFetch|at-field|<input|<textarea/);
+ assert.ok(s.includes('${automationsWhatsappSamplesHtml(config)}'));
+});

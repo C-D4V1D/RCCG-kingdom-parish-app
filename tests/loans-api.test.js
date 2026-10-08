@@ -250,3 +250,14 @@ test('two repayments recorded side by side cannot both be confirmed if together 
   assert.match((await second.json()).error, /more than the loan/);
   assert.equal((await t.list())[0].outstanding, 4000);
 });
+
+test('WhatsApp finance feed includes names but no private notes, and refuses viewers',async()=>{
+ const {call,as,record}=await setup();
+ await record('acct',{person:'Bro Sam',purpose:'Private purpose',note:'Private note'});
+ assert.equal((await call('whatsapp-finance-events',{headers:as.viewer})).status,403);
+ const res=await call('whatsapp-finance-events',{headers:as.acct});assert.equal(res.status,200);
+ assert.equal(res.headers.get('Cache-Control'),'no-store');
+ const data=await res.json();assert.equal(data.loans[0].person,'Bro Sam');
+ assert.equal('purpose' in data.loans[0],false);assert.equal('note' in data.loans[0],false);
+ assert.equal(data.pool.calculation,'accountant-cash-pool-v1');assert.ok(Array.isArray(data.deposits));
+});
