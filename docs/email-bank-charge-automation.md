@@ -53,7 +53,7 @@ The portal needs a secret token to verify that incoming requests are legitimate
 **Generate a secret** -- use this one (or generate your own random string):
 
 ```
-kpsc-email-ingest-2026-xR7mQ9pL4wN2
+REPLACE_WITH_YOUR_PRIVATE_RANDOM_SECRET
 ```
 
 > To generate your own, run in any terminal:
