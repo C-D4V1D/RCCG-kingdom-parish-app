@@ -1,3 +1,4 @@
+import { computeAccountantCashPool, accountantLoanCashMovements } from '../../src/js/cash-pool.js';
 import {
   suggestCuts as budgetSuggestCuts,
   categoryAverages as budgetCategoryAverages,
@@ -2426,6 +2427,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
 
     // ── /api/dashboard — batched first-load payload ────────────
     if (route === 'dashboard' && method === 'GET' && !param) return await getDashboardBatch(DB);
+    if (route === 'accountant-cash-pool' && method === 'GET' && !param) return await getAccountantCashPool(DB);
 
     // ── /api/income ────────────────────────────────────────────
     if (route === 'income') {
@@ -6160,6 +6162,20 @@ async function getCashPhoto(DB, id) {
 // and reparse their JSON, so the batch can never drift from the individual
 // endpoints. getRemRates is derived from settings on the client, so it needs
 // no entry here.
+async function getAccountantCashPool(DB) {
+  const [income, expenses, petty, settings, remittances, cashTx, satelliteFunds, loans] = await Promise.all([
+    getIncome(DB), getExpenses(DB), getPetty(DB), getSettings(DB), getRemittances(DB), getCashTransactions(DB),
+    getSatelliteFunds(DB), getLoans(DB, { automation: true }),
+  ].map(p => p.then(r => { if (!r.ok) throw new Error('Cash-pool source unavailable'); return r.json(); })));
+  const pool = computeAccountantCashPool(income, cashTx, expenses, petty, satelliteFunds, remittances,
+    settings.remittanceRates || {}, null, accountantLoanCashMovements(loans));
+  if (!Number.isFinite(pool.balance)) throw new Error('Invalid accountant cash-pool balance');
+  const response = ok({ cashWithAccountant: Math.round(Math.max(0, pool.balance) * 100) / 100,
+    rawBalance: Math.round(pool.balance * 100) / 100, asOf: new Date().toISOString(), calculation: 'accountant-cash-pool-v1' });
+  response.headers.set('Cache-Control', 'no-store');
+  return response;
+}
+
 async function getDashboardBatch(DB) {
   const [income, expenses, petty, settings, remittances, pettyConfig, cashTransactions] =
     await Promise.all([

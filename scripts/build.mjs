@@ -58,6 +58,13 @@ function classicBudgetEngine(src) {
 async function buildJS(rel) {
   let src = await readFile(join(ROOT, rel), 'utf8');
   if (rel.endsWith('budget-engine.js')) src = classicBudgetEngine(src);
+  if (rel.endsWith('app.js')) {
+    const pool = (await readFile(join(ROOT, 'src/js/cash-pool.js'), 'utf8')).replace(/^export function /gm, 'function ');
+    src = src.replace(/^import \{ computeAccountantCashPool, accountantLoanCashMovements \} from '\.\/cash-pool\.js';\n/m, '');
+    // The helper has private names that also exist in the app. Scope it separately.
+    src = "const {computeAccountantCashPool, accountantLoanCashMovements} = (() => {\n" + pool + "\nreturn {computeAccountantCashPool, accountantLoanCashMovements};})();\n" + src;
+  }
+
   const out = await minifyJS(src);
   const dest = rel.replace(/^src\//, 'dist/');
   await mkdir(join(ROOT, dirname(dest)), { recursive: true });
