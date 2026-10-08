@@ -11402,7 +11402,7 @@ async function shareMonthlyStatement(fromOverride, toOverride){
     restore && restore();
     const shareUrl = `${location.origin}/statement.html?t=${token}`;
     const safeUrl = shareUrl.replace(/'/g,"\\'");
-    const waText = encodeURIComponent(`*${snapshot.churchName}* — Monthly Financial Statement (${snapshot.periodLabel})\n\nView the full statement here:\n${shareUrl}`);
+    const waText = encodeURIComponent(`*${whatsappLiteral(snapshot.churchName)}* — Monthly Financial Statement (${snapshot.periodLabel})\n\nView the full statement here:\n${shareUrl}`);
     showModal(`
       <button class="modal-close" onclick="closeModal()">✕</button>
       <div class="modal-title">📤 Share Monthly Financial Statement</div>
@@ -20520,6 +20520,7 @@ const AUTOMATION_WHATSAPP_SAMPLES = [
   ...['CREDIT','DEBIT'].map(kind=>({key:'bank-'+kind,label:'Bank NET '+kind,when:'When a new bank balance check differs from the previous check. This is a net change, not an individual transaction.',sample:`🏦 Kingdom Parish · Access Bank\n\n*${kind==='CREDIT'?'💰':'🔻'} NET ${kind}*\n\nAmount: ₦47\nTime: Wed 7 Oct, 9:49 PM - Thu 8 Oct, 6:02 AM\nBalance: ₦34,441.73\n\nRCCG KP AI Clerk`})),
   ...[false,true].map(full=>({key:'deposit-'+full,label:full?'Deposit recorded - no cash remaining':'Deposit recorded - partial',when:'Once an effective parish deposit is recorded. Grouped deposit entries produce one post. Fresh total cash remaining.',sample:`✅ Cash deposit recorded\n\nAccountant ({person:divine}) deposited ${full?'₦44,170.70':'₦20,000'} into the church bank account.\nDeposit date: Thu 8 Oct\nTotal cash still with Accountant: ${full?'₦0':'₦24,170.70'}\n\n${full?'No cash remains with the Accountant. God bless.':'Please deposit the remaining cash and record it in the app. God bless.'}\n\nRCCG KP AI Clerk`})),
 ];
+function whatsappLiteral(value){ return String(value || '').replace(/([*_~`])/g, '\u200b$1\u200b'); }
 function automationsWhatsappPreview(text){
   return esc(text).replace(/(^|[\s>])\*([^*\n]+)\*(?=$|[\s<.,!?;:])/g,'$1<b>$2</b>');
 }

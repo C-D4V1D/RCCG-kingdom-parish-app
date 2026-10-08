@@ -12753,7 +12753,7 @@ function shareInsightActions() {
     lines.push(`\n*${whatsappLiteral(assignee)}:*`);
     items.forEach((e, i) => {
       const due = e.dueDate ? ` (due ${e.dueDate})` : '';
-      lines.push(`${i+1}. ${e.text}${due}`);
+      lines.push(`${i+1}. ${whatsappLiteral(e.text)}${due}`);
     });
   }
   const msg = lines.join('\n');
@@ -15588,7 +15588,7 @@ async function shareMinutesWhatsApp(meetingId) {
   }
 
   const msg = [
-    `*KPSC Meeting Minutes — ${meeting.title || 'KPSC Meeting'}*`,
+    `*KPSC Meeting Minutes — ${whatsappLiteral(meeting.title || 'KPSC Meeting')}*`,
     date ? `📅 Date: ${date}` : '',
     '',
     summary,
@@ -15651,13 +15651,13 @@ function renderActionNotifications(actions, meeting) {
       <p class="k-review-hint" style="margin-bottom:12px">Tap a link below to open WhatsApp with a pre-composed notification for each assigned action item. Select the recipient in WhatsApp before sending.</p>
       ${assignedActions.map((a) => {
         const msg = [
-          `*KPSC Action Item — ${meetingTitle}*`,
+          `*KPSC Action Item — ${whatsappLiteral(meetingTitle)}*`,
           meetingDate ? `📅 Meeting date: ${meetingDate}` : '',
           '',
-          `Dear ${a.assignee},`,
+          `Dear ${whatsappLiteral(a.assignee)},`,
           '',
           `You have been assigned the following action item from the KPSC meeting:`,
-          `📌 ${a.task}`,
+          `📌 ${whatsappLiteral(a.task)}`,
           a.dueDate ? `🗓️ Due: ${a.dueDate}` : '',
           '',
           'Please update the secretary on progress at your earliest convenience.',
