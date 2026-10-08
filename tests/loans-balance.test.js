@@ -287,3 +287,13 @@ test('cash pool as of a date and Sunday cash cycle both honour loan dates', () =
   assert.equal(App._computeSundayCashCycle(sunday, [], [], [], [], [], {}).netCashToDeposit, 100000);
   App._setLoansLatest([]);
 });
+
+test('Sunday spent or lent to zero is cleared, not deposited; real deposit keeps deposited', () => {
+  const sunday = { id:'S1', date:'2026-10-04', totalCollection:1000, childrenOffering:0 };
+  App._setLoansLatest([loan({amount:1000, date:'2026-10-05'})]);
+  assert.equal(App._computeSundayCashCycle(sunday,[],[],[],[],[],{}).status,'cleared');
+  App._setLoansLatest([]);
+  assert.equal(App._computeSundayCashCycle(sunday,[],[{date:'2026-10-05',amount:1000,status:'approved',paymentMethod:'cash'}],[],[],[],{}).status,'cleared');
+  assert.equal(App._computeSundayCashCycle(sunday,[{type:'cash_deposit',date:'2026-10-05',amount:1000,incomeRef:'S1'}],[],[],[],[],{}).status,'deposited');
+  assert.equal(App._computeSundayCashCycle(sunday,[],[],[],[],[],{}).status,'pending');
+});

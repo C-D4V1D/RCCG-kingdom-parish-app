@@ -2223,7 +2223,7 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
     cashDeposited,
     netCashToDeposit,
     stillWithAccountant,
-    status: stillWithAccountant > 0.5 ? 'pending' : 'deposited'
+    status: stillWithAccountant > 0.5 ? 'pending' : (cashFromCollection > 0.5 && cashDeposited >= cashFromCollection - 0.5 ? 'deposited' : 'cleared')
   };
 }
 
@@ -2279,15 +2279,17 @@ function renderSundayCashCycleSectionHTML(cycle, lines){
   return `
     ${renderExpandableCashRow('💵','Cash from this collection', cycle.cashFromCollection, null, '+')}
     ${cycle.satelliteCashIn>0.5?renderExpandableCashRow('🛰️','Satellite/Zone cash received this week', cycle.satelliteCashIn, L.satelliteInLines, '+'):''}
+    ${cycle.loanCashIn>0.5?renderExpandableCashRow('🤝','Loan money received in cash', cycle.loanCashIn, null, '+'):''}
     ${cycle.earlierCashUsed>0.5?renderExpandableCashRow('↩️','Cash held from earlier collections', cycle.earlierCashUsed, null, '+'):''}
     ${cycle.cashExpenses>0.5?renderExpandableCashRow('💸','Cash expenses this week', cycle.cashExpenses, L.expenseLines, '-'):''}
     ${cycle.remittancesCash>0.5?renderExpandableCashRow('📤','RCCG remittance paid (cash)', cycle.remittancesCash, L.remitLines, '-'):''}
     ${cycle.poolPayoutsCash>0.5?renderExpandableCashRow('🛰️','Pool payments (cash)', cycle.poolPayoutsCash, L.payoutLines, '-'):''}
+    ${cycle.loanCashOut>0.5?renderExpandableCashRow('🤝','Loan money paid out in cash', cycle.loanCashOut, null, '-'):''}
     ${cycle.pettyCashTopups>0.5?renderExpandableCashRow('🏧','Petty cash top-ups (from cash)', cycle.pettyCashTopups, L.pettyLines, '-'):''}
     <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Net cash to deposit from this Sunday</div><div class="status-row-amt" style="font-weight:700;color:${cycle.netCashToDeposit>0.5?'var(--amber)':'var(--primary)'}">${fmt(cycle.netCashToDeposit)}</div></div>
     ${cycle.cashDeposited>0.5?renderExpandableCashRow('✅','Deposited to bank', cycle.cashDeposited, L.depositLines, '-'):''}
     <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Still with accountant (this Sunday)</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${cycle.stillWithAccountant>0.5?'var(--amber)':'var(--primary)'}">${fmt(cycle.stillWithAccountant)}</div></div>
-    <div style="margin-top:6px;font-size:11px;color:${cycle.status==='pending'?'var(--amber)':'var(--success,#2e7d32)'};font-weight:700">${cycle.status==='pending'?'⏳ Not yet deposited':'✓ Deposited'}</div>`;
+    <div style="margin-top:6px;font-size:11px;color:${cycle.status==='pending'?'var(--amber)':'var(--success,#2e7d32)'};font-weight:700">${cycle.status==='pending'?'⏳ Not yet deposited':cycle.status==='deposited'?'✓ Deposited':'✓ Cleared - no cash remaining'}</div>`;
 }
 
 // Returns the ID of the most recent cash-holding income record whose date is on or
@@ -7395,7 +7397,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
         const statusBadge = cashHeld===0
           ? `<span class="badge badge-info">🏦 All to Bank</span>`
           : isBanked
-            ? `<span class="badge badge-success">✓ Deposited</span>`
+            ? `<span class="badge badge-success">${cycle?.status==='cleared'?'✓ Cleared - no cash remaining':'✓ Deposited'}</span>`
             : `<span class="badge badge-warn" title="This Sunday's own cash cycle still has money with the accountant. Open the record to see the exact week breakdown.">⏳ Not yet deposited</span>`;
         return `<tr>
           <td><strong>${fmtDate(r.date)}</strong><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div>${r.notes?`<div class="td-muted">${r.notes}</div>`:''}</td>
@@ -7421,7 +7423,7 @@ async function renderIncomeList(records, cashTxOverride, remRatesOverride, expMa
         const mobileStatus = cashHeld===0
           ? `<span class="badge badge-info">🏦 All to Bank</span>`
           : isBanked
-            ? `<span class="badge badge-success">✓ Deposited</span>`
+            ? `<span class="badge badge-success">${cycle?.status==='cleared'?'✓ Cleared - no cash remaining':'✓ Deposited'}</span>`
             : `<span class="badge badge-warn">⏳ Not yet deposited</span>`;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="Sunday Collection ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
           <td><div style="font-size:13px;font-weight:600;white-space:nowrap">${fmtDate(r.date)}</div><div class="td-muted" style="font-size:11px">${fmtTime(r.createdAt||r.date)}</div></td>
@@ -7586,7 +7588,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
         const statusBadge = cashHeld===0
           ? `<span class="badge badge-info">🏦 All to Bank</span>`
           : isBanked
-            ? `<span class="badge badge-success">✓ Deposited</span>`
+            ? `<span class="badge badge-success">${cycle?.status==='cleared'?'✓ Cleared - no cash remaining':'✓ Deposited'}</span>`
             : `<span class="badge badge-warn"${isSunday?` title="This Sunday's own cash cycle still has money with the accountant. Open the record to see the exact week breakdown."`:''}>${isSunday?'⏳ Not yet deposited':'💵 In cash pool'}</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr>
@@ -7618,7 +7620,7 @@ async function renderAllIncomeList(records, cashTxOverride, remRatesOverride, ex
         const mobileStatus = cashHeld===0
           ? `<span class="badge badge-info">🏦 All to Bank</span>`
           : isBanked
-            ? `<span class="badge badge-success">✓ Deposited</span>`
+            ? `<span class="badge badge-success">${cycle?.status==='cleared'?'✓ Cleared - no cash remaining':'✓ Deposited'}</span>`
             : `<span class="badge badge-warn">${isSunday?'⏳ Not yet deposited':'💵 In cash pool'}</span>`;
         const srcLabel = isSunday ? '📅 Sunday Collection' : (OTHER_INCOME_SOURCES.find(s=>s.key===r.source)||{label:r.source||'Other'}).label;
         return `<tr class="tx-mobile-row" onclick="App.viewIncome('${r.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.viewIncome('${r.id}')}" tabindex="0" style="cursor:pointer" role="button" aria-label="${esc(srcLabel)} ${fmtDate(r.date)} — ${fmt(r.totalCollection)}">
@@ -11174,7 +11176,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return 'No Cash';
     const cycle = sundayCycleMapM.get(r.id);
-    if(cycle?.stillWithAccountant <= 0.5) return 'Deposited';
+    if(cycle?.stillWithAccountant <= 0.5) return cycle.status==='cleared'?'Cleared - no cash remaining':'Deposited';
     if((cycle?.cashDeposited||0) > 0.5) return 'Partial';
     return 'Not yet deposited';
   };
@@ -16284,7 +16286,7 @@ async function generateMonthlyReport(){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
     const cycle = sundayCycleMapM.get(r.id);
-    if(cycle?.stillWithAccountant <= 0.5) return '<span class="badge badge-success">Deposited</span>';
+    if(cycle?.stillWithAccountant <= 0.5) return `<span class="badge badge-success">${cycle.status==='cleared'?'Cleared - no cash remaining':'Deposited'}</span>`;
     if((cycle?.cashDeposited||0) > 0.5) return '<span class="badge badge-warn">Partial</span>';
     return '<span class="badge badge-warn">Not yet deposited</span>';
   }
@@ -16510,7 +16512,7 @@ async function generateWeeklyReport(){
     const cashHeld=getSundayCashWithAccountant(r,remRates);
     if(cashHeld===0) return '<span class="badge badge-info">No Cash</span>';
     const cycle = sundayCycleMap.get(r.id);
-    if(cycle?.stillWithAccountant <= 0.5) return '<span class="badge badge-success">✓ Deposited</span>';
+    if(cycle?.stillWithAccountant <= 0.5) return `<span class="badge badge-success">${cycle.status==='cleared'?'✓ Cleared - no cash remaining':'✓ Deposited'}</span>`;
     if((cycle?.cashDeposited||0) > 0.5) return `<span class="badge badge-warn">Partial</span>`;
     return '<span class="badge badge-warn">Not yet deposited</span>';
   }
@@ -20787,7 +20789,12 @@ function renderAutomationsDashboard(data){
       </div>
     </div>`;
   }).join('');
-  document.getElementById('atDashboard').innerHTML = `<div class="at-grid">${boxCard}${cards}</div>`;
+  const wa = health.whatsapp || {};
+  const waEntries = wa.diagnostics || [];
+  const waCard = `<div class="at-card"><div class="at-card-head"><span class="at-card-icon">💬</span><span class="at-card-name">WhatsApp Clerk diagnostics</span></div>
+    <div class="at-card-summary">${Number(wa.waiting)||0} waiting · ${Number(wa.parked)||0} parked events</div>
+    ${waEntries.length ? waEntries.slice().reverse().map(e=>`<div class="at-activity-row">${esc(e.at||'')} · ${esc(e.text||'')}</div>`).join('') : '<div class="at-activity-empty">No recent WhatsApp errors reported.</div>'}</div>`;
+  document.getElementById('atDashboard').innerHTML = `<div class="at-grid">${boxCard}${cards}${waCard}</div>`;
 }
 
 function toggleAutomationCard(key){
