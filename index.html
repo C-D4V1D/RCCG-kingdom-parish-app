@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
   <meta name="theme-color" content="#0F6E56" />
+  <script>/* Appearance: apply the saved Light/Dark choice (or follow the phone) before anything paints, so there is no white flash. */
+  try{var t=localStorage.getItem('rccgTheme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
+  var dk=t==='dark'||(t!=='light'&&window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches);
+  if(dk){var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute('content','#121613');}}catch(e){}</script>
   <meta name="mobile-web-app-capable" content="yes" />
   <title>RCCG Kingdom Parish — Finance Portal</title>
   <link rel="manifest" href="/manifest.json" />
@@ -248,6 +252,14 @@
       <button class="sidebar-close" onclick="App.toggleSidebar()" aria-label="Close sidebar">✕</button>
     </div>
     <nav class="sidebar-nav" id="sidebarNav"></nav>
+        <div class="theme-switch" id="themeSwitch" role="group" aria-label="Appearance">
+          <span class="theme-switch-label">Appearance</span>
+          <div class="theme-switch-btns">
+            <button type="button" data-theme-pref="auto" onclick="App.setTheme('auto')">Auto</button>
+            <button type="button" data-theme-pref="light" onclick="App.setTheme('light')">Light</button>
+            <button type="button" data-theme-pref="dark" onclick="App.setTheme('dark')">Dark</button>
+          </div>
+        </div>
     <div class="sidebar-footer">
       <div class="sidebar-user-row">
         <div class="sidebar-user" id="sidebarUser"></div>
@@ -389,7 +401,7 @@
     window.__KP_OLD_BROWSER__ = true;
   })();
 </script>
-<script src="dist/js/budget-engine.js?v=51fcb7c80c"></script>
-<script src="dist/js/app.js?v=51fcb7c80c"></script>
+<script src="dist/js/budget-engine.js?v=82bf767ff6"></script>
+<script src="dist/js/app.js?v=82bf767ff6"></script>
 </body>
 </html>
