@@ -2,7 +2,7 @@
 // any balance move. Never income, never remittable. Runs the real route handler on an in-memory SQLite D1.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequest } from '../functions/api/[[route]].js';
+import { onRequest, __loanTesting } from '../functions/api/[[route]].js';
 import { createSqliteD1 } from './sqlite-d1.mjs';
 import { FINANCE_AUTH_HEADER, financeToken } from './finance-auth-helper.mjs';
 
@@ -110,7 +110,7 @@ test('repayments: a different person acknowledges; partial then full settles; ov
   assert.deepEqual(tx.map(r => [r.type, r.amount, r.destination]), [['cash_deposit', 4000, 'satellite_passthrough']]);
   const tooMuch = await call(`loans/${body.id}/repay`, { method: 'POST', headers: as.acct, body: { amount: 6001 } });
   assert.equal(tooMuch.status, 400);
-  const p2 = await (await call(`loans/${body.id}/repay`, { method: 'POST', headers: as.acct, body: { amount: 6000 } })).json();
+  const p2 = await (await call(`loans/${body.id}/repay`, { method: 'POST', headers: as.officer, body: { amount: 6000 } })).json();
   const done = await (await call(`loan-repayments/${p2.id}/acknowledge`, { method: 'POST', headers: as.pastor, body: {} })).json();
   assert.equal(done.loanSettled, true);
   l = (await list())[0];
@@ -241,7 +241,7 @@ test('notifications about loans reach only the four roles (IT admin sees all); o
 
 test('two repayments recorded side by side cannot both be confirmed if together they would repay more than the loan', async () => {
   const t = await acknowledged({ channel: 'cash', amount: 10000 });
-  const a = await (await t.call(`loans/${t.id}/repay`, { method: 'POST', headers: t.as.acct, body: { amount: 6000 } })).json();
+  const a = await (await t.call(`loans/${t.id}/repay`, { method: 'POST', headers: t.as.officer, body: { amount: 6000 } })).json();
   // a second repayment slipped in at the same moment as the first (the record-time check cannot see it): insert it directly
   await t.DB.prepare(`INSERT INTO loan_repayments (id, loan_id, amount, date, channel, status, recorded_by_id, recorded_by_name) VALUES ('LR-race', ?, 6000, '2026-10-07', 'cash', 'pending', 'someone', 'X')`).bind(t.id).run();
   assert.equal((await t.call(`loan-repayments/${a.id}/acknowledge`, { method: 'POST', headers: t.as.pastor, body: {} })).status, 200);
@@ -260,4 +260,103 @@ test('WhatsApp finance feed includes names but no private notes, and refuses vie
  const data=await res.json();assert.equal(data.loans[0].person,'Bro Sam');
  assert.equal('purpose' in data.loans[0],false);assert.equal('note' in data.loans[0],false);
  assert.equal(data.pool.calculation,'accountant-cash-pool-v1');assert.ok(Array.isArray(data.deposits));
+});
+
+// ── Holder rule and bank auto-confirm ──
+const repayAs = (t, who, id, body = {}) => t.call(`loans/${id}/repay`, { method: 'POST', headers: t.as[who], body: { amount: 1000, ...body } }).then(r => r.json());
+const addLine = (DB, id, amount, direction, date = '2026-10-05', status = 'unrecorded') =>
+  DB.prepare(`INSERT INTO bank_recon_entries (id,balance_history_id,date,amount,direction,status,matched_refs_json,candidates_json,narration) VALUES (?,?,?,?,?,?,'[]','[]','')`).bind(id, 'bh-' + id, date, amount, direction, status).run();
+const lineStatus = async (DB, id) => (await DB.prepare(`SELECT status, matched_refs_json, resolved_by FROM bank_recon_entries WHERE id=?`).bind(id).first());
+const loanStatus = async (DB, id) => (await DB.prepare(`SELECT status, bank_line FROM loans WHERE id=?`).bind(id).first()).status;
+
+test('holder rule: accountant+cash and officer+petty confirm their own repayment on a lent loan; other combinations stay pending', async () => {
+  for (const [who, channel, expected] of [['acct', 'cash', 'confirmed'], ['officer', 'petty', 'confirmed'], ['officer', 'cash', 'pending'], ['acct', 'petty', 'pending'], ['pastor', 'cash', 'pending']]) {
+    const t = await acknowledged({ channel: 'cash', amount: 10000 });
+    const r = await repayAs(t, who, t.id, { channel });
+    assert.equal(r.status, expected, `${who}/${channel}`);
+    if (expected === 'confirmed') {
+      assert.equal((await t.list())[0].outstanding, 9000);
+      const a = await t.DB.prepare(`SELECT acknowledged_by_id FROM loan_repayments WHERE id=?`).bind(r.id).first();
+      assert.equal(a.acknowledged_by_id, 'holder');
+      assert.equal((await t.DB.prepare(`SELECT COUNT(*) n FROM audit_log WHERE type='loan_repayment_confirmed_by_holder'`).first()).n, 1);
+    } else assert.equal((await t.list())[0].outstanding, 10000);
+  }
+});
+
+test('holder rule: a repayment on a borrowed loan by the accountant in cash stays pending', async () => {
+  const t = await acknowledged({ channel: 'cash', direction: 'borrowed', amount: 10000 });
+  assert.equal((await repayAs(t, 'acct', t.id, { channel: 'cash' })).status, 'pending');
+});
+
+test('bank auto-confirm: a unique matching line confirms the loan and is marked resolved', async () => {
+  const { DB, record } = await setup();
+  const { body } = await record('acct', { channel: 'bank', amount: 30000 });
+  await addLine(DB, 'L1', 30000.3, 'out', '2026-10-08');
+  assert.equal(await __loanTesting.autoConfirmBankLoans(DB), 1);
+  assert.equal(await loanStatus(DB, body.id), 'active');
+  const l = await lineStatus(DB, 'L1');
+  assert.equal(l.status, 'resolved');
+  assert.equal(JSON.parse(l.matched_refs_json)[0].sourceTable, 'cash_transactions');
+  assert.equal((await DB.prepare(`SELECT COUNT(*) n FROM audit_log WHERE type='loan_confirmed_by_bank'`).first()).n, 1);
+});
+
+test('bank auto-confirm: a bank repayment on a lent loan matches money coming in', async () => {
+  const t = await acknowledged({ channel: 'bank', amount: 30000 });
+  const r = await repayAs(t, 'acct', t.id, { channel: 'bank', amount: 5000, date: '2026-10-06' });
+  assert.equal(r.status, 'pending');
+  await addLine(t.DB, 'L1', 5000, 'in', '2026-10-07');
+  assert.equal(await __loanTesting.autoConfirmBankLoans(t.DB), 1);
+  assert.equal((await t.DB.prepare(`SELECT status FROM loan_repayments WHERE id=?`).bind(r.id).first()).status, 'confirmed');
+  assert.equal((await lineStatus(t.DB, 'L1')).status, 'resolved');
+});
+
+test('bank auto-confirm: wrong amount, wrong direction, date too far, or a needs_attention line never confirm', async () => {
+  for (const [amount, dir, date, status] of [[30100, 'out', '2026-10-05', 'unrecorded'], [30000, 'in', '2026-10-05', 'unrecorded'],
+    [30000, 'out', '2026-10-20', 'unrecorded'], [30000, 'out', '2026-10-05', 'needs_attention']]) {
+    const { DB, record } = await setup();
+    const { body } = await record('acct', { channel: 'bank', amount: 30000 });
+    await addLine(DB, 'L1', amount, dir, date, status);
+    assert.equal(await __loanTesting.autoConfirmBankLoans(DB), 0, `${amount}/${dir}/${date}/${status}`);
+    assert.equal(await loanStatus(DB, body.id), 'pending');
+    assert.equal((await lineStatus(DB, 'L1')).status, status);
+  }
+});
+
+test('bank auto-confirm: two rival pending items for one line are both left to a person', async () => {
+  const { DB, record } = await setup();
+  const a = (await record('acct', { channel: 'bank', amount: 30000 })).body;
+  const b = (await record('officer', { channel: 'bank', amount: 30000, person: 'Sis Ada' })).body;
+  await addLine(DB, 'L1', 30000, 'out');
+  assert.equal(await __loanTesting.autoConfirmBankLoans(DB), 0);
+  assert.equal(await loanStatus(DB, a.id), 'pending');
+  assert.equal(await loanStatus(DB, b.id), 'pending');
+  assert.equal((await lineStatus(DB, 'L1')).status, 'unrecorded');
+});
+
+test('bank auto-confirm: cash and petty loans are never matched to a bank line', async () => {
+  const { DB, record } = await setup();
+  const a = (await record('acct', { channel: 'cash', amount: 30000 })).body;
+  const b = (await record('acct', { channel: 'petty', amount: 30000 })).body;
+  await addLine(DB, 'L1', 30000, 'out');
+  assert.equal(await __loanTesting.autoConfirmBankLoans(DB), 0);
+  assert.equal(await loanStatus(DB, a.id), 'pending');
+  assert.equal(await loanStatus(DB, b.id), 'pending');
+});
+
+test('bank auto-confirm: a loan recorded when the bank line already exists is confirmed straight away', async () => {
+  const { DB, record } = await setup();
+  await addLine(DB, 'L1', 12000, 'in', '2026-10-04');
+  const r = await record('acct', { channel: 'bank', direction: 'borrowed', amount: 12000 });
+  assert.equal(r.body.status, 'active');
+  assert.equal((await lineStatus(DB, 'L1')).status, 'resolved');
+});
+
+test('bank auto-confirm: an IT-admin reversal releases the bank line back to unrecorded', async () => {
+  const { DB, call, record } = await setup();
+  await addLine(DB, 'L1', 12000, 'out');
+  const { body } = await record('acct', { channel: 'bank', amount: 12000 });
+  assert.equal(body.status, 'active');
+  assert.equal((await call(`loans/${body.id}/reverse`, { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { reason: 'Wrong' } })).status, 200);
+  assert.equal((await lineStatus(DB, 'L1')).status, 'unrecorded');
+  assert.equal(await loanStatus(DB, body.id), 'reversed');
 });
