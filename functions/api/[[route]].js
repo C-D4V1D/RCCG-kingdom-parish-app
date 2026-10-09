@@ -2564,9 +2564,10 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     // Money lent out or borrowed. Recorded by one person, acknowledged by a different one.
     if (route === 'loans') {
       if (method === 'GET'  && !param) return await getLoans(DB, authz);
-      if (method === 'POST' && !param) return await createLoan(DB, body, authz);
-      if (method === 'POST' &&  param && parts[2]) return await loanAction(DB, param, parts[2], body, authz);
+      if (method === 'POST' && !param) return await createLoan(DB, body, authz, env);
+      if (method === 'POST' &&  param && parts[2]) return await loanAction(DB, param, parts[2], body, authz, env);
     }
+    if (route === 'loan-receipt' && method === 'GET' && !param) return await getLoanReceipt(DB, url, authz);
     if (route === 'loan-repayments' && method === 'POST' && param && parts[2]) {
       return await loanRepaymentAction(DB, param, parts[2], body, authz);
     }
@@ -4149,6 +4150,10 @@ async function handleInit(DB) {
     `ALTER TABLE notifications ADD COLUMN roles TEXT DEFAULT ''`,
     `ALTER TABLE loans ADD COLUMN bank_line TEXT DEFAULT ''`,
     `ALTER TABLE loan_repayments ADD COLUMN bank_line TEXT DEFAULT ''`,
+    `CREATE TABLE IF NOT EXISTS loan_receipts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_type TEXT NOT NULL, owner_id INTEGER NOT NULL, photo_data TEXT, photo_hash TEXT, ai_status TEXT DEFAULT '', ai_amount REAL, ai_reference TEXT DEFAULT '', ai_notes TEXT DEFAULT '', created_by TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)`,
+    `CREATE INDEX IF NOT EXISTS idx_loan_receipts_owner ON loan_receipts (owner_type, owner_id)`,
+    `ALTER TABLE loans ADD COLUMN receipt_status TEXT DEFAULT ''`,
+    `ALTER TABLE loan_repayments ADD COLUMN receipt_status TEXT DEFAULT ''`,
   ];
   for (const m of migrations) {
     try { await DB.prepare(m).run(); } catch { /* column already exists — safe to ignore */ }
@@ -5881,9 +5886,20 @@ function mapRepayment(r) {
     recordedById: r.recorded_by_id || '', recordedByName: r.recorded_by_name || '',
     acknowledgedByName: r.acknowledged_by_name || '', acknowledgedAt: r.acknowledged_at || '',
     rejectedReason: r.rejected_reason || '', bankRef: r.bank_ref || '', bankLine: r.bank_line || '',
-    confirmedBy: r.acknowledged_by_id === 'bank-match' ? 'bank' : r.acknowledged_by_id === 'holder' ? 'holder' : (r.acknowledged_at ? 'person' : ''),
+    confirmedBy: loanConfirmedBy(r),
+    ...loanReceiptFields(r),
     createdAt: r.created_at,
   };
+}
+
+const loanConfirmedBy = r => r.acknowledged_by_id === 'bank-match' ? 'bank' : r.acknowledged_by_id === 'holder' ? 'holder'
+  : r.acknowledged_by_id === 'receipt-ai' ? 'receipt' : (r.acknowledged_at ? 'person' : '');
+// Never the photo itself: only the status, and the AI's note when it flagged the receipt.
+function loanReceiptFields(r) {
+  const receiptStatus = r.receipt_status || '';
+  const f = { receiptStatus, hasReceipt: !!receiptStatus };
+  if (receiptStatus === 'flagged') f.receiptNote = String(r.receipt_note || '').slice(0, 300);
+  return f;
 }
 
 function mapLoan(row, repayments) {
@@ -5897,7 +5913,8 @@ function mapLoan(row, repayments) {
     acknowledgedByName: row.acknowledged_by_name || '', acknowledgedAt: row.acknowledged_at || '',
     rejectedReason: row.rejected_reason || '', bankRef: row.bank_ref || '', pettyRef: row.petty_ref || '', settledAt: row.settled_at || '',
     bankLine: row.bank_line || '',
-    confirmedBy: row.acknowledged_by_id === 'bank-match' ? 'bank' : row.acknowledged_by_id === 'holder' ? 'holder' : (row.acknowledged_at ? 'person' : ''),
+    confirmedBy: loanConfirmedBy(row),
+    ...loanReceiptFields(row),
     createdAt: row.created_at, repayments: mine, repaid,
     outstanding: row.status === 'active' ? Math.max(0, (row.amount || 0) - repaid) : 0,
   };
@@ -5908,12 +5925,123 @@ async function getLoans(DB, authz) {
     DB.prepare(`SELECT * FROM loans ORDER BY date DESC, created_at DESC`).all(),
     DB.prepare(`SELECT * FROM loan_repayments ORDER BY date ASC, created_at ASC`).all(),
   ]);
+  // AI notes of flagged receipts only (never photo_data) so an acknowledger sees why it was flagged.
+  const { results: notes } = await DB.prepare(`SELECT owner_type, owner_id, ai_notes FROM loan_receipts WHERE ai_status='flagged' ORDER BY id ASC`).all();
+  const noteOf = new Map((notes || []).map(n => [`${n.owner_type}:${n.owner_id}`, n.ai_notes]));
+  for (const l of loans || []) l.receipt_note = noteOf.get(`loan:${l.id}`) || '';
+  for (const r of reps || []) r.receipt_note = noteOf.get(`repayment:${r.id}`) || '';
   const mapped = (loans || []).map(l => mapLoan(l, reps || []));
   const seesDetails = !!authz?.finance && LOAN_ROLES.includes(authz.finance.role);
   return ok(seesDetails ? mapped : loanSanitize(mapped));
 }
 
-async function createLoan(DB, data, authz) {
+// ── Receipt photo as proof ───────────────────────────────────────────────────────────────────────────
+// A receipt photo that the AI reads and matches (amount, date, not reused) is enough to confirm a loan or
+// repayment with no second person. Anything doubtful stays pending for a person; an unavailable AI never blocks.
+const LOAN_PHOTO_MAX = 2000000;
+const loanPhotoProblem = p => (p == null || p === '') ? null
+  : (typeof p !== 'string' || !p.startsWith('data:image/')) ? err('The receipt must be a photo.', 400)
+  : p.length > LOAN_PHOTO_MAX ? err('That photo is too large. Take a smaller one.', 400) : null;
+const RECEIPT_AI = { id: 'receipt-ai', name: 'Receipt check (AI)', role: 'receipt' };
+
+async function verifyLoanReceiptAI(DB, env, { photoData, amount, date }, attempt = 1) {
+  const pending = aiNotes => ({ status: 'pending', aiAmount: null, aiReference: '', aiNotes });
+  try {
+    const apiKey = await resolveOpenAiKey(env, DB);
+    if (!apiKey) return pending('No AI key is set up, so a person needs to check this receipt.');
+    const base64 = photoData.includes(',') ? photoData.split(',')[1] : photoData;
+    const mediaType = photoData.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+    const retry = async why => {
+      if (attempt < 2) { await new Promise(r => setTimeout(r, 300)); return verifyLoanReceiptAI(DB, env, { photoData, amount, date }, attempt + 1); }
+      return pending(`${why}, so a person needs to check this receipt.`);
+    };
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: [
+          { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}`, detail: 'auto' } },
+          { type: 'text', text: `Analyze this image. Determine if it is a payment receipt: a bank transfer confirmation, POS receipt, bank teller slip, or a signed or written cash receipt. The money may have been paid to or from a person. Respond ONLY with valid JSON (no markdown, no backticks):
+
+{"is_receipt": <true or false>, "amount": <number or null>, "reference": "<teller/reference/transaction number or null>", "date": "<date in YYYY-MM-DD format or null>", "bank": "<bank name or null>", "confidence": "<high|medium|low>", "notes": "<any relevant observation>"}
+
+- If this is NOT a financial receipt (random photo, screenshot of something else), set is_receipt to false
+- If you cannot read the image clearly, set confidence to "low"` },
+        ] }],
+        max_tokens: 300, temperature: 0,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return await retry('The AI check was not available');
+    let p;
+    try { p = JSON.parse(String(data?.choices?.[0]?.message?.content || '').replace(/```json|```/g, '').trim()); } catch { return await retry('The AI answer could not be read'); }
+    if (!p || typeof p !== 'object') return await retry('The AI answer could not be read');
+
+    const aiAmount = p.amount != null && Number.isFinite(Number(p.amount)) ? Number(p.amount) : null;
+    const aiReference = p.reference && p.reference !== 'null' ? String(p.reference).slice(0, 100) : '';
+    const recorded = Number(amount) || 0;
+    const flags = [];
+    if (p.is_receipt !== true) flags.push('The photo does not look like a payment receipt.');
+    if (!['high', 'medium'].includes(String(p.confidence || '').toLowerCase())) flags.push('The receipt is hard to read.');
+    if (aiAmount == null) flags.push('The amount on the receipt could not be read.');
+    else if (Math.abs(aiAmount - recorded) > Math.max(recorded * 0.02, 50)) {
+      flags.push(`The receipt shows ₦${aiAmount.toLocaleString('en-NG')} but ₦${recorded.toLocaleString('en-NG')} was recorded.`);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')) && /^\d{4}-\d{2}-\d{2}/.test(String(date || ''))) {
+      const days = (Date.parse(String(date).slice(0, 10)) - Date.parse(p.date)) / 86400000;
+      const today = Date.parse(new Date().toISOString().slice(0, 10));
+      if (days > 14) flags.push(`The receipt is dated ${p.date}, more than 14 days before this entry.`);
+      if (Date.parse(p.date) > today + 86400000) flags.push(`The receipt is dated ${p.date}, which is in the future.`);
+    }
+    const extra = String(p.notes || '').slice(0, 150);
+    return { status: flags.length ? 'flagged' : 'verified', aiAmount, aiReference,
+      aiNotes: (flags.length ? flags.join(' ') : 'Receipt matches the amount and date.') + (extra ? ` AI note: ${extra}` : '') };
+  } catch (e) {
+    if (attempt < 2) { await new Promise(r => setTimeout(r, 300)); return verifyLoanReceiptAI(DB, env, { photoData, amount, date }, attempt + 1); }
+    return pending('The AI check could not be reached, so a person needs to check this receipt.');
+  }
+}
+
+// Store the photo, check it (and that it was not used before), save the outcome. Returns 'verified'|'flagged'|'pending'.
+async function storeAndCheckLoanReceipt(DB, env, { ownerType, ownerId, photoData, amount, date, actor }) {
+  const table = ownerType === 'loan' ? 'loans' : 'loan_repayments';
+  let status = 'pending';
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(photoData));
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    await DB.prepare(`INSERT INTO loan_receipts (owner_type, owner_id, photo_data, photo_hash, created_by) VALUES (?,?,?,?,?)`)
+      .bind(ownerType, ownerId, photoData, hash, actor.name).run();
+    const used = 'This receipt was already used on another entry.';
+    let r;
+    if (await DB.prepare(`SELECT id FROM loan_receipts WHERE photo_hash=? AND NOT (owner_type=? AND owner_id=?) LIMIT 1`).bind(hash, ownerType, ownerId).first()) {
+      r = { status: 'flagged', aiAmount: null, aiReference: '', aiNotes: used };
+    } else {
+      r = await verifyLoanReceiptAI(DB, env, { photoData, amount, date });
+      if (r.aiReference && r.aiAmount != null && await DB.prepare(
+        `SELECT id FROM loan_receipts WHERE ai_reference=? AND ABS(ai_amount-?)<=0.5 AND NOT (owner_type=? AND owner_id=?) LIMIT 1`)
+        .bind(r.aiReference, r.aiAmount, ownerType, ownerId).first()) r = { ...r, status: 'flagged', aiNotes: used };
+    }
+    status = r.status;
+    await DB.prepare(`UPDATE loan_receipts SET ai_status=?, ai_amount=?, ai_reference=?, ai_notes=? WHERE owner_type=? AND owner_id=?`)
+      .bind(r.status, r.aiAmount, r.aiReference, r.aiNotes, ownerType, ownerId).run();
+  } catch (e) { console.error('loan receipt check failed:', e.message); }
+  try { await DB.prepare(`UPDATE ${table} SET receipt_status=? WHERE id=?`).bind(status, ownerId).run(); } catch { /* column missing: ignore */ }
+  return status;
+}
+
+async function getLoanReceipt(DB, url, authz) {
+  const actor = await loanActor(DB, authz);
+  if (actor instanceof Response) return actor;
+  const kind = url.searchParams.get('kind') === 'repayment' ? 'repayment' : url.searchParams.get('kind') === 'loan' ? 'loan' : '';
+  const id = url.searchParams.get('id') || '';
+  if (!kind || !id) return err('Say which entry (kind and id).', 400);
+  const row = await DB.prepare(`SELECT photo_data, ai_status, ai_amount, ai_reference, ai_notes FROM loan_receipts WHERE owner_type=? AND owner_id=? ORDER BY id DESC LIMIT 1`).bind(kind, id).first();
+  if (!row) return err('No receipt on this entry.', 404);
+  return ok({ photoData: row.photo_data || '', aiStatus: row.ai_status || '', aiAmount: row.ai_amount, aiReference: row.ai_reference || '', aiNotes: row.ai_notes || '' });
+}
+
+async function createLoan(DB, data, authz, env) {
   const actor = await loanActor(DB, authz);
   if (actor instanceof Response) return actor;
   const person = String(data.person || '').trim().slice(0, 100);
@@ -5923,6 +6051,9 @@ async function createLoan(DB, data, authz) {
   if (!person) return err('Who is the loan with? Enter a name.', 400);
   if (!direction) return err("Choose whether we lent the money or borrowed it.", 400);
   if (!Number.isFinite(amount) || amount <= 0) return err('Enter an amount greater than zero.', 400);
+  const photoData = data.photoData || '';
+  const badPhoto = loanPhotoProblem(photoData);
+  if (badPhoto) return badPhoto;
   const id = newId('LN-');
   const date = loanDateOrToday(data.date);
   const dueRaw = String(data.dueDate || '').slice(0, 10);
@@ -5936,14 +6067,24 @@ async function createLoan(DB, data, authz) {
     actor.id, actor.name, actor.role).run();
   await writeAuditLog(DB, 'loan_recorded',
     `${actor.name} (${actor.role}) recorded a loan ${direction === 'lent' ? 'to' : 'from'} ${person} of ₦${amount.toLocaleString('en-NG')} (${channel}). Awaiting acknowledgement.`, actor.name);
-  await createNotification(DB, { title: 'Loan awaiting acknowledgement',
+  const receiptStatus = photoData ? await storeAndCheckLoanReceipt(DB, env, { ownerType: 'loan', ownerId: id, photoData, amount, date, actor }) : '';
+  const extra = photoData ? { receiptStatus } : {};
+  const notify = () => createNotification(DB, { title: 'Loan awaiting acknowledgement',
     body: `${actor.name} recorded a loan ${direction === 'lent' ? 'to' : 'from'} ${person}. A different person must acknowledge it.`, type: 'info', roles: LOAN_ROLES });
+  if (!photoData) await notify();
   if (channel === 'bank') {
     await autoConfirmBankLoans(DB);
     const after = await DB.prepare(`SELECT status FROM loans WHERE id=?`).bind(id).first();
-    if (after?.status === 'active') return ok({ id, status: 'active' });
+    if (after?.status === 'active') return ok({ id, status: 'active', ...extra });
   }
-  return ok({ id, status: 'pending' });
+  if (receiptStatus === 'verified') {
+    const loan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(id).first();
+    const res = await confirmLoanRow(DB, loan, RECEIPT_AI, { auditType: 'loan_confirmed_by_receipt',
+      auditText: w => `Confirmed by the receipt check: the receipt photo for the loan ${w} of ₦${amount.toLocaleString('en-NG')} matches the amount and date. No second person needed.` });
+    if (res.ok) return ok({ id, status: 'active', confirmedBy: 'receipt', ...extra });
+  }
+  if (photoData) await notify();
+  return ok({ id, status: 'pending', ...extra });
 }
 
 // Mirror a loan or repayment into the ledger of the money used. `moneyIn` = money comes into the church.
@@ -6129,7 +6270,7 @@ async function autoConfirmBankLoans(DB) {
 }
 export const __loanTesting = { autoConfirmBankLoans };
 
-async function loanAction(DB, id, action, data, authz) {
+async function loanAction(DB, id, action, data, authz, env) {
   const actor = await loanActor(DB, authz);
   if (actor instanceof Response) return actor;
   const loan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(id).first();
@@ -6181,28 +6322,40 @@ async function loanAction(DB, id, action, data, authz) {
     if (amount > (loan.amount || 0) - taken + LOAN_EPS) {
       return err(`That is more than is still owed (₦${Math.max(0, (loan.amount || 0) - taken).toLocaleString('en-NG')}, counting repayments waiting for acknowledgement).`, 400);
     }
+    const photoData = data.photoData || '';
+    const badPhoto = loanPhotoProblem(photoData);
+    if (badPhoto) return badPhoto;
     const rid = newId('LR-');
+    const repDate = loanDateOrToday(data.date);
     await DB.prepare(`
       INSERT INTO loan_repayments (id, loan_id, amount, date, channel, reference, note, status, recorded_by_id, recorded_by_name)
       VALUES (?,?,?,?,?,?,?, 'pending', ?,?)
-    `).bind(rid, id, amount, loanDateOrToday(data.date), loanChannel(data.channel),
+    `).bind(rid, id, amount, repDate, loanChannel(data.channel),
       String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name).run();
     await writeAuditLog(DB, 'loan_repayment_recorded', `${actor.name} (${actor.role}) recorded a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${where}. Awaiting acknowledgement.`, actor.name);
+    const receiptStatus = photoData ? await storeAndCheckLoanReceipt(DB, env, { ownerType: 'repayment', ownerId: rid, photoData, amount, date: repDate, actor }) : '';
+    const extra = photoData ? { receiptStatus } : {};
     const recorded = await DB.prepare(`SELECT * FROM loan_repayments WHERE id=?`).bind(rid).first();
     const channel = loanChannel(data.channel);
     if (holderConfirms(actor, channel, loan.direction)) {
       const holder = { id: 'holder', name: `${actor.name} (holds the money)`, role: actor.role };
       const res = await confirmRepaymentRow(DB, recorded, loan, holder, { auditType: 'loan_repayment_confirmed_by_holder',
         auditText: (w, settled) => `${actor.name} (${actor.role}) recorded and confirmed a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${w}, received into ${channel === 'petty' ? 'Petty Cash' : 'Cash with the Accountant'}. The person holding the money confirms it; no second person needed${settled ? '. The loan is now settled.' : '.'}` });
-      if (res.ok) return ok({ id: rid, status: 'confirmed', loanSettled: res.settled });
+      if (res.ok) return ok({ id: rid, status: 'confirmed', loanSettled: res.settled, ...extra });
     }
     if (channel === 'bank') {
       await autoConfirmBankLoans(DB);
       const after = await DB.prepare(`SELECT status FROM loan_repayments WHERE id=?`).bind(rid).first();
-      if (after?.status === 'confirmed') return ok({ id: rid, status: 'confirmed' });
+      if (after?.status === 'confirmed') return ok({ id: rid, status: 'confirmed', ...extra });
+    }
+    if (receiptStatus === 'verified') {
+      const freshLoan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(id).first();
+      const res = await confirmRepaymentRow(DB, recorded, freshLoan, RECEIPT_AI, { auditType: 'loan_repayment_confirmed_by_receipt',
+        auditText: (w, settled) => `Confirmed by the receipt check: the receipt photo for a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${w} matches the amount and date. No second person needed${settled ? '. The loan is now settled.' : '.'}` });
+      if (res.ok) return ok({ id: rid, status: 'confirmed', confirmedBy: 'receipt', loanSettled: res.settled, ...extra });
     }
     await createNotification(DB, { title: 'Loan repayment awaiting acknowledgement', body: `${actor.name} recorded a repayment on the loan ${where}.`, type: 'info', roles: LOAN_ROLES });
-    return ok({ id: rid, status: 'pending' });
+    return ok({ id: rid, status: 'pending', ...extra });
   }
 
   return err('Unknown loan action', 404);

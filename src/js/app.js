@@ -928,6 +928,7 @@ const DB = {
 
   getCashTransactions(full=false){ return apiFetch('cash-transactions'+(full?'?full=1':'')); },
   getCashPhoto(id)             { return apiFetch(`cash-photo/${id}`); },
+  getLoanReceipt(kind, id)     { return apiFetch(`loan-receipt?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}`); },
   addCashTransaction(d)        { return apiFetch('cash-transactions','POST',d); },
   updateCashTransaction(id,d)  { return apiFetch(`cash-transactions/${id}`,'PUT',d); },
   deleteCashTransaction(id)    { return apiFetch(`cash-transactions/${id}`,'DELETE'); },
@@ -9345,9 +9346,44 @@ function loanChannelPicker(name){
 function loanWho(l){ return l.direction === 'lent' ? `Lent to ${esc(l.person)}` : `Borrowed from ${esc(l.person)}`; }
 
 function loanConfirmText(x){
-  return x.confirmedBy === 'bank' ? 'Confirmed by the bank match' : x.confirmedBy === 'holder' ? 'Confirmed (money held by the recorder)' : '';
+  return x.confirmedBy === 'receipt' ? 'Confirmed by the receipt check' : x.confirmedBy === 'bank' ? 'Confirmed by the bank match' : x.confirmedBy === 'holder' ? 'Confirmed (money held by the recorder)' : '';
 }
-const LOAN_BANK_WAIT = '<div style="font-size:11px;color:var(--text3);margin-top:2px">Waiting for the bank to show this, or for a second person to confirm.</div>';
+function loanReceiptField(id){
+  return `<div class="form-group"><label class="form-label">Receipt photo (optional) - a clear receipt that the AI can read confirms this without a second person</label>
+      <input type="file" id="${id}" accept="image/*" class="form-input" style="padding:6px" onchange="App._previewDepPhoto(this,'${id}_preview')" />
+      <div id="${id}_preview" style="margin-top:6px;display:none"><img style="max-width:100%;max-height:150px;border-radius:6px;border:1px solid var(--border)" /></div></div>`;
+}
+async function loanReceiptData(id, btn){
+  const f = document.getElementById(id)?.files?.[0];
+  if(!f) return '';
+  if(btn) btn.textContent = 'Checking the receipt…';
+  return await compressPhoto(f, 1200, 0.75);
+}
+function loanReceiptNote(x){
+  const link = x.hasReceipt && canAction('loan_view') ? ` <a href="#" onclick="event.preventDefault();App.viewLoanReceipt('${x.kind || ''}','${esc(x.id)}')" style="color:var(--primary-text);font-weight:600">View receipt</a>` : '';
+  const note = x.status === 'pending' && x.receiptStatus === 'flagged' && x.receiptNote ? `<div style="font-size:11px;color:var(--amber)">Receipt: ${esc(x.receiptNote)}</div>` : '';
+  return (link ? `<div style="font-size:11.5px;margin-top:2px">📷${link}</div>` : '') + note;
+}
+function loanSavedMsg(what, res, hadPhoto, bankSuffix){
+  if(res && res.confirmedBy === 'receipt') return `${what} recorded and confirmed by the receipt check`;
+  if(res && (res.status === 'active' || res.status === 'confirmed')) return `${what} recorded and confirmed${res.confirmedBy === 'bank' ? ' by the bank' : ''}`;
+  if(hadPhoto) return res.receiptStatus === 'flagged'
+    ? `${what} recorded. The receipt could not be matched, so a different person must confirm it.`
+    : `${what} recorded. The receipt could not be checked right now, so a different person must confirm it.`;
+  return `${what} recorded. A different person must ${bankSuffix}`;
+}
+async function viewLoanReceipt(kind, id){
+  let photoData = '';
+  try { const r = await DB.getLoanReceipt(kind, id); photoData = r?.photoData || ''; }
+  catch(e){ showAlert('Could not load the receipt. Please try again.','danger'); return; }
+  if(!photoData){ showAlert('No receipt photo found.','info'); return; }
+  showModal(`
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-title">📷 Receipt</div>
+    ${photoData.startsWith('data:image') ? `<img src="${photoData}" style="width:100%;border-radius:var(--r);max-height:70vh;object-fit:contain" alt="Receipt" />` : `<a href="${photoData}" target="_blank" class="btn btn-primary" download="receipt">Open receipt</a>`}
+    <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button></div>`);
+}
+const LOAN_BANK_WAIT ='<div style="font-size:11px;color:var(--text3);margin-top:2px">Waiting for the bank to show this, or for a second person to confirm.</div>';
 function loanRepaymentLine(r, canDo, me){
   const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ ' + (loanConfirmText(r) || 'confirmed') : r.status === 'reversed' ? '↩ reversed' : '✕ rejected';
   const acts = (r.status === 'pending' && canDo && r.recordedById !== me)
@@ -9359,7 +9395,7 @@ function loanRepaymentLine(r, canDo, me){
     : (r.status === 'confirmed' && state.user?.role === 'it_admin' ? `<div style="margin-top:4px"><button class="btn btn-sm" onclick="App.showRejectLoan('repayment_reverse','${esc(r.id)}')">Reverse</button></div>` : ''));
   return `<div style="font-size:12px;color:var(--text2);padding:6px 0;border-top:1px dashed var(--border)">
     Repayment ${fmt(r.amount)} · ${esc(fmtDateShort(r.date))} · ${loanChannelLabel(r.channel)} <span style="color:var(--text3)">${st}</span>
-    ${(r.status === 'rejected' || r.status === 'reversed') && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${r.status === 'pending' && r.channel === 'bank' ? LOAN_BANK_WAIT : ''}${acts}</div>`;
+    ${(r.status === 'rejected' || r.status === 'reversed') && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${r.status === 'pending' && r.channel === 'bank' ? LOAN_BANK_WAIT : ''}${loanReceiptNote({ ...r, kind: 'repayment' })}${acts}</div>`;
 }
 
 function loanCard(l, canDo, me){
@@ -9395,6 +9431,7 @@ function loanCard(l, canDo, me){
     <div style="font-size:11.5px;color:var(--text3);margin-top:2px">${esc(fmtDateShort(l.date))} · ${loanChannelLabel(l.channel)}${l.purpose ? ' · ' + esc(l.purpose) : ''}${l.dueDate ? ' · due ' + esc(fmtDateShort(l.dueDate)) : ''} · recorded by ${esc(l.recordedByName || '')}</div>
     <div style="font-size:12px;margin-top:4px">${status}</div>
     ${l.status === 'pending' && l.channel === 'bank' ? LOAN_BANK_WAIT : ''}
+    ${loanReceiptNote({ ...l, kind: 'loan' })}
     ${actions ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${actions}</div>` : ''}
     ${reps}
   </div>`;
@@ -9443,6 +9480,7 @@ function showLoanForm(){
     <div class="form-group"><label class="form-label">What is it for?</label><input id="ln_purpose" class="form-input" maxlength="200" /></div>
     <div class="form-group"><label class="form-label">Due date (optional)</label><input id="ln_due" type="date" class="form-input" /></div>
     <div class="form-group"><label class="form-label">Reference (optional)</label><input id="ln_ref" class="form-input" maxlength="100" /></div>
+    ${loanReceiptField('loan_receipt')}
     <div class="alert alert-warn"><span class="alert-icon">ℹ</span><span>A different person (Accountant, Admin Officer, Pastor or IT Admin) must acknowledge this before it counts.</span></div>
     <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
       <button class="btn btn-primary" onclick="App.submitLoan(this)">Save</button></div>`);
@@ -9457,17 +9495,16 @@ async function submitLoan(btn=null){
   if(!person){ showAlert('Enter the name of the person or group.','danger'); return; }
   if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
-  let res;
+  let res, photoData = '';
   try {
-    res = await DB.addLoan({ direction, channel, person, amount, date: val('ln_date'), purpose: val('ln_purpose'), dueDate: val('ln_due'), reference: val('ln_ref') });
+    photoData = await loanReceiptData('loan_receipt', btn);
+    res = await DB.addLoan({ direction, channel, person, amount, date: val('ln_date'), purpose: val('ln_purpose'), dueDate: val('ln_due'), reference: val('ln_ref'), ...(photoData ? { photoData } : {}) });
   } catch(err) {
     restore();
     showAlert(`Could not save the loan: ${err.message}`,'danger');
     return;
   }
-  const done = res && (res.status === 'active' || res.status === 'confirmed');
-  showAlert(done ? `Loan of ${fmt(amount)} recorded and confirmed${res.confirmedBy === 'bank' ? ' by the bank' : ''}.`
-    : `Loan of ${fmt(amount)} recorded. A different person must acknowledge it.`,'success');
+  showAlert(loanSavedMsg(`Loan of ${fmt(amount)}`, res, !!photoData, 'acknowledge it.') + (res && (res.status === 'active' || res.status === 'confirmed') ? '.' : ''),'success');
   await showLoans();
   if(state.page === 'dashboard') renderDashboard();
 }
@@ -9533,6 +9570,7 @@ async function showLoanRepaymentForm(loanId){
       ${loanChannelPicker('lr_channel')}
       <div style="font-size:11px;color:var(--text3);margin-top:4px">${l.direction === 'lent' ? 'The repayment is put into it.' : 'The repayment is taken out of it.'}</div></div>
     <div class="form-group"><label class="form-label">Reference (optional)</label><input id="lr_ref" class="form-input" maxlength="100" /></div>
+    ${loanReceiptField('rep_receipt')}
     <div class="alert alert-warn"><span class="alert-icon">ℹ</span><span>A different person must acknowledge this repayment before it counts.</span></div>
     <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button>
       <button class="btn btn-primary" onclick="App.submitLoanRepayment('${esc(loanId)}', this)">Save</button></div>`);
@@ -9542,16 +9580,15 @@ async function submitLoanRepayment(loanId, btn=null){
   const amount = parseFloat(document.getElementById('lr_amount')?.value) || 0;
   if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
-  let res;
+  let res, photoData = '';
   try {
+    photoData = await loanReceiptData('rep_receipt', btn);
     res = await DB.loanAction(loanId, 'repay', {
       amount, date: document.getElementById('lr_date')?.value || '',
       channel: document.querySelector('input[name="lr_channel"]:checked')?.value || 'cash',
-      reference: (document.getElementById('lr_ref')?.value || '').trim() });
+      reference: (document.getElementById('lr_ref')?.value || '').trim(), ...(photoData ? { photoData } : {}) });
   } catch(err){ restore(); showAlert(err.message,'danger'); return; }
-  const done = res && (res.status === 'active' || res.status === 'confirmed');
-  showAlert(done ? `Repayment recorded and confirmed${res.confirmedBy === 'bank' ? ' by the bank' : ''}.`
-    : 'Repayment recorded. A different person must acknowledge it.','success');
+  showAlert(loanSavedMsg('Repayment', res, !!photoData, 'acknowledge it.') + (res && (res.status === 'active' || res.status === 'confirmed') ? '.' : ''),'success');
   await showLoans();
 }
 
@@ -22129,7 +22166,7 @@ return {
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
-  showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment,
+  showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
   updateExpenseSubcats, updateExpenseDescRequired,

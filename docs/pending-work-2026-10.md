@@ -19,16 +19,12 @@ No real figures, names with contact details, addresses or keys belong here (this
 | Loans round 2: petty cash option, IT admin reversal, names only for four roles, role-targeted notifications, loan lines in cash breakdown pages (app PR 404) | Done |
 | Monthly statement and report: loans memo (app PR 413) | Done |
 | Dark mode (Auto / Light / Dark switch in the menu) | Built and tested on branch `claude/dark-mode`; being checked on screenshots before it is merged |
-| Loans: optional receipt upload with the advisory AI check | Not started |
+| Loans: confirmation without a second person (bank match, holder rule, AI-checked receipt photo) | Done (app PR 416 and the receipt PR) |
 | Budget tab: its own "available for new spending" figure | Not started (see below) |
 | Owner's two-login trial of Loans | Still to do |
 
 ## Open items
 
-1. **Loans: receipt upload with an advisory AI check.** Optional photo when recording a loan or repayment. The AI
-   reads it the way the deposit-receipt check does and gives a hint (amount, reference, recipient) to the person who
-   acknowledges. A human acknowledgement is always required. Keep the photo out of the loans list and out of the
-   WhatsApp feed (fetch it on demand through its own route).
 2. **Budget tab.** The dashboard applies the owner's rule for money owed to us (savings, then known bills saved, then
    new spending, then set-aside). The Budget tab computes "available for new spending" on its own and does not apply
    it yet. Needs one decision on how to show it there, then the same helper.
@@ -58,6 +54,17 @@ No real figures, names with contact details, addresses or keys belong here (this
   device. Printed pages and shared statements stay light.
 - **WhatsApp reminders:** the missed-collection reminder stays daily (no weekly ladder).
 - **Nigerian time:** the whole box runs on Nigerian time (WAT, UTC+1, no daylight saving).
+
+## Loans: who confirms (owner rulings, 9 Oct)
+
+- **Bank match:** a bank loan or repayment confirms itself when exactly one unrecorded bank line matches (amount,
+  direction, date within 7 days) and nothing else could match it. Money out of the bank needs no second person.
+- **Holder rule:** the accountant recording a repayment on a cash loan we lent, or the admin officer on a petty cash
+  loan we lent, confirms it at once.
+- **Receipt photo:** an optional photo that the AI reads and matches (real receipt, amount, date, not used before)
+  confirms any entry with no second person. Doubtful, unreadable or reused receipts go to a second person with a note.
+  Photos are stored apart from the loans list and fetched on demand by the four loan roles.
+- Everything else still needs a different person. IT admin reversal releases a bank line again.
 
 ## Loans: how it works (design as built)
 
