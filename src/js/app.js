@@ -9344,8 +9344,12 @@ function loanChannelPicker(name){
 }
 function loanWho(l){ return l.direction === 'lent' ? `Lent to ${esc(l.person)}` : `Borrowed from ${esc(l.person)}`; }
 
+function loanConfirmText(x){
+  return x.confirmedBy === 'bank' ? 'Confirmed by the bank match' : x.confirmedBy === 'holder' ? 'Confirmed (money held by the recorder)' : '';
+}
+const LOAN_BANK_WAIT = '<div style="font-size:11px;color:var(--text3);margin-top:2px">Waiting for the bank to show this, or for a second person to confirm.</div>';
 function loanRepaymentLine(r, canDo, me){
-  const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ confirmed' : r.status === 'reversed' ? '↩ reversed' : '✕ rejected';
+  const st = r.status === 'pending' ? '⏳ waiting for a second person' : r.status === 'confirmed' ? '✓ ' + (loanConfirmText(r) || 'confirmed') : r.status === 'reversed' ? '↩ reversed' : '✕ rejected';
   const acts = (r.status === 'pending' && canDo && r.recordedById !== me)
     ? `<div style="margin-top:4px;display:flex;gap:6px">
          <button class="btn btn-primary btn-sm" onclick="App.acknowledgeLoanRepayment('${esc(r.id)}', this)">Acknowledge</button>
@@ -9355,7 +9359,7 @@ function loanRepaymentLine(r, canDo, me){
     : (r.status === 'confirmed' && state.user?.role === 'it_admin' ? `<div style="margin-top:4px"><button class="btn btn-sm" onclick="App.showRejectLoan('repayment_reverse','${esc(r.id)}')">Reverse</button></div>` : ''));
   return `<div style="font-size:12px;color:var(--text2);padding:6px 0;border-top:1px dashed var(--border)">
     Repayment ${fmt(r.amount)} · ${esc(fmtDateShort(r.date))} · ${loanChannelLabel(r.channel)} <span style="color:var(--text3)">${st}</span>
-    ${(r.status === 'rejected' || r.status === 'reversed') && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${acts}</div>`;
+    ${(r.status === 'rejected' || r.status === 'reversed') && r.rejectedReason ? `<div style="font-size:11px;color:var(--danger)">${esc(r.rejectedReason)}</div>` : ''}${r.status === 'pending' && r.channel === 'bank' ? LOAN_BANK_WAIT : ''}${acts}</div>`;
 }
 
 function loanCard(l, canDo, me){
@@ -9371,7 +9375,7 @@ function loanCard(l, canDo, me){
                  <button class="btn btn-sm" onclick="App.showRejectLoan('loan','${esc(l.id)}')">Cancel it</button>`;
     }
   } else if(l.status === 'active'){
-    status = `<span style="color:var(--text3)">${fmt(l.repaid || 0)} repaid · <strong style="color:var(--text)">${fmt(l.outstanding)} still ${l.direction === 'lent' ? 'owed to us' : 'to pay'}</strong></span>`;
+    status = `${loanConfirmText(l) ? `<span style="color:var(--success)">✓ ${loanConfirmText(l)}</span> · ` : ''}<span style="color:var(--text3)">${fmt(l.repaid || 0)} repaid · <strong style="color:var(--text)">${fmt(l.outstanding)} still ${l.direction === 'lent' ? 'owed to us' : 'to pay'}</strong></span>`;
     if(canDo) actions = `<button class="btn btn-sm" onclick="App.showLoanRepaymentForm('${esc(l.id)}')">Record a repayment</button>`;
   } else if(l.status === 'settled'){
     status = '<span style="color:var(--success);font-weight:600">✓ Fully repaid</span>';
@@ -9390,6 +9394,7 @@ function loanCard(l, canDo, me){
     </div>
     <div style="font-size:11.5px;color:var(--text3);margin-top:2px">${esc(fmtDateShort(l.date))} · ${loanChannelLabel(l.channel)}${l.purpose ? ' · ' + esc(l.purpose) : ''}${l.dueDate ? ' · due ' + esc(fmtDateShort(l.dueDate)) : ''} · recorded by ${esc(l.recordedByName || '')}</div>
     <div style="font-size:12px;margin-top:4px">${status}</div>
+    ${l.status === 'pending' && l.channel === 'bank' ? LOAN_BANK_WAIT : ''}
     ${actions ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${actions}</div>` : ''}
     ${reps}
   </div>`;
@@ -9452,14 +9457,17 @@ async function submitLoan(btn=null){
   if(!person){ showAlert('Enter the name of the person or group.','danger'); return; }
   if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
+  let res;
   try {
-    await DB.addLoan({ direction, channel, person, amount, date: val('ln_date'), purpose: val('ln_purpose'), dueDate: val('ln_due'), reference: val('ln_ref') });
+    res = await DB.addLoan({ direction, channel, person, amount, date: val('ln_date'), purpose: val('ln_purpose'), dueDate: val('ln_due'), reference: val('ln_ref') });
   } catch(err) {
     restore();
     showAlert(`Could not save the loan: ${err.message}`,'danger');
     return;
   }
-  showAlert(`Loan of ${fmt(amount)} recorded. A different person must acknowledge it.`,'success');
+  const done = res && (res.status === 'active' || res.status === 'confirmed');
+  showAlert(done ? `Loan of ${fmt(amount)} recorded and confirmed${res.confirmedBy === 'bank' ? ' by the bank' : ''}.`
+    : `Loan of ${fmt(amount)} recorded. A different person must acknowledge it.`,'success');
   await showLoans();
   if(state.page === 'dashboard') renderDashboard();
 }
@@ -9534,13 +9542,16 @@ async function submitLoanRepayment(loanId, btn=null){
   const amount = parseFloat(document.getElementById('lr_amount')?.value) || 0;
   if(amount <= 0){ showAlert('Enter an amount greater than zero.','danger'); return; }
   const restore = setBtnLoading(btn, 'Saving…');
+  let res;
   try {
-    await DB.loanAction(loanId, 'repay', {
+    res = await DB.loanAction(loanId, 'repay', {
       amount, date: document.getElementById('lr_date')?.value || '',
       channel: document.querySelector('input[name="lr_channel"]:checked')?.value || 'cash',
       reference: (document.getElementById('lr_ref')?.value || '').trim() });
   } catch(err){ restore(); showAlert(err.message,'danger'); return; }
-  showAlert('Repayment recorded. A different person must acknowledge it.','success');
+  const done = res && (res.status === 'active' || res.status === 'confirmed');
+  showAlert(done ? `Repayment recorded and confirmed${res.confirmedBy === 'bank' ? ' by the bank' : ''}.`
+    : 'Repayment recorded. A different person must acknowledge it.','success');
   await showLoans();
 }
 
