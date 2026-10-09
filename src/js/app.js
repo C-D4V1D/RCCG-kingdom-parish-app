@@ -147,7 +147,7 @@ async function correctDepositAmount(txId, aiAmount, currentAmount){
       </div>
       <div style="display:flex;justify-content:space-between;font-size:13px">
         <span style="color:var(--text2)">Max depositable (cash available):</span>
-        <span style="font-weight:700;color:var(--primary)">${fmt(maxAmount)}</span>
+        <span style="font-weight:700;color:var(--primary-text)">${fmt(maxAmount)}</span>
       </div>
     </div>
     <div class="form-group">
@@ -2261,7 +2261,7 @@ function renderCashPoolSectionHTML(pool, lines){
     ${pool.pettyCashTopups>0.5?renderExpandableCashRow('🏧','Petty cash top-ups (from cash)', pool.pettyCashTopups, null, '-'):''}
     ${pool.loanCashOut>0.5?renderExpandableCashRow('🤝','Loans paid out in cash (lent or repaid)', pool.loanCashOut, L.loanOutLines, '-'):''}
     ${pool.cashDeposited>0.5?renderExpandableCashRow('✅','Deposited to bank', pool.cashDeposited, L.depositLines, '-'):''}
-    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Cash with Accountant now</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${pool.balance>0.5?'var(--amber)':'var(--primary)'}">${fmt(Math.max(0,pool.balance))}</div></div>
+    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Cash with Accountant now</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${pool.balance>0.5?'var(--amber)':'var(--primary-text)'}">${fmt(Math.max(0,pool.balance))}</div></div>
     ${pool.balance<-0.5?`<div style="font-size:11px;color:var(--danger);margin-top:6px;line-height:1.5">⚠️ The cash pool is over-drawn by ${fmt(Math.abs(pool.balance))} — recorded cash payments exceed recorded cash received. Check for a missing collection or a mis-recorded cash payment.</div>`:''}`;
 }
 
@@ -2286,9 +2286,9 @@ function renderSundayCashCycleSectionHTML(cycle, lines){
     ${cycle.poolPayoutsCash>0.5?renderExpandableCashRow('🛰️','Pool payments (cash)', cycle.poolPayoutsCash, L.payoutLines, '-'):''}
     ${cycle.loanCashOut>0.5?renderExpandableCashRow('🤝','Loan money paid out in cash', cycle.loanCashOut, null, '-'):''}
     ${cycle.pettyCashTopups>0.5?renderExpandableCashRow('🏧','Petty cash top-ups (from cash)', cycle.pettyCashTopups, L.pettyLines, '-'):''}
-    <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Net cash to deposit from this Sunday</div><div class="status-row-amt" style="font-weight:700;color:${cycle.netCashToDeposit>0.5?'var(--amber)':'var(--primary)'}">${fmt(cycle.netCashToDeposit)}</div></div>
+    <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Net cash to deposit from this Sunday</div><div class="status-row-amt" style="font-weight:700;color:${cycle.netCashToDeposit>0.5?'var(--amber)':'var(--primary-text)'}">${fmt(cycle.netCashToDeposit)}</div></div>
     ${cycle.cashDeposited>0.5?renderExpandableCashRow('✅','Deposited to bank', cycle.cashDeposited, L.depositLines, '-'):''}
-    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Still with accountant (this Sunday)</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${cycle.stillWithAccountant>0.5?'var(--amber)':'var(--primary)'}">${fmt(cycle.stillWithAccountant)}</div></div>
+    <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Still with accountant (this Sunday)</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${cycle.stillWithAccountant>0.5?'var(--amber)':'var(--primary-text)'}">${fmt(cycle.stillWithAccountant)}</div></div>
     <div style="margin-top:6px;font-size:11px;color:${cycle.status==='pending'?'var(--amber)':'var(--success,#2e7d32)'};font-weight:700">${cycle.status==='pending'?'⏳ Not yet deposited':cycle.status==='deposited'?'✓ Deposited':'✓ Cleared - no cash remaining'}</div>`;
 }
 
@@ -2689,6 +2689,7 @@ function pageFromPath(){
 }
 
 function initApp(){
+  initTheme();
   if(isSatellite()) return initSatelliteApp();
   buildMonthSelector();
   buildSidebar();
@@ -3992,12 +3993,12 @@ function renderDashboardSkeleton(){
       <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div style="padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};text-align:left">
-          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${monthName} Remittance Period</div>
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary-text)':'var(--text2)'};line-height:1.25">${monthName} Remittance Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
           ${chip}
         </div>
         <div style="padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};text-align:left">
-          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${monthName} Calendar Period</div>
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary-text)':'var(--text2)'};line-height:1.25">${monthName} Calendar Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
           ${chip}
         </div>
@@ -4261,7 +4262,7 @@ function renderDashBudgetBreakdown(avail, rangeTo, fund, color, owedToUs){
         ${owedNote}
         ${warningHtml}
       </div>
-      <div style="margin-top:6px;text-align:center"><a href="#" onclick="event.preventDefault();App.openBudgetBreakdown()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">See full breakdown ›</a></div>
+      <div style="margin-top:6px;text-align:center"><a href="#" onclick="event.preventDefault();App.openBudgetBreakdown()" style="font-size:12px;font-weight:600;color:var(--primary-text);text-decoration:none">See full breakdown ›</a></div>
     </div>`;
 }
 
@@ -5090,12 +5091,12 @@ async function renderDashboard(){
       <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <button onclick="App.setPeriodMode('remittance')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${useRemPeriod?'var(--primary)':'var(--border)'};background:${useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[remBtnM]} Remittance Period</div>
+          <div style="font-size:13px;font-weight:700;color:${useRemPeriod?'var(--primary-text)':'var(--text2)'};line-height:1.25">${MONTHS[remBtnM]} Remittance Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the custom RCCG period</div>
           <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">${fmtDateShort(remBtnRange.from)} – ${fmtDateShort(remBtnRange.to)}</span></div>
         </button>
         <button onclick="App.setPeriodMode('calendar')" style="min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid ${!useRemPeriod?'var(--primary)':'var(--border)'};background:${!useRemPeriod?'rgba(15,110,86,0.10)':'var(--bg)'};cursor:pointer;text-align:left;outline:none;transition:background 0.15s,border-color 0.15s;box-shadow:${!useRemPeriod?'inset 4px 0 0 var(--primary)':'none'}">
-          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary)':'var(--text2)'};line-height:1.25">${MONTHS[calBtnM]} Calendar Period</div>
+          <div style="font-size:13px;font-weight:700;color:${!useRemPeriod?'var(--primary-text)':'var(--text2)'};line-height:1.25">${MONTHS[calBtnM]} Calendar Period</div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px">the normal month period</div>
           <div style="margin-top:8px"><span style="display:inline-block;padding:4px 10px;border-radius:12px;background:${!useRemPeriod?'var(--primary)':'rgba(0,0,0,0.05)'};color:${!useRemPeriod?'#fff':'var(--text2)'};font-size:11px;font-weight:700;letter-spacing:0.2px">1 ${MONTHS[calBtnM].slice(0,3)} – ${calBtnLastDay} ${MONTHS[calBtnM].slice(0,3)}</span></div>
         </button>
@@ -5242,7 +5243,7 @@ async function renderDashboard(){
         <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(184,134,11,0.25);display:flex;align-items:center;justify-content:space-between;gap:12px">
           <div>
             <div style="font-size:10.5px;color:var(--text3)">Includes unpaid from previous period(s)</div>
-            ${dashShortfallPeriods.length?`<button onclick="App.openReconcileModal()" style="margin-top:4px;background:transparent;border:none;color:var(--primary);font-size:11px;font-weight:600;text-decoration:underline;cursor:pointer;padding:0">Reconcile →</button>`:''}
+            ${dashShortfallPeriods.length?`<button onclick="App.openReconcileModal()" style="margin-top:4px;background:transparent;border:none;color:var(--primary-text);font-size:11px;font-weight:600;text-decoration:underline;cursor:pointer;padding:0">Reconcile →</button>`:''}
           </div>
           <div style="font-size:14px;font-weight:700;color:var(--danger);white-space:nowrap;flex-shrink:0">${fmt(dashPriorUnpaid)}</div>
         </div>`:''}
@@ -5284,7 +5285,7 @@ async function renderDashboard(){
           </div>
           ${dashLoanInfo.pendingNote?`<div style="font-size:10.5px;color:var(--amber);font-weight:600;line-height:1.5;margin-top:2px">${dashLoanInfo.pendingNote}</div>`:''}
         </div>
-        ${dashCanSeeLoans?`<div style="margin-top:8px;text-align:right"><a href="#" onclick="event.preventDefault();App.showLoans()" style="font-size:12px;font-weight:600;color:var(--primary);text-decoration:none">${canAction('loan_manage')?'Record or view loans ›':'View loans ›'}</a></div>`:''}
+        ${dashCanSeeLoans?`<div style="margin-top:8px;text-align:right"><a href="#" onclick="event.preventDefault();App.showLoans()" style="font-size:12px;font-weight:600;color:var(--primary-text);text-decoration:none">${canAction('loan_manage')?'Record or view loans ›':'View loans ›'}</a></div>`:''}
       </div>
 
       <!-- = connector to Final -->
@@ -5557,7 +5558,7 @@ async function renderDashboard(){
             return `
           <div style="margin-top:12px;padding:10px 14px;background:${_wkPeriodIsDeficit?'#FCEBEB':'var(--green-light,#E1F5EE)'};border-radius:10px;text-align:center">
             <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Period Total ${_wkPeriodIsDeficit?'Deficit':'Surplus'}</div>
-            <div style="font-size:20px;font-weight:800;color:${_wkPeriodIsDeficit?'var(--danger)':'var(--primary)'}">${fmt(_wkPeriodTotal)}</div>
+            <div style="font-size:20px;font-weight:800;color:${_wkPeriodIsDeficit?'var(--danger)':'var(--primary-text)'}">${fmt(_wkPeriodTotal)}</div>
           </div>`; })() : ''}
         </div>` : ''}
 
@@ -5662,7 +5663,7 @@ async function renderDashboard(){
               <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:var(--text)">${esc(t.label)}</div></div>
               <div style="text-align:right;flex-shrink:0;margin-left:12px"><div style="font-size:13px;font-weight:600;color:var(--text)">${fmt(amt)}</div><div style="font-size:11px;color:var(--text3)">${pct}%</div></div>
             </div>`;
-          }).join('')+`<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary)">${fmt(totalIncome)}</span></div>`
+          }).join('')+`<div style="display:flex;justify-content:space-between;padding-top:10px;margin-top:4px"><span style="font-size:13px;font-weight:600;color:var(--text2)">Total income</span><span style="font-size:16px;font-weight:700;color:var(--primary-text)">${fmt(totalIncome)}</span></div>`
           :'<div class="empty-table">No income recorded this month.</div>'}
         </div>
 
@@ -5713,9 +5714,9 @@ async function renderDashboard(){
           <div class="status-row"><div><div class="status-row-label">Ministers</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(remittances.totalMinisters)}</div></div></div>
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Remittance Due</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--danger);font-size:15px">${fmt(dashTotalRemDue)}</div></div></div>
           <div class="status-row" style="margin-top:8px"><div><div class="status-row-label">Children's Department</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(dashChildrenDeptShare)}</div></div></div>
-          <div class="status-row"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(netLocal)}</div></div></div>
+          <div class="status-row"><div><div class="status-row-label fw-bold">Net Local Retained</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary-text);font-size:15px">${fmt(netLocal)}</div></div></div>
           <div class="status-row"><div><div class="status-row-label">+ Other Income (not remitted)</div></div><div class="status-row-right"><div class="status-row-amt">${fmt(otherUnremittedIncome)}</div></div></div>
-          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Local Retained Income</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(netLocal + otherUnremittedIncome)}</div></div></div>
+          <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px;padding-top:12px"><div><div class="status-row-label fw-bold">Total Local Retained Income</div></div><div class="status-row-right"><div class="status-row-amt" style="color:var(--primary-text);font-size:16px">${fmt(netLocal + otherUnremittedIncome)}</div></div></div>
         </div>
       </div>
     </div>`;
@@ -5922,11 +5923,11 @@ async function renderIncome(){
     </div>
     <div class="kpi-grid" style="margin-bottom:16px">
       <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Collected</div><div class="kpi-val">${fmt(totalCollected)}</div><div class="kpi-delta up">${records.length} record(s)</div></div>
-      <div class="kpi" onclick="App.showCashPoolModal()" style="cursor:pointer" title="Tap to see the selected-period breakdown"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Tap for selected period ›':'All deposited ✓'}</div></div>
+      <div class="kpi" onclick="App.showCashPoolModal()" style="cursor:pointer" title="Tap to see the selected-period breakdown"><div class="kpi-icon" style="background:#FAEEDA">💵</div><div class="kpi-label">Cash with Accountant</div><div class="kpi-val" style="color:${cashWithAccountant>0?'var(--amber)':'var(--primary-text)'}">${fmt(cashWithAccountant)}</div><div class="kpi-delta ${cashWithAccountant>0?'warn':'up'}">${cashWithAccountant>0?'Tap for selected period ›':'All deposited ✓'}</div></div>
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
     ${_hasPendingDeposits?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_pendingDepTotal)}</strong> is ${_pendingFlaggedDeposits[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it':'<strong>pending AI verification</strong>'}. Check the Bank page for details.</span></div>`:''}
-    ${cashWithAccountant>0&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:underline;color:var(--primary);font-weight:600">View breakdown</a> · <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>0&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:underline;color:var(--primary-text);font-weight:600">View breakdown</a> · <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     ${renderSatelliteFundsInSection(satFundsInRecords)}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
@@ -6532,7 +6533,7 @@ function renderBudgetLine(line, expenses, progress){
   const saved = Math.max(0, Number(line.saved)||0);
   const pct = Number.isFinite(line.pct) ? line.pct : (usable ? Math.round((line.spent/usable)*100) : (line.spent>0?100:0));
   const savesTag = line.saves
-    ? `<span class="badge" title="${esc(budgetSavingReasonText(line.saveReason))}" style="margin-left:6px;background:rgba(15,110,86,0.12);color:var(--primary)">Saves unspent</span>`
+    ? `<span class="badge" title="${esc(budgetSavingReasonText(line.saveReason))}" style="margin-left:6px;background:rgba(15,110,86,0.12);color:var(--primary-text)">Saves unspent</span>`
     : '';
   const amountLine = saved > 0
     ? `${fmt(line.spent)} of ${fmt(usable)} (Budget ${fmt(line.budgeted)} · + ${fmt(saved)} saved = ${fmt(usable)} you can use) · ${leftText}`
@@ -7524,9 +7525,9 @@ async function renderIncomeSummary(records){
             <div class="status-row-label">${esc(t.label)}</div>
             <div class="status-row-amt">${totals[t.key]>0?fmt(totals[t.key]):'—'}</div>
           </div>`).join('')}
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Sunday Sub-total</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sundayGrand)}</div></div>
-        ${otherTotal>0?`<div class="status-row" style="margin-top:8px"><div class="status-row-label">Other Income (donations, midweek, etc.)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(otherTotal)}</div></div>`:''}
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">${otherTotal>0?'Grand Total (All Income)':'Grand Total'}</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(grand)}</div></div>
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Sunday Sub-total</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(sundayGrand)}</div></div>
+        ${otherTotal>0?`<div class="status-row" style="margin-top:8px"><div class="status-row-label">Other Income (donations, midweek, etc.)</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(otherTotal)}</div></div>`:''}
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">${otherTotal>0?'Grand Total (All Income)':'Grand Total'}</div><div class="status-row-amt" style="color:var(--primary-text);font-size:16px">${fmt(grand)}</div></div>
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">Remittance Breakdown</span><span style="font-size:11px;color:var(--text3)">Applies to Sunday collections only</span></div>
@@ -7560,7 +7561,7 @@ async function renderIncomeSummary(records){
         ${(rem.childrenDept||0)>0?`<div class="status-row" style="background:var(--surface);border-radius:var(--r);padding:8px 10px;border:none;margin-top:4px">
           <div><div class="status-row-label">Children's Department</div><div class="status-row-sub">Held by the Children Teacher — not parish money</div></div><div class="status-row-amt" style="color:var(--text2)">${fmt(rem.childrenDept)}</div>
         </div>`:''}
-        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
+        <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px"><div class="status-row-label fw-bold">Net Local Retained</div><div class="status-row-amt" style="color:var(--primary-text);font-size:16px">${fmt(trueNetLocal)}</div></div>`:''}
       </div>
     </div>`;
 }
@@ -7666,7 +7667,7 @@ function showIncomeForm(){
         <button type="button" class="btn btn-sm" style="margin-top:6px" onclick="App.addBankTransferRow()">+ Add Transfer</button>
         <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--surface);border-radius:var(--r)">
           <span style="font-size:12px;font-weight:600;color:var(--text2)">Total Bank Transfers</span>
-          <span id="inc_bank_transfer_total" style="font-size:15px;font-weight:700;color:var(--primary)">₦0</span>
+          <span id="inc_bank_transfer_total" style="font-size:15px;font-weight:700;color:var(--primary-text)">₦0</span>
         </div>
         <input type="hidden" id="inc_bank_transfer" value="0" />
       </div>
@@ -7677,7 +7678,7 @@ function showIncomeForm(){
     </div>
     <div id="inc_breakdown_card" class="card" style="background:var(--surface);margin-top:4px">
       <div style="font-size:12px;color:var(--text2);line-height:2">
-        <span style="color:var(--primary);font-weight:600">💵 Cash with Accountant (to deposit):</span> <span id="inc_cash_held">₦0</span>
+        <span style="color:var(--primary-text);font-weight:600">💵 Cash with Accountant (to deposit):</span> <span id="inc_cash_held">₦0</span>
         &nbsp;·&nbsp; 🏦 Bank Transfer: <span id="inc_bank_lbl">₦0</span>
         &nbsp;·&nbsp; 💳 To Petty Cash: <span id="inc_petty_lbl">₦0</span>
         &nbsp;·&nbsp; 🧒 Children Teacher Hold: <span id="inc_children_teacher_lbl">₦0</span>
@@ -7910,7 +7911,7 @@ async function viewIncome(id){
 
     <div style="font-size:11px;color:var(--text3);margin:-2px 0 8px;line-height:1.5"><strong style="color:var(--text2)">Part 1 — how this ${fmt(r.totalCollection)} was split</strong> when it was handed over. These figures are specific to this collection.</div>
     ${childrenTeacherHeld?`<div class="status-row"><div class="status-row-label">🧒 Children Teacher Hold (for refreshments)</div><div class="status-row-amt" style="color:var(--success)">${fmt(childrenTeacherHeld)}</div></div>`:''}
-    ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (straight to bank)</div><div class="status-row-amt" style="color:var(--primary)">${fmt(btAmt)}</div></div>`:''}
+    ${btAmt?`<div class="status-row"><div class="status-row-label">🏦 Bank Transfer (straight to bank)</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(btAmt)}</div></div>`:''}
     ${dpAmt?`<div class="status-row"><div class="status-row-label">💳 Direct → Admin Officer Petty Cash</div><div class="status-row-amt" style="color:var(--success)">${fmt(dpAmt)}</div></div>`:''}
     <div class="status-row"><div class="status-row-label" style="font-weight:600">💵 Cash Handed to Accountant</div><div class="status-row-amt" style="font-weight:700;color:var(--amber)">${fmt(cashHeld)}</div></div>
     <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Total Collection</div><div class="status-row-amt" style="font-weight:700">${fmt(r.totalCollection)}</div></div>
@@ -8102,7 +8103,7 @@ async function reconcileCashWithAccountant(){
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Log an audited adjustment that brings the ledger balance in line with the cash the accountant actually has in hand today. The variance is recorded as an explicit entry (positive or negative) so the audit trail stays intact.</span></div>
     <div class="form-group">
       <label class="form-label">Current Ledger Balance (Cash with Accountant)</label>
-      <div style="font-size:22px;font-weight:700;color:${current>0.5?'var(--amber)':'var(--primary)'};padding:8px 0">${fmt(current)}</div>
+      <div style="font-size:22px;font-weight:700;color:${current>0.5?'var(--amber)':'var(--primary-text)'};padding:8px 0">${fmt(current)}</div>
     </div>
     <div class="form-group">
       <label class="form-label">Actual Cash Counted with Accountant Today *</label>
@@ -8259,8 +8260,8 @@ async function confirmDeposit(id){
     <div class="modal-title">💰 Record Cash Deposit — ${fmtDate(r.date)}</div>
     ${totalCashWithAccountant > 0 ? `
     <div style="background:var(--primary-light);border:1.5px solid var(--primary);border-radius:8px;padding:12px 14px;margin-bottom:14px">
-      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Total Cash with Accountant</div>
-      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1;margin-bottom:8px">${fmt(totalCashWithAccountant)}</div>
+      <div style="font-size:11px;font-weight:700;color:var(--primary-text);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">Your Total Cash with Accountant</div>
+      <div style="font-size:22px;font-weight:800;color:var(--primary-text);line-height:1;margin-bottom:8px">${fmt(totalCashWithAccountant)}</div>
       <div style="display:flex;flex-wrap:wrap;gap:16px;font-size:13px">
         <span style="color:var(--text2)">This record: <strong style="color:var(--text)">${fmt(effectiveRemaining)}</strong></span>
         ${otherCash > 0.5 ? `<span style="color:var(--text2)">Other cash held: <strong style="color:var(--text)">${fmt(otherCash)}</strong></span>` : `<span style="color:var(--success,#2e7d32);font-size:12px;font-weight:600">✓ Only pending record</span>`}
@@ -8269,7 +8270,7 @@ async function confirmDeposit(id){
     </div>` : ''}
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Record when you physically deposit the cash collected into the church bank account.</span></div>
     <div class="form-group"><label class="form-label">Cash Available from this Record</label>
-      <div style="font-size:20px;font-weight:700;color:var(--primary);padding:8px 0">${fmt(effectiveRemaining)}</div>
+      <div style="font-size:20px;font-weight:700;color:var(--primary-text);padding:8px 0">${fmt(effectiveRemaining)}</div>
       ${alreadyDeposited?`<div class="form-hint">${fmt(alreadyDeposited)} already deposited previously from this record.</div>`:''}
       ${isSunday&&sundayCycle?`<div class="form-hint">This exact deposit will be tied to ${fmtDate(r.date)} even if you bank it after this Sunday.</div>`:''}
       ${expensesDeducted>0?`<div class="form-hint" style="color:var(--danger)">💸 ${fmt(expensesDeducted)} deducted — cash expenses already recorded.</div>`:''}
@@ -8425,14 +8426,14 @@ async function confirmBulkDeposit(){
           <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.label}</div>
           <div style="font-size:11px;color:var(--text3)">${fmtDate(item.date)}</div>
         </div>
-        <div style="font-size:14px;font-weight:700;color:var(--primary)">${fmt(remaining)}</div>
+        <div style="font-size:14px;font-weight:700;color:var(--primary-text)">${fmt(remaining)}</div>
       </div>
       <div style="padding-left:30px;font-size:11px;color:var(--text2);line-height:2">
         <div style="display:flex;justify-content:space-between"><span>Cash received</span><span style="font-weight:600">${fmt(cashHeld)}</span></div>
         ${expensed>0?`<div style="display:flex;justify-content:space-between"><span>Less: expenses from this cash</span><span style="color:var(--danger)">−${fmt(expensed)}</span></div>`:''}
         ${deposited>0?`<div style="display:flex;justify-content:space-between"><span>Less: already deposited</span><span style="color:var(--danger)">−${fmt(deposited)}</span></div>`:''}
         ${pettyUsed>0?`<div style="display:flex;justify-content:space-between"><span>Less: petty cash top-ups</span><span style="color:var(--danger)">−${fmt(pettyUsed)}</span></div>`:''}
-        <div style="display:flex;justify-content:space-between;border-top:1px dashed var(--border);padding-top:3px;margin-top:2px"><span style="font-weight:700">Available for deposit</span><span style="font-weight:700;color:var(--primary)">${fmt(remaining)}</span></div>
+        <div style="display:flex;justify-content:space-between;border-top:1px dashed var(--border);padding-top:3px;margin-top:2px"><span style="font-weight:700">Available for deposit</span><span style="font-weight:700;color:var(--primary-text)">${fmt(remaining)}</span></div>
       </div>
     </div>`;
   }).join('') : '<div style="padding:12px;font-size:12px;color:var(--text3);text-align:center">No cash income pending deposit.</div>';
@@ -8448,8 +8449,8 @@ async function confirmBulkDeposit(){
     <button class="modal-close" onclick="closeModal()">✕</button>
     <div class="modal-title">💰 Record Cash Deposit</div>
     <div style="background:var(--primary-light);border:1.5px solid var(--primary);border-radius:8px;padding:12px 14px;margin-bottom:14px">
-      <div style="font-size:11px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Cash with Accountant — Full Balance</div>
-      <div style="font-size:22px;font-weight:800;color:var(--primary);line-height:1">${fmt(cashWithAccountant)}</div>
+      <div style="font-size:11px;font-weight:700;color:var(--primary-text);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Cash with Accountant — Full Balance</div>
+      <div style="font-size:22px;font-weight:800;color:var(--primary-text);line-height:1">${fmt(cashWithAccountant)}</div>
       <div style="font-size:12px;color:var(--text2);margin-top:4px">This is the exact amount you will deposit to the bank.</div>
     </div>
     <details open style="margin-bottom:16px">
@@ -8460,7 +8461,7 @@ async function confirmBulkDeposit(){
         ${incomeHtml}${bankHtml}${expHtml}${pettyHtml}
         <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:2px solid var(--border);margin-top:6px">
           <span style="font-size:13px;font-weight:700">Net Cash to Deposit</span>
-          <span style="font-size:17px;font-weight:800;color:var(--primary)">${fmt(cashWithAccountant)}</span>
+          <span style="font-size:17px;font-weight:800;color:var(--primary-text)">${fmt(cashWithAccountant)}</span>
         </div>
       </div>
     </details>
@@ -9201,7 +9202,7 @@ async function renderRemittances(){
           </tr>
           <tr>
             <td colspan="2" style="font-size:12px;color:var(--text2);padding:6px 12px">Net Local Retained (after Province Rebate &amp; Fixed Quotas)</td>
-            <td class="td-right rem-amt-col" style="font-size:13px;color:var(--primary);font-weight:600;padding:6px 12px">${fmt(trueNetLocal)}</td>
+            <td class="td-right rem-amt-col" style="font-size:13px;color:var(--primary-text);font-weight:600;padding:6px 12px">${fmt(trueNetLocal)}</td>
           </tr>
         </table></div>
 
@@ -9245,7 +9246,7 @@ async function renderRemittances(){
               <div class="feed-dot" style="background:var(--success-light)">✓</div>
               <div class="feed-body">
                 <div class="feed-title">RCCG Remittance Payment</div>
-                <div class="feed-sub">${r.paymentMethod==='cash'?'<span style="color:var(--amber)">💵 Cash</span> · ':'🏦 Bank · '}Ref: ${esc(r.reference)||'—'}<br>Authorized: ${esc(r.authorizedBy)||'—'}${(r.otherParishesAmount||0)>0?`<br><span style="color:var(--primary)">🛰️ Satellite share (${fmt(r.otherParishesAmount)}) drawn from pool — see Satellite/Zone Pool panel</span>`:''}</div>
+                <div class="feed-sub">${r.paymentMethod==='cash'?'<span style="color:var(--amber)">💵 Cash</span> · ':'🏦 Bank · '}Ref: ${esc(r.reference)||'—'}<br>Authorized: ${esc(r.authorizedBy)||'—'}${(r.otherParishesAmount||0)>0?`<br><span style="color:var(--primary-text)">🛰️ Satellite share (${fmt(r.otherParishesAmount)}) drawn from pool — see Satellite/Zone Pool panel</span>`:''}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
               <div class="feed-right td-green">${fmt(r.amount)}</div>
@@ -9261,7 +9262,7 @@ async function renderRemittances(){
               <div class="feed-dot" style="background:${isWrittenOff?'#FDECC8':'var(--success-light)'}">${isWrittenOff?'⚖️':'✓'}</div>
               <div class="feed-body">
                 <div class="feed-title">${esc(r.label||'RCCG Remittance')} ${isWrittenOff?'<span class="badge badge-warn" style="font-size:9px;margin-left:4px">WRITTEN OFF</span>':''}</div>
-                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${isWrittenOff?`Reason: ${esc(r.notes)||'—'}`:`${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'}`} · ${esc(r.authorizedBy)||'—'}${(r.otherParishesAmount||0)>0?`<br><span style="color:var(--primary)">🛰️ Satellite share (${fmt(r.otherParishesAmount)}) drawn from pool</span>`:''}</div>
+                <div class="feed-sub">${r.periodFrom&&r.periodTo?`<em>Period: ${fmtDate(r.periodFrom)} – ${fmtDate(r.periodTo)}</em><br>`:''}${isWrittenOff?`Reason: ${esc(r.notes)||'—'}`:`${r.paymentMethod==='cash'?'💵 Cash':'🏦 Bank'} · Ref: ${esc(r.reference)||'—'}`} · ${esc(r.authorizedBy)||'—'}${(r.otherParishesAmount||0)>0?`<br><span style="color:var(--primary-text)">🛰️ Satellite share (${fmt(r.otherParishesAmount)}) drawn from pool</span>`:''}</div>
                 <div class="feed-time">${fmtDate(r.paidDate)}</div>
               </div>
               <div class="feed-right" style="color:${isWrittenOff?'var(--amber)':'var(--success)'}">${fmt(r.amount)}</div>
@@ -9275,7 +9276,7 @@ async function renderRemittances(){
           ${rem.lines.filter(l=>(l.local||0)>0).map(l=>`
             <div class="status-row">
               <div class="status-row-label">${l.label} (local ${Math.round((l.local/l.total)*100)}%)</div>
-              <div class="status-row-amt" style="color:var(--primary)">${fmt(l.local)}</div>
+              <div class="status-row-amt" style="color:var(--primary-text)">${fmt(l.local)}</div>
             </div>`).join('')}
           ${rem.provinceRebate>0?`
           <div class="status-row" style="border-top:1px dashed var(--border)">
@@ -9289,7 +9290,7 @@ async function renderRemittances(){
           </div>`:''}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">NET LOCAL RETAINED</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt(trueNetLocal)}</div>
+            <div class="status-row-amt" style="color:var(--primary-text);font-size:15px">${fmt(trueNetLocal)}</div>
           </div>
         </div>
 
@@ -9301,26 +9302,26 @@ async function renderRemittances(){
           ${(rem.totalArea||0)>0?`
           <div class="status-row">
             <div class="status-row-label">TG → Area / Zonal Pastor (${Math.round(rr.tgArea*100)}%)</div>
-            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalArea)}</div>
+            <div class="status-row-amt" style="color:var(--primary-text)">${fmt(rem.totalArea)}</div>
           </div>`:''}
           ${(rem.totalPastor||0)>0?`
           <div class="status-row">
             <div class="status-row-label">TG → Parish Pastor's Share (${Math.round(rr.tgPastor*100)}%)</div>
-            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalPastor)}</div>
+            <div class="status-row-amt" style="color:var(--primary-text)">${fmt(rem.totalPastor)}</div>
           </div>`:''}
           ${(rem.totalMinisters||0)>0?`
           <div class="status-row">
             <div class="status-row-label">TG → Ministers' Share (${Math.round(rr.tgMinisters*100)}%)</div>
-            <div class="status-row-amt" style="color:var(--primary)">${fmt(rem.totalMinisters)}</div>
+            <div class="status-row-amt" style="color:var(--primary-text)">${fmt(rem.totalMinisters)}</div>
           </div>`:''}
           ${(()=>{ const mq=quotaLines.find(q=>isMummyQuotaLabel(q.label)); return mq&&(mq.amount||0)>0?`
           <div class="status-row">
             <div><div class="status-row-label">${mq.label}</div><div class="status-row-sub">${esc(mq.basis||'Fixed monthly amount')}</div></div>
-            <div class="status-row-amt" style="color:var(--primary)">${fmt(mq.amount)}</div>
+            <div class="status-row-amt" style="color:var(--primary-text)">${fmt(mq.amount)}</div>
           </div>`:'' })()}
           <div class="status-row" style="border-top:2px solid var(--border);margin-top:4px">
             <div class="status-row-label fw-bold">TOTAL PASTORATE &amp; MINISTERS SHARE</div>
-            <div class="status-row-amt" style="color:var(--primary);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0))}</div>
+            <div class="status-row-amt" style="color:var(--primary-text);font-size:15px">${fmt((rem.totalArea||0)+(rem.totalPastor||0)+(rem.totalMinisters||0)+(quotaLines.find(q=>isMummyQuotaLabel(q.label))?.amount||0))}</div>
           </div>
         </div>`:''}
       </div>
@@ -9543,6 +9544,39 @@ async function submitLoanRepayment(loanId, btn=null){
   await showLoans();
 }
 
+
+// ── Appearance: Light / Dark / Auto (follow the phone). The choice is kept on this device only. ──
+const THEME_KEY = 'rccgTheme';
+function getThemePref(){
+  try { const v = localStorage.getItem(THEME_KEY); return v === 'light' || v === 'dark' ? v : 'auto'; } catch(e) { return 'auto'; }
+}
+function themeIsDark(pref){
+  if(pref === 'dark') return true;
+  if(pref === 'light') return false;
+  try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch(e) { return false; }
+}
+function applyTheme(pref){
+  const root = document.documentElement;
+  if(pref === 'light' || pref === 'dark') root.setAttribute('data-theme', pref); else root.removeAttribute('data-theme');
+  try {
+    const m = document.querySelector('meta[name="theme-color"]');
+    if(m) m.setAttribute('content', themeIsDark(pref) ? '#121613' : '#0F6E56');
+    document.querySelectorAll('[data-theme-pref]').forEach(b => b.setAttribute('aria-pressed', b.getAttribute('data-theme-pref') === pref ? 'true' : 'false'));
+  } catch(e) {}
+}
+function setTheme(pref){
+  const p = pref === 'light' || pref === 'dark' ? pref : 'auto';
+  try { if(p === 'auto') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, p); } catch(e) {}
+  applyTheme(p);
+}
+function initTheme(){
+  applyTheme(getThemePref());
+  try {
+    const mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+    if(mq && mq.addEventListener && !initTheme._wired){ initTheme._wired = true; mq.addEventListener('change', () => applyTheme(getThemePref())); }
+  } catch(e) {}
+}
+
 function gotoSatellitePool(){
   state._scrollToSatPool = true;
   navigate('income');
@@ -9626,7 +9660,7 @@ function renderSatelliteFundsPanel(totalIn, totalOut, totalTransferOut, held, re
         <div class="kpi"><div class="kpi-icon" style="background:#E1F5EE">📥</div><div class="kpi-label">Total Received (In)</div><div class="kpi-val" style="color:var(--success)">${fmt(totalIn)}</div></div>
         <div class="kpi"><div class="kpi-icon" style="background:#FCEBEB">📤</div><div class="kpi-label">Paid Out (Province/Joint)</div><div class="kpi-val" style="color:var(--danger)">${fmt(totalOut)}</div></div>
         <div class="kpi"><div class="kpi-icon" style="background:#FAEEDA">🔁</div><div class="kpi-label">Transferred to Parish</div><div class="kpi-val" style="color:var(--amber)">${fmt(totalTransferOut)}</div>${reasonBits.length?`<div class="kpi-delta" style="color:var(--text3)">${reasonBits.join(' · ')}</div>`:''}</div>
-        <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">${held<0?heldDisp.label:'Current Balance Held'}</div><div class="kpi-val" style="color:${held<0?'var(--primary)':'inherit'}">${heldDisp.amount}</div></div>
+        <div class="kpi"><div class="kpi-icon" style="background:#E6F1FB">🏦</div><div class="kpi-label">${held<0?heldDisp.label:'Current Balance Held'}</div><div class="kpi-val" style="color:${held<0?'var(--primary-text)':'inherit'}">${heldDisp.amount}</div></div>
       </div>
       ${(canRecord||canTransfer)?`
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
@@ -9797,7 +9831,7 @@ async function showRemittancePaymentModal(part){
     ${part==='a'?`
     <!-- Area Payment (HQ pays for all parishes combined) -->
     <div style="background:var(--surface);border-radius:var(--r);padding:14px;margin-bottom:14px;border-left:3px solid var(--primary)">
-      <div style="font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">🏛️ Area Payment</div>
+      <div style="font-size:12px;font-weight:700;color:var(--primary-text);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">🏛️ Area Payment</div>
       <div style="font-size:12px;color:var(--text2);margin-bottom:12px">
         As Area HQ, you pay remittance for all parishes combined on the RCCG portal. Enter the <strong>total area amount</strong> paid — the system will calculate how much came from satellite parishes.
       </div>
@@ -9834,7 +9868,7 @@ async function showRemittancePaymentModal(part){
         </div>
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
           <span style="color:var(--text2)">🏘️ Satellite Parishes (3)</span>
-          <span id="rem_area_others_amt" style="font-weight:600;color:var(--primary)">₦0</span>
+          <span id="rem_area_others_amt" style="font-weight:600;color:var(--primary-text)">₦0</span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:13px;padding-top:6px;border-top:1px solid var(--border);margin-top:4px">
           <span style="font-weight:700">Total Area Payment</span>
@@ -11654,7 +11688,7 @@ async function renderExpenses(){
           " >
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <span style="font-size:22px;line-height:1">${c.icon}</span>
-              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
+              ${pct>0?`<span style="font-size:11px;font-weight:700;padding:2px 6px;border-radius:10px;background:var(--primary-light);color:var(--primary-text)">${pct<1?'<1':Math.round(pct)}%</span>`:''}
             </div>
             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:2px">
               <span style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3">${c.label}</span>
@@ -12731,7 +12765,7 @@ async function showBankWithdrawal(){
 
     <!-- Direct Expense fields — shown only when Direct Expense Payment is selected -->
     <div id="wd_expense_section" style="display:none;background:var(--surface);border-radius:var(--r);padding:12px;margin-bottom:14px;border-left:3px solid var(--primary)">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--primary);margin-bottom:10px">📋 Expense Details</div>
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--primary-text);margin-bottom:10px">📋 Expense Details</div>
       <div class="form-group" style="margin-bottom:10px">
         <label class="form-label">Category *</label>
         <select id="wd_exp_cat" class="form-select" onchange="App.onWdCatChange()">
@@ -13107,7 +13141,7 @@ async function renderBank(){
       <div class="kpi" style="grid-column:1/-1;min-width:0">
         <div class="kpi-icon" style="background:#E6F1FB">🏦</div>
         <div class="kpi-label">Bank Balance</div>
-        <div class="kpi-val" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(bankBalance)}</div>
+        <div class="kpi-val" style="color:${bankBalance<0?'var(--danger)':'var(--primary-text)'}">${fmt(bankBalance)}</div>
         ${renderPortalBalanceBlock(bankPortalBalance, bankBalance)}
       </div>
       <div class="kpi">
@@ -13144,7 +13178,7 @@ async function renderBank(){
         </div>
         <div style="text-align:center;padding:10px 4px">
           <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Closing Balance</div>
-          <div style="font-size:14px;font-weight:700;color:${closingBankBalance<0?'var(--danger)':'var(--primary)'}">${fmt(closingBankBalance)}</div>
+          <div style="font-size:14px;font-weight:700;color:${closingBankBalance<0?'var(--danger)':'var(--primary-text)'}">${fmt(closingBankBalance)}</div>
         </div>
       </div>
     </div>`}
@@ -13201,7 +13235,7 @@ function renderBankOverview(monthBankTx,bankBalance){
             <div>Balance after this transaction: <strong style="color:${balColor}">${fmt(t.balAfter)}</strong></div>
             ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
             ${t.txNote?`<div>${esc(t.txNote)}</div>`:''}
-            ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
+            ${(()=>{ const pid=t._splitParts?t._splitParts.find(p=>p.hasPhoto||p.photoData)?.id:(t.hasPhoto||t.photoData?t.id:null); return pid?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${pid}')" style="color:var(--primary-text);font-weight:600">📷 View Deposit Slip</a></div>`:''; })()}
             ${t._splitParts?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">Split across ${t._splitParts.length} income records: ${t._splitParts.map(p=>fmt(p.amount)).join(' + ')}</div>`:''}
             ${t.verificationStatus?`<div style="margin-top:4px">${depositActionButtons(t)}</div>`:''}
             ${t.aiNotes?`<div style="margin-top:4px;font-size:10px;color:var(--text3)">AI: ${t.aiNotes}</div>`:''}
@@ -13424,7 +13458,7 @@ function renderBankDeposits(deposits){
         <div class="bk-det" style="display:none;padding:8px 0 2px;font-size:11px;color:var(--text2);line-height:2">
           ${t.reference?`<div>Reference: <strong>${t.reference}</strong></div>`:''}
           ${t.recordedBy?`<div>Recorded By: <strong>${t.recordedBy}</strong></div>`:''}
-          ${photoId?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${photoId}')" style="color:var(--primary);font-weight:600">📷 View Deposit Slip</a></div>`:''}
+          ${photoId?`<div><a href="#" onclick="event.preventDefault();App.viewCashPhoto('${photoId}')" style="color:var(--primary-text);font-weight:600">📷 View Deposit Slip</a></div>`:''}
           ${breakdown}
           <div>Time: ${fmtTime(t.createdAt||t.date)}</div>
         </div>
@@ -13532,7 +13566,7 @@ function renderPortalBalanceBlock(portal, appBalance){
   if(notChecked){
     return `<div data-portal-balance-block style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text3);display:flex;justify-content:space-between;align-items:center">
       <span>Real Balance: not checked yet</span>
-      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary-text);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>`;
   }
   const diff = appBalance - portal.balance;
@@ -13551,7 +13585,7 @@ function renderPortalBalanceBlock(portal, appBalance){
     ${!aligned && canReconcile ? `<button onclick="App.goToBankReconciliation()" class="btn btn-sm btn-primary" style="width:100%;margin-top:8px;font-size:12px;padding:7px 10px;white-space:normal;height:auto;line-height:1.3;box-sizing:border-box">🔍 Reconcile This Difference</button>` : ''}
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);margin-top:4px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
-      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${prevTs}')" style="background:transparent;border:none;color:var(--primary-text);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>
   </div>`;
 }
@@ -13649,7 +13683,7 @@ function renderReconciliationHeadline(portal, appBalance, entries=[]){
     ${breakdown}
     <div style="display:flex;justify-content:space-between;align-items:center;color:var(--text3);font-size:11.5px;margin-top:8px">
       <span>${checkedAt?`Checked ${checkedAt}`:''}</span>
-      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${portal.checked_at||''}')" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
+      <button onclick="App.refreshPortalBankBalance(this, ${appBalance}, '${portal.checked_at||''}')" style="background:transparent;border:none;color:var(--primary-text);font-weight:600;text-decoration:underline;cursor:pointer;font-size:11.5px;padding:0">🔄 Refresh</button>
     </div>
   </div>`;
 }
@@ -13672,7 +13706,7 @@ function renderBankReconciliation(bankTxAll,bankBalance,bankTransferIncome,cashD
         <div class="status-row"><div><div class="status-row-label" style="color:var(--danger)">− Petty cash top-ups via bank transfer</div></div><div class="status-row-right"><div class="status-row-amt td-red">${fmt(pettyBankTopups)}</div></div></div>
         <div class="status-row" style="border-top:2px solid var(--border);margin-top:8px;padding-top:12px">
           <div><div class="status-row-label fw-bold">= Computed Bank Balance</div></div>
-          <div class="status-row-right"><div class="status-row-amt" style="color:${bankBalance<0?'var(--danger)':'var(--primary)'};font-size:18px;font-weight:700">${fmt(bankBalance)}</div></div>
+          <div class="status-row-right"><div class="status-row-amt" style="color:${bankBalance<0?'var(--danger)':'var(--primary-text)'};font-size:18px;font-weight:700">${fmt(bankBalance)}</div></div>
         </div>
       </div>
     </details>
@@ -13751,7 +13785,7 @@ function renderBankLedgerCard(){
   return `<div class="card" id="bankLedgerCard">
     <div class="card-header" style="flex-wrap:wrap;gap:8px">
       <span class="card-title">${title}</span>
-      <button onclick="App.toggleBankLedgerAll()" style="background:transparent;border:none;color:var(--primary);font-weight:600;text-decoration:underline;cursor:pointer;font-size:12px;padding:0">${showAll?'Show this month only':'Show all months'}</button>
+      <button onclick="App.toggleBankLedgerAll()" style="background:transparent;border:none;color:var(--primary-text);font-weight:600;text-decoration:underline;cursor:pointer;font-size:12px;padding:0">${showAll?'Show this month only':'Show all months'}</button>
     </div>
     <div style="padding:0 4px">${rows || `<div class="empty-table">${showAll?'No bank transactions found.':'No bank transactions this month.'}</div>`}</div>
     ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankLedger()">Show more (${left} left)</button>`:''}
@@ -13988,7 +14022,7 @@ function renderBankReconList(all, isAdmin){
   const left = rows.length - shown.length;
   const filtersOn = f.status!=='all' || f.dir!=='all' || f.sort!=='action' || String(f.q||'').trim()!=='';
   const empty = (all||[]).length
-    ? `<div class="empty-table">No bank lines match these filters.${filtersOn?` <a href="#" onclick="event.preventDefault();App.clearBankReconFilters()" style="color:var(--primary)">Clear filters</a>`:''}</div>`
+    ? `<div class="empty-table">No bank lines match these filters.${filtersOn?` <a href="#" onclick="event.preventDefault();App.clearBankReconFilters()" style="color:var(--primary-text)">Clear filters</a>`:''}</div>`
     : `<div class="empty-table">No bank movements reported yet.</div>`;
   return `${shown.map(e=>renderBankReconRow(e, isAdmin)).join('') || empty}
     ${left>0?`<button class="btn btn-sm" style="margin-top:10px;width:100%" onclick="App.showMoreBankRecon()">Show more (${left} left)</button>`:''}`;
@@ -14777,7 +14811,7 @@ async function renderPettyCash(){
             </td>
             <td class="td-muted">${r.requestedBy||'—'}</td>
             <td class="td-muted">${r.approvedBy||'—'}</td>
-            <td class="td-right td-bold" style="color:var(--primary)">
+            <td class="td-right td-bold" style="color:var(--primary-text)">
               <div>${fmt(r._effectiveAmount)}</div>
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--success)">Paid: ${fmt(r.actualAmount)}</div>`:''}
               ${(r.actualAmount||0)>0?`<div style="font-size:11px;color:var(--amber)">Due: ${fmt(_due)}</div>`:''}
@@ -15211,7 +15245,7 @@ async function showTopUpRequest(){
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>This lists everything paid from the wallet — petty cash expenses and Satellite/Zone pool payouts — that a previous top-up request has not already covered. The Accountant will verify these, then a Signatory approves before the cash is sent to you.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
-      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
+      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary-text)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
     </div>
     ${unrecovered.length ? `
     <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">Payments to be recovered (${unrecovered.length}):</div>
@@ -15221,7 +15255,7 @@ async function showTopUpRequest(){
         ${expRows}
         <tr style="border-top:2px solid var(--border)">
           <td colspan="3" style="font-size:13px;font-weight:700;padding:8px">Total to recover</td>
-          <td class="td-right td-bold" style="font-size:15px;color:var(--primary);padding:8px">${fmt(totalAmt)}</td>
+          <td class="td-right td-bold" style="font-size:15px;color:var(--primary-text);padding:8px">${fmt(totalAmt)}</td>
         </tr>
       </table>
     </div>
@@ -15344,7 +15378,7 @@ async function showAdvanceRequest(){
     <div class="alert alert-info"><span class="alert-icon">ℹ</span><span>Use this when you need cash <strong>before</strong> making a purchase. The Accountant verifies, a Signatory approves, then cash is released. You must submit proof of purchase within <strong>48 hours</strong>.</span></div>
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:12px;color:var(--text2)">Current wallet balance</span>
-      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
+      <span style="font-weight:700;color:${cashOnHand<0?'var(--danger)':cashOnHand<10000?'var(--amber)':'var(--primary-text)'}">${cashOnHand<0?'−'+fmt(Math.abs(cashOnHand)):fmt(cashOnHand)}</span>
     </div>
     <div class="form-group"><label class="form-label">What do you need to buy? *</label>
       <input type="text" id="adv_purpose" class="form-input" placeholder="e.g. Diesel for generator — Sunday 27 Apr" />
@@ -15477,7 +15511,7 @@ async function approvePetty(id, btn=null){
             ${expRows}
             <tr style="border-top:2px solid var(--border)">
               <td colspan="4" style="font-weight:700;padding:8px;font-size:13px">Total Requested</td>
-              <td style="font-weight:800;font-size:15px;color:var(--primary);text-align:right;padding:8px">${fmt(req.amount)}</td>
+              <td style="font-weight:800;font-size:15px;color:var(--primary-text);text-align:right;padding:8px">${fmt(req.amount)}</td>
             </tr>
           </table>
         </div>` : `<div class="empty-table" style="margin-bottom:12px">No linked items found. The Admin Officer submitted this without selecting specific expenses.</div>`}
@@ -15757,7 +15791,7 @@ async function showPettyRefill(prefillAmount, topupRequestId=''){
     <div style="background:var(--surface);border-radius:var(--r);padding:10px 14px;margin-bottom:14px">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;color:var(--text2)">Current cash balance</span><span style="font-weight:600;color:${petty.float<0?'var(--danger)':'var(--text)'}">${petty.float<0?'−'+fmt(Math.abs(petty.float)):fmt(petty.float)}</span></div>
       <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;color:var(--text2)">Approved maximum</span><span style="font-weight:600">${fmt(petty.max)}</span></div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;color:var(--text2)">Space to top up</span><span style="font-weight:600;color:var(--primary)">${fmt(Math.max(0,spaceInFloat))}</span></div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;color:var(--text2)">Space to top up</span><span style="font-weight:600;color:var(--primary-text)">${fmt(Math.max(0,spaceInFloat))}</span></div>
       ${suggested>0?`<div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)"><span style="font-size:12px;color:var(--text2)">Suggested amount (based on settled items)</span><span style="font-weight:700;color:var(--amber)">${fmt(suggested)}</span></div>`:''}
       ${petty.float<0?`<div style="margin-top:8px;font-size:12px;color:var(--danger);font-weight:600">⚠ The Admin Officer is owed ${fmt(Math.abs(petty.float))} of personal funds. Top this up to clear the debt.</div>`:''}
     </div>
@@ -18664,7 +18698,7 @@ async function showKPSCAlert(){
     <div class="modal-title">🔔 Alert KPSC — Emergency Support</div>
     <div class="alert alert-warn"><span class="alert-icon">⚠</span><span>Use this when the main account cannot cover necessary daily expenses after RCCG remittances. This follows proper procedure — no public announcements from the Pastor.</span></div>
     <div class="grid-2" style="margin:12px 0">
-      <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Current Balance</div><div style="font-size:18px;font-weight:700;color:${balance<0?'var(--danger)':'var(--primary)'}">${fmt(balance)}</div></div>
+      <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Current Balance</div><div style="font-size:18px;font-weight:700;color:${balance<0?'var(--danger)':'var(--primary-text)'}">${fmt(balance)}</div></div>
       <div style="background:var(--surface);padding:10px;border-radius:var(--r);text-align:center"><div class="amount-label">Remittances Pending</div><div style="font-size:18px;font-weight:700;color:var(--amber)">${fmt(remPending)}</div></div>
     </div>
     <div class="form-group"><label class="form-label">Nature of Emergency</label>
@@ -20033,7 +20067,7 @@ function satListHtml(){
     <div class="card sat-summary">
       <div class="status-row"><div class="status-row-label">Collections to remit so far</div><div class="status-row-amt">${fmt(sm.remitSoFar)}</div></div>
       <div class="status-row"><div class="status-row-label">Monthly quotas (share so far)</div><div class="status-row-amt">${fmt(sm.quotas)}</div></div>
-      <div class="status-row"><div class="status-row-label fw-bold">To remit so far</div><div class="status-row-amt" style="color:var(--primary)">${fmt(sm.toRemit)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">To remit so far</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(sm.toRemit)}</div></div>
       <div class="status-row"><div class="status-row-label fw-bold">Kept in the parish so far</div><div class="status-row-amt">${fmt(sm.kept)}</div></div>
     </div>
   </div>`;
@@ -22144,6 +22178,7 @@ return {
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
   _loanDashboardInfo: loanDashboardInfo,
+  setTheme, _getThemePref: getThemePref, _applyTheme: applyTheme,
   _summarizeLoans: summarizeLoans,
   _loanCashMovements: loanCashMovements,
   _buildCashPoolDetailLines: buildCashPoolDetailLines,
