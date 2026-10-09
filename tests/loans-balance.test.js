@@ -297,3 +297,32 @@ test('Sunday spent or lent to zero is cleared, not deposited; real deposit keeps
   assert.equal(App._computeSundayCashCycle(sunday,[{type:'cash_deposit',date:'2026-10-05',amount:1000,incomeRef:'S1'}],[],[],[],[],{}).status,'deposited');
   assert.equal(App._computeSundayCashCycle(sunday,[],[],[],[],[],{}).status,'pending');
 });
+
+// ── Monthly statement / report memo ──
+test('statement loans memo: period movements, closing balances, nothing counted before acknowledgement, no names', () => {
+  const loans = [
+    loan({ id: 'A', amount: 30000, date: '2026-09-20', repayments: [rep({ amount: 10000, date: '2026-10-08' })] }),   // lent in Sept, 10k repaid in Oct
+    loan({ id: 'B', direction: 'borrowed', amount: 8000, date: '2026-10-02', repayments: [rep({ amount: 3000, date: '2026-10-20' }), rep({ amount: 500, status: 'pending', date: '2026-10-21' })] }),
+    loan({ id: 'C', amount: 5000, date: '2026-10-12' }),                                                                // lent in Oct
+    loan({ id: 'D', status: 'pending', amount: 9999, date: '2026-10-03' }),                                              // not counted
+    loan({ id: 'E', status: 'reversed', amount: 7777, date: '2026-10-03' }),                                             // not counted
+  ];
+  const s = App._summarizeLoans(loans, '2026-10-01', '2026-10-31');
+  assert.equal(s.lentPeriod, 5000);
+  assert.equal(s.borrowedPeriod, 8000);
+  assert.equal(s.repaidToUsPeriod, 10000);
+  assert.equal(s.repaidByUsPeriod, 3000);
+  assert.equal(s.owedToUsEnd, 30000 + 5000 - 10000);
+  assert.equal(s.weOweEnd, 8000 - 3000);
+  assert.equal(s.anyActivity, true);
+  assert.ok(!JSON.stringify(s).includes('Bro Sam'));
+  // as of mid-month the later items are not yet there
+  const early = App._summarizeLoans(loans, '2026-10-01', '2026-10-10');
+  assert.equal(early.owedToUsEnd, 30000 - 10000);
+  assert.equal(early.weOweEnd, 8000);
+  // nothing at all -> no memo
+  assert.equal(App._summarizeLoans([], '2026-10-01', '2026-10-31').anyActivity, false);
+  // a settled old loan with nothing left and no activity this month -> no memo
+  const old = loan({ status: 'settled', amount: 1000, date: '2026-01-05', repayments: [rep({ amount: 1000, date: '2026-02-01' })] });
+  assert.equal(App._summarizeLoans([old], '2026-10-01', '2026-10-31').anyActivity, false);
+});
