@@ -121,6 +121,8 @@ export const DEFAULT_CONFIG = {
       saturday_note: { enabled: true, time: "18:00" },
       sunday_records: { enabled: true, every_minutes: 10 },
       bank_movements: { enabled: true },
+      deposit_bank_confirmed: { enabled: true },
+      deposit_bank_missing: { enabled: true, days: 3 },
       memo: { enabled: true },
       statement: { enabled: true },
       rrr_reminders: { enabled: true },
@@ -415,7 +417,12 @@ export function validateConfig(cfg) {
             }
           }
         }
-        for (const k of ["bank_movements", "memo", "statement", "rrr_reminders"]) {
+        const dbm = wa.deposit_bank_missing;
+        if (dbm !== undefined && dbm !== null && typeof dbm === "object" && !Array.isArray(dbm)
+            && dbm.days !== undefined && !(Number.isInteger(dbm.days) && dbm.days >= 1 && dbm.days <= 14)) {
+          errors.push("automations.whatsapp.deposit_bank_missing.days must be a whole number from 1 to 14");
+        }
+        for (const k of ["bank_movements", "deposit_bank_confirmed", "deposit_bank_missing", "memo", "statement", "rrr_reminders"]) {
           const b = wa[k];
           if (b === undefined) continue;
           if (!b || typeof b !== "object" || Array.isArray(b)) { errors.push(`automations.whatsapp.${k} must be an object`); continue; }

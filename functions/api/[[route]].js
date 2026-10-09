@@ -6461,10 +6461,20 @@ async function getWhatsappFinanceEvents(DB, authz) {
   const [loanRes, cashRes, poolRes] = await Promise.all([getLoans(DB, {finance:{role:'it_admin'}}), getCashTransactions(DB), getAccountantCashPool(DB)]);
   if (![loanRes,cashRes,poolRes].every(r=>r.ok)) throw new Error('WhatsApp finance source unavailable');
   const [loans,cash,pool] = await Promise.all([loanRes.json(),cashRes.json(),poolRes.json()]);
+  // One query for the bank lines, then exact-id maps (no substring matching: id 12 must not match 123).
+  const { results: bankRows } = await DB.prepare(`SELECT date,status,matched_refs_json,candidates_json FROM bank_recon_entries WHERE direction='in' AND status IN ('auto','resolved','needs_attention')`).all();
+  const matchedOn = new Map(), inReview = new Set();
+  const cashIds = (json) => (safeJsonParse(json, []) || []).filter(r => r && r.sourceTable === 'cash_transactions' && r.sourceId != null).map(r => String(r.sourceId));
+  for (const b of bankRows || []) {
+    if (b.status === 'needs_attention') cashIds(b.candidates_json).forEach(id => inReview.add(id));
+    else cashIds(b.matched_refs_json).forEach(id => { if (!matchedOn.has(id)) matchedOn.set(id, String(b.date || '').slice(0, 10)); });
+  }
+  const isoUtc = (s) => /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(s || '') ? s.replace(' ', 'T') + 'Z' : '';
   const response = ok({
     loans:loans.map(l=>({id:l.id,person:l.person,direction:l.direction,amount:l.amount,date:l.date,channel:l.channel,status:l.status,
       repayments:l.repayments.map(r=>({id:r.id,amount:r.amount,date:r.date,channel:r.channel,status:r.status}))})),
-    deposits:cash.filter(t=>t.type==='cash_deposit'&&t.destination!=='satellite_passthrough').map(t=>({id:t.id,groupId:t.groupId,date:t.date,amount:t.amount,recordedBy:t.recordedBy,verificationStatus:t.verificationStatus})),
+    deposits:cash.filter(t=>t.type==='cash_deposit'&&t.destination!=='satellite_passthrough').map(t=>({id:t.id,groupId:t.groupId,date:t.date,amount:t.amount,recordedBy:t.recordedBy,verificationStatus:t.verificationStatus,
+      recordedAt:isoUtc(t.createdAt),bankMatch:matchedOn.has(String(t.id))?'matched':inReview.has(String(t.id))?'review':'none',bankDate:matchedOn.get(String(t.id))||''})),
     pool
   });
   response.headers.set('Cache-Control','no-store');

@@ -20591,7 +20591,7 @@ const AUTOMATION_WHATSAPP_DEFAULTS = {
   morning_reminders: { enabled: true, time: '09:00' },
   saturday_note: { enabled: true, time: '18:00' },
   sunday_records: { enabled: true, every_minutes: 10 },
-  bank_movements: { enabled: true }, memo: { enabled: true }, statement: { enabled: true }, rrr_reminders: { enabled: true },
+  bank_movements: { enabled: true }, deposit_bank_confirmed: { enabled: true }, deposit_bank_missing: { enabled: true, days: 3 }, memo: { enabled: true }, statement: { enabled: true }, rrr_reminders: { enabled: true },
 };
 // Telegram bot menu (Automations -> Telegram bot). App-side default = the box's built-in menu, so an unsaved config
 // shows the right values and the next Save keeps them on. 'everyone' is accepted for statement/balance/refresh/system
@@ -20686,7 +20686,7 @@ function automationsWhatsappSectionHtml(saved, saveBar){
   const wa = { ...AUTOMATION_WHATSAPP_DEFAULTS, ...s };
   const sub = (k)=>({ ...AUTOMATION_WHATSAPP_DEFAULTS[k], ...(s[k] || {}) });
   const cc = sub('cutoff_checklist'), mr = sub('morning_reminders'), sn = sub('saturday_note'),
-        sr = sub('sunday_records'), bm = sub('bank_movements'), mm = sub('memo'), st = sub('statement'), rr = sub('rrr_reminders');
+        sr = sub('sunday_records'), bm = sub('bank_movements'), dc = sub('deposit_bank_confirmed'), dm = sub('deposit_bank_missing'), mm = sub('memo'), st = sub('statement'), rr = sub('rrr_reminders');
   return `<details class="at-details">
       <summary>WhatsApp posts</summary>
       <div class="at-details-body">
@@ -20713,6 +20713,9 @@ function automationsWhatsappSectionHtml(saved, saveBar){
         ${automationsBoolField('automations.whatsapp.sunday_records.enabled', sr.enabled, 'Sunday attendance and collection', "Posted the moment attendance or a collection is saved in the app — the app tells the box straight away. The safety look below only catches a signal that went missing.")}
         <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.sunday_records.every_minutes', sr.every_minutes, 'Safety look for new records every (minutes)', 5, 720)}</div>
         ${automationsBoolField('automations.whatsapp.bank_movements.enabled', bm.enabled, 'Bank movements', 'A NET CREDIT or NET DEBIT note when the church bank balance moves, with the new balance. The portal only gives the balance, so there is no sender or recipient.')}
+        ${automationsBoolField('automations.whatsapp.deposit_bank_confirmed.enabled', dc.enabled, 'Deposit confirmed by the bank', 'Posts when a recorded cash deposit is matched to a bank credit.')}
+        ${automationsBoolField('automations.whatsapp.deposit_bank_missing.enabled', dm.enabled, 'Deposit not seen in the bank', 'Posts once if a recorded deposit has no matching bank credit after this many days.')}
+        <div class="form-row" style="margin-top:10px">${automationsNumField('automations.whatsapp.deposit_bank_missing.days', dm.days, 'Days to wait before posting', 1, 14)}</div>
         ${automationsBoolField('automations.whatsapp.memo.enabled', mm.enabled, 'New memos', 'A new RCCG memo is posted with its PDF attached, at the same time as it is emailed.')}
         ${automationsBoolField('automations.whatsapp.statement.enabled', st.enabled, 'Monthly statement', 'The monthly statement is posted with its PDF and a link to view it, at the same time as it is emailed.')}
         ${saveBar}
