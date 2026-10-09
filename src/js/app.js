@@ -11156,16 +11156,41 @@ function summarizeSatelliteFunds(allSatFunds, fromDate, toDate){
 }
 
 /**
+ * Loans (money lent out / borrowed) for the printed statement and report. Memo only: a loan moves money between
+ * "in hand" and "owed", so none of this is income or expense and it never enters the totals. Only acknowledged loans
+ * and confirmed repayments count (same rule as calcChurchBalance). No names: statements are shared outside the church.
+ */
+function summarizeLoans(loans, fromDate, toDate){
+  const dateOf = r => String(r?.date || '').slice(0,10);
+  const inRange = r => { const d = dateOf(r); return d && d >= fromDate && d <= toDate; };
+  const upTo = r => { const d = dateOf(r); return !d || d <= toDate; };
+  const live = (loans||[]).filter(l => l && (l.status === 'active' || l.status === 'settled'));
+  const reps = live.flatMap(l => (l.repayments||[]).filter(r => r.status === 'confirmed').map(r => ({ ...r, direction: l.direction })));
+  const sum = (list, f) => list.filter(f).reduce((t,r) => t + (r.amount||0), 0);
+  const open = dir => Math.max(0, sum(live, l => l.direction === dir && upTo(l)) - sum(reps, r => r.direction === dir && upTo(r)));
+  return {
+    lentPeriod: sum(live, l => l.direction === 'lent' && inRange(l)),
+    borrowedPeriod: sum(live, l => l.direction === 'borrowed' && inRange(l)),
+    repaidToUsPeriod: sum(reps, r => r.direction === 'lent' && inRange(r)),
+    repaidByUsPeriod: sum(reps, r => r.direction === 'borrowed' && inRange(r)),
+    owedToUsEnd: open('lent'),
+    weOweEnd: open('borrowed'),
+    anyActivity: live.some(l => inRange(l)) || reps.some(r => inRange(r)) || open('lent') > 0.5 || open('borrowed') > 0.5
+  };
+}
+
+/**
  * Build a structured, self-contained snapshot of the Monthly Financial Statement
  * for the given period. Mirrors the sections rendered by generateMonthlyReport()
  * so the public statement.html page can reproduce identical figures without app
  * access. All currency basis text is pre-formatted; amounts stay numeric.
  */
 async function buildMonthlyStatementData(fromDate, toDate){
-  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMS, allSatFundsMS] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMS, allSatFundsMS, allLoansMS] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds(), DB.getLoans()
   ]);
   const satFundsSummary=summarizeSatelliteFunds(allSatFundsMS, fromDate, toDate);
+  const loansSummary=summarizeLoans(allLoansMS, fromDate, toDate);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
   const remRates=remRatesData.rates||DEFAULT_REMITTANCE_RATES;
@@ -11231,11 +11256,11 @@ async function buildMonthlyStatementData(fromDate, toDate){
   const [openingBalResult, closingBalResult]=await Promise.all([
     calcChurchBalance(openingBalDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,loans:allLoansMS,remRates:remRates
     }),
     calcChurchBalance(toDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMS,satelliteFunds:allSatFundsMS,loans:allLoansMS,remRates:remRates
     })
   ]);
   const openingBalance=openingBalResult.total;
@@ -11384,6 +11409,8 @@ async function buildMonthlyStatementData(fromDate, toDate){
     satelliteFundsIn:satFundsSummary.inPeriod, satelliteFundsOut:satFundsSummary.outPeriod, satelliteFundsHeld:satFundsSummary.heldAsOf,
     satelliteFundsTransferOut:satFundsSummary.transferOutPeriod, satelliteFundsGift:satFundsSummary.giftPeriod,
     satelliteFundsReimbursement:satFundsSummary.reimbursementPeriod, satelliteFundsCorrection:satFundsSummary.correctionPeriod,
+    loansLentPeriod:loansSummary.lentPeriod, loansBorrowedPeriod:loansSummary.borrowedPeriod, loansRepaidToUsPeriod:loansSummary.repaidToUsPeriod,
+    loansRepaidByUsPeriod:loansSummary.repaidByUsPeriod, loansOwedToUsEnd:loansSummary.owedToUsEnd, loansWeOweEnd:loansSummary.weOweEnd,
   };
 }
 
@@ -16275,8 +16302,8 @@ function onReportDatesChange(){
 }
 
 async function generateMonthlyReport(){
-  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMR, allSatFundsMR] = await Promise.all([
-    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds()
+  const [allIncome, allExpenses, allRemittances, settings, allCashTx, remRatesData, users, allPettyMR, allSatFundsMR, allLoansMR] = await Promise.all([
+    DB.getIncome(), DB.getExpenses(), DB.getRemittances(), DB.getSettings(), DB.getCashTransactions(), getRemRates(), DB.getUsers(), DB.getPetty(), DB.getSatelliteFunds(), DB.getLoans()
   ]);
   const pastorName=(users||[]).find(u=>u.role==='pastor')?.name||'';
   const accountantName=(users||[]).find(u=>u.role==='accountant')?.name||'';
@@ -16294,6 +16321,7 @@ async function generateMonthlyReport(){
   const toDate=state.reportToDate||ymdLocal(new Date());
   const periodLabel=`${fmtDate(fromDate)} – ${fmtDate(toDate)}`;
   const satFundsSummaryMR=summarizeSatelliteFunds(allSatFundsMR, fromDate, toDate);
+  const loansSummaryMR=summarizeLoans(allLoansMR, fromDate, toDate);
   const income=filterByDateRange(allIncome,fromDate,toDate);
   const allMonthExpenses=filterByDateRange(allExpenses,fromDate,toDate);
   const expenses=allMonthExpenses.filter(e=>isLoggedExpense(e));
@@ -16335,11 +16363,11 @@ async function generateMonthlyReport(){
   const [openingBalResult, closingBalResult]=await Promise.all([
     calcChurchBalance(openingBalDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,loans:allLoansMR,remRates:remRates
     }),
     calcChurchBalance(toDate,{
       income:allIncome,expenses:allExpenses,remittances:allRemittances,
-      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,remRates:remRates
+      cashTx:allCashTx,pettyHistory:allPettyMR,satelliteFunds:allSatFundsMR,loans:allLoansMR,remRates:remRates
     })
   ]);
   const openingBalance=openingBalResult.total;
@@ -16489,6 +16517,12 @@ async function generateMonthlyReport(){
       <strong>Funds Received &amp; Remitted on Behalf of Satellite Parishes</strong> — In ${fmt(satFundsSummaryMR.inPeriod)} / Out ${fmt(satFundsSummaryMR.outPeriod)} / Held ${fmt(satFundsSummaryMR.heldAsOf)}
       <div style="font-size:11px;margin-top:4px;color:#555">Pass-through custodial funds for the satellite parishes' Province remittance and joint area/zone payments — excluded from Income, Expenses, and Net Position above.</div>
       ${satFundsSummaryMR.transferOutPeriod>0?`<div style="font-size:11px;margin-top:6px;color:#555">Transferred to parish this period: <strong>${fmt(satFundsSummaryMR.transferOutPeriod)}</strong>${satFundsSummaryMR.giftPeriod>0?` — Gift/surplus: ${fmt(satFundsSummaryMR.giftPeriod)} (counted as income above, see Section A)`:''}${satFundsSummaryMR.reimbursementPeriod>0?` — Reimbursement: ${fmt(satFundsSummaryMR.reimbursementPeriod)} (memo only, not income)`:''}${satFundsSummaryMR.correctionPeriod>0?` — Correction: ${fmt(satFundsSummaryMR.correctionPeriod)} (memo only, not income)`:''}</div>`:''}
+    </div>`:''}
+
+    ${loansSummaryMR.anyActivity?`
+    <div class="note-box" style="background:#f3e9df;border-color:#e0cbb4;color:#5a3a1c">
+      <strong>Loans (money lent out or borrowed)</strong> — Still owed to the church ${fmt(loansSummaryMR.owedToUsEnd)} / Still owed by the church ${fmt(loansSummaryMR.weOweEnd)}
+      <div style="font-size:11px;margin-top:4px;color:#555">This period: lent out ${fmt(loansSummaryMR.lentPeriod)}, repaid to the church ${fmt(loansSummaryMR.repaidToUsPeriod)}, borrowed ${fmt(loansSummaryMR.borrowedPeriod)}, repaid by the church ${fmt(loansSummaryMR.repaidByUsPeriod)}. Loans only move money between cash on hand and money owed, so they are not income or expenses and are not in the totals above.</div>
     </div>`:''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
@@ -22110,6 +22144,7 @@ return {
   _remittanceSettledDate: remittanceSettledDate,
   _calcChurchBalance: calcChurchBalance,
   _loanDashboardInfo: loanDashboardInfo,
+  _summarizeLoans: summarizeLoans,
   _loanCashMovements: loanCashMovements,
   _buildCashPoolDetailLines: buildCashPoolDetailLines,
   _renderCashPoolSectionHTML: renderCashPoolSectionHTML,
