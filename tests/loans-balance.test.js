@@ -326,3 +326,15 @@ test('statement loans memo: period movements, closing balances, nothing counted 
   const old = loan({ status: 'settled', amount: 1000, date: '2026-01-05', repayments: [rep({ amount: 1000, date: '2026-02-01' })] });
   assert.equal(App._summarizeLoans([old], '2026-10-01', '2026-10-31').anyActivity, false);
 });
+
+test('all the cash lent out leaves exactly zero, and a tiny float leftover is shown as zero (no "not yet deposited" banner at ₦0)', async () => {
+  const exact = await balance({ income: [{ source: 'other_income', date: '2026-10-01', totalCollection: 50000, bankTransferAmount: 0, directPettyCash: 0 }],
+    loans: [loan({ amount: 40000 }), loan({ id: 'L2', amount: 10000 })] });
+  assert.equal(exact.cashWithAccountant, 0);
+  const residue = await balance({ income: [{ source: 'other_income', date: '2026-10-01', totalCollection: 50000.001, bankTransferAmount: 0, directPettyCash: 0 }],
+    loans: [loan({ amount: 50000 })] });
+  assert.equal(residue.cashWithAccountant, 0);
+  const real = await balance({ income: [{ source: 'other_income', date: '2026-10-01', totalCollection: 50000.4, bankTransferAmount: 0, directPettyCash: 0 }],
+    loans: [loan({ amount: 50000 })] });
+  assert.ok(Math.abs(real.cashWithAccountant - 0.4) < 1e-9);
+});

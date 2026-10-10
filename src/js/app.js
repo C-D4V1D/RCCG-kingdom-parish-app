@@ -3915,7 +3915,7 @@ async function calcChurchBalance(asOfDate, prefetched){
   const heldForSatellites = satelliteIn - satelliteOut - satelliteTransferOut;
 
   return {
-    cashWithAccountant: Math.max(0, cashWithAccountantRaw),
+    cashWithAccountant: (Math.abs(cashWithAccountantRaw) < 0.005 ? 0 : Math.max(0, cashWithAccountantRaw)),
     // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
     // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here
     cashDeficit: Math.max(0, -cashWithAccountantRaw),
@@ -5928,7 +5928,7 @@ async function renderIncome(){
       <div class="kpi"><div class="kpi-icon" style="background:#EAF3DE">🏦</div><div class="kpi-label">In Bank (this month)</div><div class="kpi-val">${fmt(totalDeposited)}</div><div class="kpi-delta up">Transfers + deposits</div></div>
     </div>
     ${_hasPendingDeposits?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_pendingDepTotal)}</strong> is ${_pendingFlaggedDeposits[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it':'<strong>pending AI verification</strong>'}. Check the Bank page for details.</span></div>`:''}
-    ${cashWithAccountant>0&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:underline;color:var(--primary-text);font-weight:600">View breakdown</a> · <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>=0.005&&!_hasPendingDeposits&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong>${pendingItems.length>0?` — pending: <strong>${pendingItems.map(r=>fmtDate(r.date||r.createdAt)).join(', ')}</strong>`:''} — not yet deposited to the bank. <a onclick="App.showCashPoolModal()" style="cursor:pointer;text-decoration:underline;color:var(--primary-text);font-weight:600">View breakdown</a> · <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Record Deposit Now</button></span></div>`:''}
     ${renderSatelliteFundsInSection(satFundsInRecords)}
     <div class="tabs">
       <button class="tab ${tab==='list'?'active':''}" onclick="App.setIncomeTab('list')">Sunday Collections (${sundayRecs.length})</button>
@@ -13068,7 +13068,11 @@ async function renderBank(){
   // this is the only place they reduce the balance. Mirrors calcChurchBalance's
   // satelliteCashAccountantOut term.
   const satelliteCashAccountantOutRB = (allSatFundsRB||[]).filter(s=>s.direction==='out' && s.channel==='cash_accountant').reduce((s,r)=>s+(r.amount||0),0);
-  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB + satelliteCashInRB - satelliteCashAccountantOutRB - paidRemsCash);
+  // Cash lent out of (or repaid into) the accountant's cash through Loans: same term calcChurchBalance uses,
+  // so this page agrees with the Dashboard and Record Income.
+  const _bankLoanMoves = loanCashMovements((await DB.getLoans()) || []);
+  const loanCashNetRB = sumLoanMoves(_bankLoanMoves, 'in') - sumLoanMoves(_bankLoanMoves, 'out');
+  const cashWithAccountant = Math.max(0, cashFromCollectionsRB - cashDepositedFromAccountantRB + bankToAccountantRB - cashExpensesRB - pettyCashTopupsRB + satelliteCashInRB - satelliteCashAccountantOutRB - paidRemsCash + loanCashNetRB);
   const _bankPendingDeps = allCashTx.filter(t=>t.type==='cash_deposit'&&(t.verificationStatus==='pending'||t.verificationStatus==='flagged'));
   const _bankHasPending = _bankPendingDeps.length > 0;
   const _bankPendingTotal = _bankPendingDeps.reduce((s,t)=>s+(t.amount||0),0);
@@ -13182,7 +13186,7 @@ async function renderBank(){
       </div>
     </div>
     ${_bankHasPending?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⏳</span><span>A deposit of <strong>${fmt(_bankPendingTotal)}</strong> is ${_bankPendingDeps[0]?.verificationStatus==='flagged'?'<strong>flagged by AI</strong> — please review and correct or approve it below':'<strong>pending AI verification</strong>'}.</span></div>`:''}
-    ${cashWithAccountant>0&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
+    ${cashWithAccountant>=0.005&&!_bankHasPending&&canAction('income_deposit')?`<div class="alert alert-warn" style="margin-bottom:12px"><span class="alert-icon">⚠</span><span>Cash with Accountant: <strong>${fmt(cashWithAccountant)}</strong> not yet deposited to the bank account.${pendingDepCount>0?` (${pendingDepCount} income record(s) pending)`:''} <button class="btn btn-sm btn-amber" onclick="App.confirmBulkDeposit()" style="margin-left:8px">Deposit Now</button></span></div>`:''}
     ${tab!=='reconciliation'&&Math.abs(heldForSatellitesRB||0)>=0.5?`<div class="alert alert-info" style="margin-bottom:12px"><span class="alert-icon">🛰️</span><span>${bankSatHeldDisp.label}: <strong>${bankSatHeldDisp.amount}</strong> (${bankSatHeldDisp.suffix}) — already included in the Bank Balance or Cash with Accountant below (depending on how it was received); see the <a onclick="App.gotoSatellitePool()" style="cursor:pointer;text-decoration:underline">Satellite Pass-Through Fund panel</a> on Record Income.</span></div>`:''}
 
     ${tab==='reconciliation'?'':`<div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
