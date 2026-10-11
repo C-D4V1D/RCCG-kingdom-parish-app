@@ -6,6 +6,9 @@ import {
   knownBillSchedule as budgetKnownBillSchedule,
   planStatus as budgetPlanStatus,
   budgetConfig,
+  safetyCushion as budgetSafetyCushion,
+  isCountableExpense as budgetIsCountableExpense,
+  sumExpensesByCategory as budgetSumExpensesByCategory,
   savingCategories as budgetSavingCategories,
   RCCG_DEMANDS_KEY as BUDGET_RCCG_DEMANDS_KEY,
   LEGACY_REMITTANCE_CATEGORY as BUDGET_LEGACY_REMITTANCE_CATEGORY,
@@ -2428,6 +2431,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
     // ── /api/dashboard — batched first-load payload ────────────
     if (route === 'dashboard' && method === 'GET' && !param) return await getDashboardBatch(DB);
     if (route === 'whatsapp-finance-events' && method === 'GET' && !param) return await getWhatsappFinanceEvents(DB, authz);
+    if (route === 'budget-summary' && method === 'GET' && !param) return await getBudgetSummary(DB, authz, url);
     if (route === 'accountant-cash-pool' && method === 'GET' && !param) return await getAccountantCashPool(DB);
 
     // ── /api/income ────────────────────────────────────────────
@@ -6478,6 +6482,45 @@ async function getWhatsappFinanceEvents(DB, authz) {
     pool
   });
   response.headers.set('Cache-Control','no-store');
+  return response;
+}
+
+// Same budget and spent figures as the Dashboard's "This Period's Budget" (app.js computeAvailableForNewSpending):
+// plan = saved plan for the month (any status) else the previous month's v2 plan; cushion via the engine.
+async function getBudgetSummary(DB, authz, url) {
+  if (!authz?.automation && !LOAN_ROLES.includes(authz?.finance?.role)) return err('Finance access required.', 403);
+  const q = k => url.searchParams.get(k) || '';
+  const monthKey = q('month'), from = q('from'), to = q('to'), weekFrom = q('weekFrom'), weekTo = q('weekTo');
+  const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if (!isValidMonthKey(monthKey) || !isDay(from) || !isDay(to) || (weekFrom || weekTo) && !(isDay(weekFrom) && isDay(weekTo))) {
+    return err('month=YYYY-MM, from and to=YYYY-MM-DD are required (weekFrom/weekTo optional, both or neither).', 400);
+  }
+  const [expRes, setRes, budgets] = await Promise.all([getExpenses(DB), getSettings(DB), loadMonthlyBudgets(DB)]);
+  const [expenses, settings] = await Promise.all([expRes.json(), setRes.json()]);
+  const [y, m] = monthKey.split('-').map(Number);
+  const prevKey = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
+  let plan = budgets[monthKey] || null, planSource = 'saved';
+  if (!plan) {
+    const prev = budgets[prevKey];
+    if (prev && prev.version === 2) { plan = prev; planSource = 'previous'; } else planSource = 'none';
+  }
+  let normalMonthly = null, cushion = null, budgetTotal = null;
+  if (plan) {
+    const cfg = budgetConfig(settings);
+    normalMonthly = plan.normalMonthly || 0;
+    cushion = budgetSafetyCushion({
+      mode: cfg.safetyMode, percent: cfg.safetyPercent, periodTotals: plan.periodTotals || [],
+      normal: normalMonthly, floorPercent: cfg.cushionFloorPercent, minPeriods: cfg.cushionMinPeriods,
+    });
+    budgetTotal = normalMonthly + Math.round(cushion);
+  }
+  const spentIn = (a, b) => budgetSumExpensesByCategory((expenses || []).filter(e => {
+    const d = String(e?.date || e?.createdAt || '').slice(0, 10);
+    return d && d >= a && d <= b && budgetIsCountableExpense(e, { mode: 'tracking' });
+  })).total;
+  const response = ok({ monthKey, planSource, budgetTotal, normalMonthly, cushion, spent: spentIn(from, to),
+    spentWeek: weekFrom ? spentIn(weekFrom, weekTo) : null });
+  response.headers.set('Cache-Control', 'no-store');
   return response;
 }
 
