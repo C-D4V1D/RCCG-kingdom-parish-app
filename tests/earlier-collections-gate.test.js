@@ -25,13 +25,13 @@ const full = {
 const LAST = '2026-01-25';                 // cut-off Sunday; period Mon 29 Dec 2025 – Sun 25 Jan 2026
 const sunday = date => ({ date, source: 'sunday_collection', membersTithe: 100, totalCollection: 100, recordedBy: 'Accountant' });
 
-async function periodDB() {
+async function periodDB(cut2026 = [25, 22, 29, 26, 31, 28, 26, 30, 27, 25, 29, 27]) {
   const DB = createD1(':memory:');
   await call(DB, 'init');
   await DB.prepare(`UPDATE settings SET value='2026-01-05' WHERE key='attendanceGateFrom'`).run();
   await DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES ('remCutoffDatesByYear',?)`).bind(JSON.stringify({
     2025: [26, 23, 30, 27, 25, 29, 27, 31, 28, 26, 30, 28],
-    2026: [25, 22, 29, 26, 31, 28, 26, 30, 27, 25, 29, 27],
+    2026: cut2026,
   })).run();
   // Attendance is in for every gated week, and week N carries the Monthly report.
   for (const wk of ['2026-01-11', '2026-01-18']) {
@@ -81,4 +81,17 @@ test('other Sundays and other income are never held by this gate', async () => {
   assert.equal((await call(DB, 'income', 'POST', sunday('2026-01-18'))).status, 200);   // not a cut-off date
   const other = await call(DB, 'income', 'POST', { date: LAST, source: 'other_income', membersTithe: 0, totalCollection: 10, recordedBy: 'Accountant' });
   assert.notEqual(other.body.code, 'earlier_collections_missing');
+});
+
+// Same period, but the cut-off day is a Wednesday (28 Jan): the last Sunday before it (25 Jan) is the gated one.
+test('a mid-week cut-off gates the last Sunday before it, not the cut-off date itself', async () => {
+  const DB = await periodDB([28, 22, 29, 26, 31, 28, 26, 30, 27, 25, 29, 27]);
+  const r = await call(DB, 'income', 'POST', sunday(LAST));
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, 'earlier_collections_missing');
+  assert.deepEqual(r.body.missing, ['2026-01-11', '2026-01-18']);
+  assert.equal(r.body.periodEnd, '2026-01-28');
+  assert.equal((await call(DB, 'income', 'POST', sunday('2026-01-11'))).status, 200);
+  assert.equal((await call(DB, 'income', 'POST', sunday('2026-01-18'))).status, 200);   // not the last Sunday: never held
+  assert.equal((await call(DB, 'income', 'POST', sunday(LAST))).status, 200);
 });
