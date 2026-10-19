@@ -38,3 +38,8 @@ test('the previous month\'s payment that only overlaps by a couple of days is NO
   const aug = { ...partB, id: 'a', periodFrom: '2026-08-22', periodTo: '2026-09-22' };
   assert.deepEqual(App._remitPeriodPayments([aug], '2026-09-21', '2026-10-21'), []);
 });
+test('KNOWN LIMIT (documented): two paid records for the same month with different end dates (old and new cut-off) BOTH count toward the period', () => {
+  const oldCut = { ...partB, id: 'old', amount: 9616, periodTo: '2026-10-18' };
+  const newCut = { ...partB, id: 'new', amount: 9616, periodTo: '2026-10-21' };
+  assert.deepEqual(App._remitPeriodPayments([oldCut, newCut], '2026-09-21', '2026-10-21').map(r => r.id), ['old', 'new']);
+});
