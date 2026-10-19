@@ -161,7 +161,14 @@ test('a delivered Sunday-save signal records the shared start marker as sent:...
 test('a Sunday save sends NOTHING when the cut-off job or a button already started this period (shared start marker)', async () => {
   const DB = dbWithCutoffs();
   const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' };
-  await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING`).bind("remit_cutoff_signal_2026-09-20", "sent:2026-09-19T10:00:00.000Z").run();
+  const prep = DB.prepare.bind(DB);
+  DB.prepare = (sql) => {
+    if (sql === 'SELECT value FROM settings WHERE key=?') {
+      let k; const st = { bind(...a) { k = a[0]; return st; }, async first() { return k === 'remit_cutoff_signal_2026-09-20' ? { value: 'sent:2026-09-19T10:00:00.000Z' } : prep(sql).bind(k).first(); } };
+      return st;
+    }
+    return prep(sql);
+  };
   const r = await save(sunday('2026-09-20'), env);
   assert.equal(r.calls.length, 0);
 });
