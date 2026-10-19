@@ -13,6 +13,11 @@ export function cutoffSignalMarkerKey(periodEnd) {
   return `remit_cutoff_signal_${periodEnd}`;
 }
 
+/** Sundays of the period (up to the cut-off) that have no saved collection. Used by the hourly job and the Remittances page buttons. */
+export function missingSundays({ sundays, haveSundays, periodEnd }) {
+  return (sundays || []).filter(d => d <= periodEnd && !haveSundays.has(d));
+}
+
 /**
  * Decide what the hourly job does.
  *   today        YYYY-MM-DD (Dublin)
@@ -28,7 +33,7 @@ export function decideCutoffSignal({ today, period, sundays, haveSundays, marked
   // period could be taken by the box as an interrupted run and stop a good filing, so this job only covers other weekdays.
   if (new Date(`${period.periodEnd}T00:00:00Z`).getUTCDay() === 0) return { action: 'skip', reason: 'cut-off Sunday: the Sunday collection save is the trigger', missing: [] };
   if (marked) return { action: 'skip', reason: 'signal already sent for this period', missing: [] };
-  const missing = (sundays || []).filter(d => d <= period.periodEnd && !haveSundays.has(d));
+  const missing = missingSundays({ sundays, haveSundays, periodEnd: period.periodEnd });
   if (missing.length) return { action: 'wait', reason: 'weekly collections missing', missing };
   return { action: 'send', reason: 'cut-off date and every Sunday has a collection', missing: [] };
 }

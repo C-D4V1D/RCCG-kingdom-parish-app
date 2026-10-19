@@ -21,7 +21,7 @@ import {
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
-import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal } from '../_lib/cutoff-date-signal.js';
+import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal, missingSundays } from '../_lib/cutoff-date-signal.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -366,6 +366,9 @@ function financeRoleDenied(user, route, param, method) {
     const allowed = (route === 'change-pin') || (route === 'audit' && method === 'POST' && !param)
       || (route === 'bank-portal-balance' && param === 'refresh');
     if (!allowed) return finAuthErr('forbidden', 403, 'Your role (viewer) is read-only.');
+  }
+  if (route === 'remit-file-now' && !REMIT_FILE_ROLES.includes(user.role)) {
+    return finAuthErr('forbidden', 403, 'Only the IT administrator and the accountant can start the month-end run.');
   }
   if (route === 'users' && user.role !== 'it_admin') {
     return finAuthErr('forbidden', 403, 'Only the IT administrator can manage users.');
@@ -2362,6 +2365,11 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       });
       if (errorResponse) return errorResponse;
       return ok({ ok: true, id: data?.id });
+    }
+    if (route === 'remit-file-now' && !param) {
+      if (!REMIT_FILE_ROLES.includes(authz?.finance?.role)) return err('Only the IT administrator and the accountant can start the month-end run.', 403);
+      if (method === 'GET') return await remitFileStatus(DB, env, authz, url.searchParams.get('month'));
+      if (method === 'POST') return await remitFileNow(DB, env, request, body, authz);
     }
     if (route === 'kpsc-finance-share' && method === 'POST') {
       const auth = await requireKpscRole(DB, request, KPSC_FINANCE_ROLES);
@@ -16983,6 +16991,22 @@ Requirements:
 // short-circuits once a draft for the target month exists, and the attempt
 // stamp stops a DeepSeek outage being retried every 30 minutes all day.
 /**
+ * The month-end Sunday gate, shared by the cut-off date job and the Remittances page buttons: the Sundays of the period
+ * (from the gate start) that have no saved collection. `parishDb` is the database holding that parish's income (Kingdom's
+ * own, or a satellite's); `DB` is Kingdom's, where the gate start lives. Returns { sundays, haveSundays } so callers can
+ * run decideCutoffSignal or list the missing weeks.
+ */
+async function periodSundayGate(DB, parishDb, period) {
+  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+  const sundays = sundaysBetween(period.periodStart, period.periodEnd).filter(d => !isYmd(gateFrom) || d >= gateFrom);
+  const { results } = await parishDb.prepare(
+    `SELECT DISTINCT date FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='')`
+  ).bind(period.periodStart, period.periodEnd).all();
+  const haveSundays = new Set((results || []).map(r => String(r.date).slice(0, 10)));
+  return { sundays, haveSundays };
+}
+
+/**
  * POST /api/internal/run-cutoff-date-signal (hourly, via the admin-cron Worker). The month-end filing starts ON the
  * set cut-off date whatever the weekday. On that date, if every Sunday of the period has its collection and the signal
  * has not gone out yet, send the same signed cut-off signal a Sunday save sends. Missing Sundays hold it (it retries
@@ -16996,12 +17020,7 @@ async function runCutoffDateSignal(DB, env, request) {
   const today = dublinToday();
   const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB), today);
   if (!period) return ok({ ok: true, skipped: true, reason: 'not a cut-off date', today });
-  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
-  const sundays = sundaysBetween(period.periodStart, period.periodEnd).filter(d => !isYmd(gateFrom) || d >= gateFrom);
-  const { results } = await DB.prepare(
-    `SELECT DISTINCT date FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='')`
-  ).bind(period.periodStart, period.periodEnd).all();
-  const haveSundays = new Set((results || []).map(r => String(r.date).slice(0, 10)));
+  const { sundays, haveSundays } = await periodSundayGate(DB, DB, period);
   const markerKey = cutoffSignalMarkerKey(period.periodEnd);
   const marked = (await getSettingValue(DB, markerKey)).startsWith('sent:');
   const decision = decideCutoffSignal({ today, period, sundays, haveSundays, marked });
@@ -17044,6 +17063,156 @@ async function runCutoffDateSignal(DB, env, request) {
   const marked2 = await finishCutoffSignal(DB, markerKey, 'sent', new Date().toISOString());
   if (!marked2) console.error(`[cutoff-signal] ${period.periodEnd}: sent, but the marker could not be finalised; it stays pending and may resend after 30 minutes`);
   return ok({ ok: true, sent: true, to: sent.to, markerFinal: marked2, periodEnd: period.periodEnd });
+}
+
+// ── "File now" buttons on the Remittances page ───────────────────────────────────────────────
+// GET  /api/remit-file-now           which parishes can be started this month, and whether each was already started
+// POST /api/remit-file-now {parish}  start the month-end run for 'all', 'kingdom' or one satellite parish code
+// This sends the SAME signed 'cutoff_collection_saved' signal the Sunday save and the cut-off date job send (trigger
+// 'manual_button'), through deliverMonthEndEvent. It is not a second filing path: the box (or Clerk AI) does the run,
+// and the RRR and the portal report still wait on the signed buttons in the check email. A parish is started at most
+// once a month: its marker (remit_manual_signal_<parish>_<month>) is claimed before sending, and a failed send leaves it
+// retryable. IT Admin and Accountant only (checked here and in financeRoleDenied).
+const REMIT_FILE_ROLES = ['it_admin', 'accountant'];
+const REMIT_FILE_KEY_RE = /^(all|kingdom|\d{4,8})$/;
+const remitManualMarkerKey = (parish, month) => `remit_manual_signal_${parish}_${month}`;
+
+/** The month a tap files: this month (Dublin), or last month. Returns { month, period } or null when no cut-off is set for it. */
+async function remitFileMonthAndPeriod(DB, wanted) {
+  const today = dublinToday();
+  const cur = today.slice(0, 7);
+  const [y, m] = cur.split('-').map(Number);
+  const prev = m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+  const month = /^\d{4}-\d{2}$/.test(String(wanted || '')) && (wanted === cur || wanted === prev) ? wanted : cur;
+  const settings = await readRemCutoffSettings(DB);
+  const days = cutoffDaysForYear(settings, Number(month.slice(0, 4)));
+  const day = Number(days?.[Number(month.slice(5, 7)) - 1]);
+  if (!Number.isInteger(day) || day < 1) return { month, period: null };
+  const periodEnd = `${month}-${String(day).padStart(2, '0')}`;
+  return { month, period: remCutoffPeriodForDate(settings, periodEnd) };
+}
+
+async function remitFileTargets(DB, env) {
+  const rows = await kingdomSettingsRows(DB, ['satParishes']);
+  const list = safeJsonParse(rows.satParishes, []);
+  const sats = (Array.isArray(list) ? list : [])
+    .filter(p => p && SAT_CODE_RE.test(String(p.code || '')) && p.active !== false)
+    .map(p => ({ key: String(p.code), name: String(p.name || p.code), sat: true }));
+  return [{ key: 'kingdom', name: 'RCCG Kingdom Parish, Aguleri', sat: false }, ...sats];
+}
+
+function remitMarkerState(value) {
+  const m = /^(pending|sent|failed):(.*)$/.exec(String(value || ''));
+  return m ? { state: m[1], at: m[2] } : { state: 'none', at: '' };
+}
+
+/** The same Sunday gate the cut-off date job uses, for one parish. { noDb } when a satellite's database is not connected. */
+async function remitParishGap(DB, env, t, period) {
+  const parishDb = t.sat ? satelliteDb(env, t.key) : DB;
+  if (!parishDb) return { noDb: true, missing: [], have: new Set() };
+  const { sundays, haveSundays } = await periodSundayGate(DB, parishDb, period);
+  return { noDb: false, missing: missingSundays({ sundays, haveSundays, periodEnd: period.periodEnd }), have: haveSundays };
+}
+
+async function remitFileStatus(DB, env, authz, wantedMonth) {
+  const { month, period } = await remitFileMonthAndPeriod(DB, wantedMonth);
+  const targets = await remitFileTargets(DB, env);
+  const parishes = [];
+  for (const t of targets) {
+    let st = remitMarkerState(await getSettingValue(DB, remitManualMarkerKey(t.key, month)));
+    if (!t.sat && st.state !== 'sent' && period) {
+      const cutoff = remitMarkerState(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
+      if (cutoff.state === 'sent') st = cutoff;
+    }
+    let gap = { noDb: false, missing: [] };
+    if (period && st.state !== 'sent') { try { gap = await remitParishGap(DB, env, t, period); } catch { gap = { noDb: true, missing: [] }; } }
+    parishes.push({ key: t.key, name: t.name, started: st.state === 'sent', startedAt: st.state === 'sent' ? st.at : '', lastAttemptFailed: st.state === 'failed', missingSundays: gap.missing, noDatabase: gap.noDb });
+  }
+  return ok({ month, periodEnd: period?.periodEnd || null, cutoffSet: !!period, parishes });
+}
+
+async function remitFileOne(DB, env, request, t, month, period, who) {
+  const base = { parish: t.key, name: t.name };
+  try {
+    const key = remitManualMarkerKey(t.key, month);
+    let st = remitMarkerState(await getSettingValue(DB, key));
+    if (!t.sat) {
+      const cutoff = remitMarkerState(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
+      if (cutoff.state === 'sent') st = cutoff;
+    }
+    if (st.state === 'sent') return { ...base, status: 'already', reason: `Already started for ${month} (${st.at.slice(0, 16).replace('T', ' ')} UTC). It is not started twice.` };
+    // Same hold the cut-off date job applies: every Sunday of the period needs its collection first.
+    const gap = await remitParishGap(DB, env, t, period);
+    if (gap.noDb) return { ...base, status: 'failed', reason: 'This parish has no database connected here. Nothing was sent.' };
+    const have = gap.have;
+    if (gap.missing.length) return { ...base, status: 'failed', reason: `Not all weekly collections are in. Missing: ${gap.missing.join(', ')}. Nothing was sent.` };
+    if (!monthEndConfigured(env)) return { ...base, status: 'failed', reason: 'No month-end destination is set up. Nothing was sent.' };
+    const savedAt = new Date().toISOString();
+    const claim = await claimCutoffSignal(DB, key, savedAt);
+    if (claim === 'error') return { ...base, status: 'failed', reason: 'Could not record the request, so nothing was sent.' };
+    if (claim === 'already') return { ...base, status: 'already', reason: 'Another tap is starting this parish right now, or it was just started.' };
+    const exp = remitActionExpForCutoff(period.periodEnd);
+    const links = t.sat ? null
+      : await buildRemitActionLinks(env, requestOrigin(request), { month, exp, people: Object.keys((await actionButtonPeople(env)).people) });
+    const payload = {
+      event: 'cutoff_collection_saved',
+      collectionDate: [...have].sort().pop() || dublinToday(),
+      periodStart: period.periodStart,
+      periodEnd: period.periodEnd,
+      action: 'created',
+      trigger: 'manual_button',
+      requestedBy: who,
+      recordId: `manual-${t.key}-${month}`,
+      savedAt,
+      parish: t.sat ? t.key : REMIT_ACTION_PARISH,
+      month,
+      links,
+      linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
+    };
+    if (t.sat) payload.satellite = true;
+    const sent = await deliverMonthEndEvent(env, payload);
+    if (!sent.ok) {
+      await finishCutoffSignal(DB, key, 'failed', new Date().toISOString());
+      return { ...base, status: 'failed', retry: true, reason: `The ${sent.to === 'box' ? 'Clerk box' : 'Clerk AI'} did not accept it. You can tap retry.` };
+    }
+    await finishCutoffSignal(DB, key, 'sent', new Date().toISOString());
+    try {
+      await auditStatement(DB, 'remit_file_now', `Month-end run for ${t.name} (${month}) started from the Remittances page by ${who}.`, who).run();
+    } catch { /* the audit line is best-effort */ }
+    return { ...base, status: 'started', to: sent.to };
+  } catch (e) {
+    console.error(`[remit-file-now] ${t.key} ${month}:`, e?.message || e);
+    return { ...base, status: 'failed', retry: true, reason: 'Something went wrong before it was sent. Nothing was sent.' };
+  }
+}
+
+async function remitFileNow(DB, env, request, body, authz) {
+  const who = String(authz?.finance?.name || authz?.finance?.id || '').slice(0, 80) || 'unknown';
+  const parish = String(body?.parish || '').trim();
+  if (!REMIT_FILE_KEY_RE.test(parish)) return err('Choose "all", "kingdom" or a parish code.', 400);
+  const { month, period } = await remitFileMonthAndPeriod(DB, body?.month);
+  if (!period) return err(`No cut-off date is set for ${month}, so there is nothing to start. Nothing was sent.`, 409);
+  const all = await remitFileTargets(DB, env);
+  const targets = parish === 'all' ? all : all.filter(t => t.key === parish);
+  if (!targets.length) return err('That parish is not set up here.', 404);
+  if (parish === 'all') {
+    // "All parishes" waits until every parish that is not started yet has all its weekly collections.
+    const blocked = [];
+    for (const t of targets) {
+      const st = remitMarkerState(await getSettingValue(DB, remitManualMarkerKey(t.key, month)));
+      if (st.state === 'sent') continue;
+      const gap = await remitParishGap(DB, env, t, period).catch(() => ({ noDb: true, missing: [] }));
+      if (gap.noDb) blocked.push({ parish: t.key, name: t.name, missing: [], noDatabase: true });
+      else if (gap.missing.length) blocked.push({ parish: t.key, name: t.name, missing: gap.missing });
+    }
+    if (blocked.length) {
+      const lines = blocked.map(b => b.noDatabase ? `${b.name}: no database connected` : `${b.name}: ${b.missing.join(', ')}`).join('; ');
+      return new Response(JSON.stringify({ error: `Not all weekly collections are in yet. Missing: ${lines}. Nothing was sent.`, blocked }), { status: 409, headers: CORS_HEADERS });
+    }
+  }
+  const results = [];
+  for (const t of targets) results.push(await remitFileOne(DB, env, request, t, month, period, who));
+  return ok({ ok: true, month, periodEnd: period.periodEnd, results });
 }
 
 async function runNewMonthDraftFallback(DB, env, request) {
