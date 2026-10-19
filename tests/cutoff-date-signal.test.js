@@ -38,3 +38,7 @@ test('dublinToday uses the Dublin date near midnight', () => {
 test('marker key is per period', () => {
   assert.equal(cutoffSignalMarkerKey('2026-10-21'), 'remit_cutoff_signal_2026-10-21');
 });
+test("a Sunday AFTER the cut-off date without a collection does not hold the start", () => {
+  const r = decideCutoffSignal({ today: "2026-10-21", period, sundays: [...sundays, "2026-10-25"], haveSundays: all, marked: false });
+  assert.equal(r.action, "send");
+});

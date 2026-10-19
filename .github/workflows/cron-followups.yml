@@ -12,6 +12,7 @@ name: Cron — Follow-ups & Pre-briefs (manual run)
 #                                                       drafts next month's message
 #   POST /api/internal/run-newmonth-draft-fallback   — backstop that makes sure next
 #                                                       month's draft exists
+#   POST /api/internal/run-cutoff-date-signal        — on the cut-off date, asks the Clerk box to start month-end
 #   POST /api/internal/run-reminder-sms              — payment reminder SMS
 #   POST /api/internal/run-anniversary-sms           — partner anniversary SMS
 #   POST /api/internal/run-premeeting-sms            — pre-meeting member SMS
@@ -113,6 +114,7 @@ jobs:
           run-actionitem-sms
           run-scheduled-sms
           run-newmonth-draft-fallback
+          run-cutoff-date-signal
           run-followups
           run-prebriefs
           run-bank-recon
