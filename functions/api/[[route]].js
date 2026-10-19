@@ -1859,7 +1859,7 @@ async function checkEarlierCollectionsGate(DB, data) {
   if (!isSundayCollectionSource(data?.source) || data?.id || !isYmd(data?.date)) return null;
   const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
   if (!isYmd(gateFrom) || data.date < gateFrom) return null;
-  const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB).catch(() => ({})), data.date);
+  const period = remCutoffPeriodForCollection(await readRemCutoffSettings(DB).catch(() => ({})), data.date);
   if (!period) return null;
   const already = await DB.prepare(
     `SELECT id FROM income WHERE date=? AND (source='sunday_collection' OR source IS NULL OR source='') LIMIT 1`
@@ -4818,6 +4818,23 @@ function remCutoffPeriodForDate(settings, date) {
   return { periodStart, periodEnd: `${m[1]}-${m[2]}-${m[3]}` };
 }
 
+/**
+ * The remittance period a saved Sunday collection closes, or null. A collection closes the period when
+ * its date IS the cut-off day (the usual Sunday cut-off) or when it is the last Sunday on or before a
+ * cut-off day that falls mid-week (e.g. a Wednesday 21 Oct cut-off is closed by Sunday 18 Oct).
+ * Same lookahead as attendanceLastWeekPeriod. The returned period still ends on the cut-off day.
+ */
+function remCutoffPeriodForCollection(settings, date) {
+  const exact = remCutoffPeriodForDate(settings, date);
+  if (exact) return exact;
+  if (!isSundayYmd(date)) return null;
+  for (let off = 1; off < 7; off++) {
+    const period = remCutoffPeriodForDate(settings, ymdAddDays(date, off));
+    if (period) return period;
+  }
+  return null;
+}
+
 // remitWebhookHeaders(env) (JSON + the shared key header) lives in ../_lib/remit-action-token.js,
 // shared with the /remit-action confirm page so both authenticate the same way.
 //
@@ -4837,7 +4854,7 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
   if (!saved || !saved.id) return;
   const collectionDate = String(saved.date || data?.date || new Date().toISOString().split('T')[0]).slice(0, 10);
   const settings = await readRemCutoffSettings(DB);
-  const period = remCutoffPeriodForDate(settings, collectionDate);
+  const period = remCutoffPeriodForCollection(settings, collectionDate);
   if (!period) return;
 
   const month = period.periodEnd.slice(0, 7);          // remittance month = month of the cut-off Sunday
@@ -17329,5 +17346,5 @@ async function getSharedReport(DB, token) {
 // ── TEST-VISIBLE EXPORTS ──────────────────────────────────────────────
 // Pure helpers exported so unit tests can exercise them directly without
 // going through the full HTTP handler stack.
-export { remCutoffPeriodForDate, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, findDetailPartGroups, inferDirectionFromNarration, applyNarrationDirections };
+export { remCutoffPeriodForDate, remCutoffPeriodForCollection, maskWebhookHost, cosineSim, embeddingToBlob, blobToEmbedding, classifyPartnerTone, classifyOverdueActionItems, sendTermiiSms, isWithinSendWindow, isWithinFreqCap, reminderSendDayInfo, reminderDueInfo, newMonthDueInfo, periodKey, sendDayKey, computeUnpaidMonths, monthPaymentStatus, smsPagesInfo, createIncome, mergeDuplicateSundayCollections, normalizeNgPhone, isLikelyValidPhone, normalizePersonName, applyCommitteePlaceholders, firstNameOf, findUnknownPlaceholders, resolveCommitteeRecipient, normalizeCustomIncomeTypeDefs, parseCustomCollections, extractCustomCollections, getIncome, saveSettings, customAmountsFromMergeNotes, backfillCustomCollectionsFromNotes, findMatchingCombinations, matchBalanceMovement, buildReconciliationCandidatePool, findManyToOneMatches, findDetailPartGroups, inferDirectionFromNarration, applyNarrationDirections };
 
