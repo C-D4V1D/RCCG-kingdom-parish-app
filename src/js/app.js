@@ -9158,6 +9158,8 @@ async function renderRemittances(){
 
     ${renderRemCutoffCard(settings)}
 
+    ${canFileRemittanceNow()?'<div id="remitFileCard"></div>':''}
+
     <!-- KPI Summary -->
     <div class="kpi-grid" style="margin-bottom:12px">
       <div class="kpi"><div class="kpi-icon" style="background:#E8F4FD">💰</div><div class="kpi-label">Total Collection</div><div class="kpi-val">${fmt(totalCollection)}</div></div>
@@ -9327,6 +9329,8 @@ async function renderRemittances(){
         </div>`:''}
       </div>
     </div>`;
+  _remitFile.results = {};
+  loadRemitFileCard();
 }
 
 // Jump from a "Held for satellites" figure (Dashboard breakdown, Bank page alert)
@@ -18065,6 +18069,85 @@ function initQuotaDnd(){
  * editing the amount would also erase the quota from previous periods and re-charge
  * this one the moment it was restored.
  */
+// ── "File now" buttons on the Remittances page (IT Admin and Accountant) ──
+// The server does the work (POST /api/remit-file-now); this only shows each parish, taps, and the per-parish result.
+const REMIT_FILE_UI_ROLES = ['it_admin', 'accountant'];
+function canFileRemittanceNow(){ return REMIT_FILE_UI_ROLES.includes(state.user?.role); }
+const _remitFile = { info: null, results: {}, busy: false, error: '' };
+
+function remitFileResultText(r){
+  if(r.status === 'started') return '<span style="color:var(--green,#166534);font-weight:600">✓ Filing started</span>';
+  if(r.status === 'already') return `<span style="color:var(--text2)">Already filed this month</span>${r.reason?`<div style="font-size:11px;color:var(--text3)">${esc(r.reason)}</div>`:''}`;
+  return `<span style="color:var(--red,#b91c1c);font-weight:600">✗ Failed</span><div style="font-size:11px;color:var(--text2)">${esc(r.reason||'')}</div>`;
+}
+
+function renderRemitFileCard(){
+  const el = document.getElementById('remitFileCard');
+  if(!el) return;
+  const info = _remitFile.info;
+  if(!info){ el.innerHTML = _remitFile.error ? `<div class="card" style="margin-bottom:12px;padding:14px 16px;font-size:13px;color:var(--text2)">${esc(_remitFile.error)}</div>` : ''; return; }
+  const dis = _remitFile.busy ? 'disabled' : '';
+  if(!Array.isArray(info.parishes)){ el.innerHTML=''; return; }
+  const blockedParishes = info.parishes.filter(p=>!p.started && !(_remitFile.results[p.key] && _remitFile.results[p.key].status==='started') && ((p.missingSundays||[]).length>0 || p.noDatabase));
+  const allBlocked = blockedParishes.length > 0;
+  const rows = info.parishes.map(p=>{
+    const r = _remitFile.results[p.key];
+    const state = r ? remitFileResultText(r)
+      : p.started ? `<span style="color:var(--text2)">Already filed this month</span>`
+      : p.noDatabase ? '<span style="color:var(--amber,#b45309)">No database connected here</span>'
+      : (p.missingSundays||[]).length ? `<span style="color:var(--amber,#b45309);font-weight:600">Waiting for weekly collections</span><div style="font-size:11px;color:var(--text2)">Missing: ${esc(p.missingSundays.join(', '))}</div>`
+      : p.lastAttemptFailed ? '<span style="color:var(--amber,#b45309)">Last try failed</span>' : '<span style="color:var(--text3)">Not started</span>';
+    const done = (r && (r.status === 'started' || r.status === 'already')) || (!r && p.started);
+    const label = r && r.status === 'failed' ? 'Retry' : 'File';
+    const gap = !p.started && ((p.missingSundays||[]).length > 0 || p.noDatabase);
+    return `<tr>
+      <td style="padding:7px 8px;font-weight:600">${esc(p.name)}</td>
+      <td style="padding:7px 8px">${state}</td>
+      <td style="padding:7px 8px;text-align:right">${done?'':`<button class="btn btn-sm" ${dis||gap?'disabled':''} onclick="App.remitFileNow('${esc(p.key)}')">${label}</button>`}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="card" style="margin-bottom:12px;padding:14px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">📤 File month-end now</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">${info.cutoffSet?`${esc(info.month)}, cut-off ${esc(info.periodEnd)}. Starts the run straight away. A parish already filed this month is skipped.`:`No cut-off date is set for ${esc(info.month)}.`}</div>
+      </div>
+      ${info.cutoffSet?`<button class="btn btn-primary" ${dis||allBlocked?'disabled':''} onclick="App.remitFileNow('all')">${_remitFile.busy?'Working…':'File all parishes'}</button>`:''}
+    </div>
+    ${info.cutoffSet&&allBlocked?`<div style="font-size:12px;color:var(--amber,#b45309);margin-bottom:6px">All parishes waits until every parish has all its weekly collections: ${esc(blockedParishes.map(p=>p.noDatabase?p.name+' (no database)':p.name+' ('+p.missingSundays.join(', ')+')').join('; '))}.</div>`:''}
+    ${info.cutoffSet?`<table style="width:100%;border-collapse:collapse;font-size:13px"><tbody>${rows}</tbody></table>`:''}
+  </div>`;
+}
+
+async function loadRemitFileCard(){
+  if(!canFileRemittanceNow()) return;
+  try{
+    _remitFile.info = await apiFetch('remit-file-now');
+    _remitFile.error = '';
+  }catch(e){
+    _remitFile.info = null; _remitFile.error = 'Could not load the filing buttons: ' + (e?.message || 'try again');
+  }
+  renderRemitFileCard();
+}
+
+async function remitFileNow(parish){
+  if(!canFileRemittanceNow() || _remitFile.busy) return;
+  _remitFile.busy = true; renderRemitFileCard();
+  try{
+    const res = await apiFetch('remit-file-now', 'POST', { parish });
+    for(const r of (res.results || [])) _remitFile.results[r.parish] = r;
+    const started = (res.results || []).filter(r=>r.status==='started').length;
+    const failed = (res.results || []).filter(r=>r.status==='failed').length;
+    if(failed) showAlert(`${started} started, ${failed} failed. See the list for the reason.`, 'danger');
+    else if(started) showAlert(`${started} parish${started===1?'':'es'} started.`, 'success');
+    else showAlert('Nothing new to start. Already filed this month.', 'success');
+  }catch(e){
+    showAlert(e?.message || 'Could not start the filing. Nothing was sent.', 'danger');
+  }
+  _remitFile.busy = false;
+  await loadRemitFileCard();
+}
+
 function confirmQuotaPeriodWaiver(quotaIndex, periodKey, isWaived){
   if(!canAction('quota_period_waiver')){ showAlert('You do not have permission to change remittance figures.','danger'); return; }
   DB.getSettings().then(s=>{
@@ -22188,7 +22271,7 @@ return {
   approvePetty, confirmTopupApproval, printTopupReview, rejectPettyFromModal, rejectPetty, submitPettyReceipt, confirmPettyReceipt, showPettyRefill, showPettyToBankDeposit, submitPettyToBankDeposit, markTopupSettled, submitRefill, onRefillMethodChange, onRefillTopupChange, onRefillEntryModeChange, onRefillTargetChange, onRefillAmountChange,
   generateMonthlyReport, generateWeeklyReport, generateRemittanceReport, shareMonthlyStatement,
   generateQuarterlyReport, generateExpenseReport, generatePettyCashReport, onReportDatesChange, setReportPeriodMode,
-  setAdminTab, setAdminUserSearch, saveSettings, resetBudgetRules, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
+  setAdminTab, setAdminUserSearch, saveSettings, resetBudgetRules, confirmPettyFloatOverride, submitPettyFloatOverride, saveQuotas, addQuotaRow, removeQuotaRow, confirmQuotaPeriodWaiver, applyQuotaPeriodWaiver, remitFileNow, loadRemitFileCard, saveRates, addIncomeType, saveIncomeTypes, toggleIncomeTypeActive, confirmDeleteIncomeType, deleteIncomeType, saveRolePermissions, resetRolePermissions, showAddUser, addUser, editUser,
   updateUser, deleteUser, exportData, importData, clearDataOnly, clearAllData, timeTravelGoBack, timeTravelUndo, driveRestoreStart, driveRestoreFile, driveSaveClientId, driveShowSetup,
   setPeriodMode,
   showKPSCAlert, submitKPSCAlert, showChildrenTeacherModal, closeModal: closeModal, showAlert,
