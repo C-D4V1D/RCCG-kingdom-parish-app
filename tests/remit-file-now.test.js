@@ -12,7 +12,7 @@ const prevM = M === 1 ? 12 : M - 1;
 const cut = Array(12).fill(20); cut[M - 1] = 20; cut[prevM - 1] = 10;
 const PERIOD_END = `${MONTH}-20`;
 const SAT = '659840';
-const KEY_K = `remit_manual_signal_kingdom_${MONTH}`;
+const KEY_K = cutoffSignalMarkerKey(PERIOD_END);   // Kingdom shares ONE start marker with the cut-off date job and the Sunday save
 const KEY_S = `remit_manual_signal_${SAT}_${MONTH}`;
 
 function makeDB({ noSundays = false, sats = true } = {}) {
@@ -209,4 +209,28 @@ test('if the weekly-collections check cannot be read, all parishes and that pari
   assert.equal(all.status, 409); assert.equal(all.calls.length, 0);
   const one = await call(makeDB(), { body: { parish: SAT }, satDb: broken });
   assert.equal(one.json.results[0].status, 'failed'); assert.equal(one.calls.length, 0);
+});
+
+test('ordering: the cut-off date job started or is starting this period (sent / fresh pending) -> a button tap sends nothing', async () => {
+  for (const v of ['sent:' + new Date().toISOString(), 'pending:' + new Date().toISOString(), 'sent:' + new Date().toISOString() + '|sunday']) {
+    const DB = makeDB(); DB.settings.set(KEY_K, v);
+    const r = await call(DB, { body: { parish: 'kingdom' } });
+    assert.equal(r.json.results[0].status, 'already', v); assert.equal(r.calls.length, 0, v);
+  }
+});
+
+test('ordering: the cut-off job failed earlier -> a button tap may start it, and the shared marker becomes sent (so the hourly job will skip it)', async () => {
+  const DB = makeDB(); DB.settings.set(KEY_K, 'failed:' + new Date().toISOString());
+  const r = await call(DB, { body: { parish: 'kingdom' } });
+  assert.equal(r.json.results[0].status, 'started'); assert.equal(r.calls.length, 1);
+  assert.match(DB.settings.get(KEY_K), /^sent:/);
+  assert.equal(DB.settings.has(`remit_manual_signal_kingdom_${MONTH}`), false);
+  const again = await call(DB, { body: { parish: 'kingdom' } });
+  assert.equal(again.json.results[0].status, 'already'); assert.equal(again.calls.length, 0);
+});
+
+test('ordering: after a button start the cut-off job sees the shared marker as sent (its own skip rule is "marked")', async () => {
+  const DB = makeDB();
+  await call(DB, { body: { parish: 'kingdom' } });
+  assert.ok(DB.settings.get(KEY_K).startsWith('sent:'));   // runCutoffDateSignal reads exactly this: getSettingValue(markerKey).startsWith('sent:')
 });

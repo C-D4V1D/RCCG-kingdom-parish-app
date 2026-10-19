@@ -4894,10 +4894,27 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
     linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
   if (satParish) { payload.satellite = true; payload.links = null; payload.linksExpireAt = null; }  // the box sends a satellite's own buttons
+  // Kingdom only: one shared start marker with the cut-off date job and the Filing buttons. If one of those already started
+  // (or is starting) this period, a Sunday save does not send a second start signal. Its own earlier send does not block its re-saves.
+  const sharedKey = satParish ? null : cutoffSignalMarkerKey(period.periodEnd);
+  if (sharedKey) {
+    try {
+      const cur = await getSettingValue(DB, sharedKey);
+      if ((cur.startsWith('sent:') && !cur.endsWith('|sunday')) || (cur.startsWith('pending:') && cur > `pending:${new Date(Date.now() - 30 * 60 * 1000).toISOString()}`)) {
+        console.error(`[remit-webhook] cut-off notice for ${collectionDate} not sent: the month-end run was already started by the cut-off job or a button`);
+        return;
+      }
+    } catch { /* marker unreadable: keep the old behaviour and send */ }
+  }
   // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
   const sent = await deliverMonthEndEvent(env, payload);
   if (!sent.ok) {
     console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
+  } else if (sharedKey) {
+    try {
+      await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value NOT LIKE 'sent:%' OR settings.value LIKE '%|sunday'`)
+        .bind(sharedKey, `sent:${new Date().toISOString()}|sunday`).run();
+    } catch { /* best effort */ }
   }
 }
 
@@ -17076,6 +17093,9 @@ async function runCutoffDateSignal(DB, env, request) {
 const REMIT_FILE_ROLES = ['it_admin', 'accountant'];
 const REMIT_FILE_KEY_RE = /^(all|kingdom|\d{4,8})$/;
 const remitManualMarkerKey = (parish, month) => `remit_manual_signal_${parish}_${month}`;
+// Kingdom shares ONE start marker with the cut-off date job and the Sunday save (remit_cutoff_signal_<periodEnd>), so whichever
+// starts the month-end run first blocks the others. A satellite has its own manual marker.
+const remitStartKey = (t, month, period) => (!t.sat && period) ? cutoffSignalMarkerKey(period.periodEnd) : remitManualMarkerKey(t.key, month);
 
 /** The month a tap files: this month (Dublin), or last month. Returns { month, period } or null when no cut-off is set for it. */
 async function remitFileMonthAndPeriod(DB, wanted) {
@@ -17119,7 +17139,7 @@ async function remitFileStatus(DB, env, authz, wantedMonth) {
   const targets = await remitFileTargets(DB, env);
   const parishes = [];
   for (const t of targets) {
-    let st = remitMarkerState(await getSettingValue(DB, remitManualMarkerKey(t.key, month)));
+    let st = remitMarkerState(await getSettingValue(DB, remitStartKey(t, month, period)));
     if (!t.sat && st.state !== 'sent' && period) {
       const cutoff = remitMarkerState(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
       if (cutoff.state === 'sent') st = cutoff;
@@ -17134,7 +17154,7 @@ async function remitFileStatus(DB, env, authz, wantedMonth) {
 async function remitFileOne(DB, env, request, t, month, period, who) {
   const base = { parish: t.key, name: t.name };
   try {
-    const key = remitManualMarkerKey(t.key, month);
+    const key = remitStartKey(t, month, period);
     let st = remitMarkerState(await getSettingValue(DB, key));
     if (!t.sat) {
       const cutoff = remitMarkerState(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
@@ -17199,7 +17219,7 @@ async function remitFileNow(DB, env, request, body, authz) {
     // "All parishes" waits until every parish that is not started yet has all its weekly collections.
     const blocked = [];
     for (const t of targets) {
-      const st = remitMarkerState(await getSettingValue(DB, remitManualMarkerKey(t.key, month)));
+      const st = remitMarkerState(await getSettingValue(DB, remitStartKey(t, month, period)));
       if (st.state === 'sent') continue;
       const gap = await remitParishGap(DB, env, t, period).catch(() => ({ noDb: true, missing: [] }));
       if (gap.noDb) blocked.push({ parish: t.key, name: t.name, missing: [], noDatabase: true });
