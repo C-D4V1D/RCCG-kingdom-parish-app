@@ -135,3 +135,23 @@ test('a failing webhook is logged and never fails the save', async () => {
   assert.ok(errors.some(e => e.includes('network down')));
   assert.ok(errors.some(e => e.includes('401')));
 });
+
+test('a delivered Sunday-save signal writes NO once-marker (only the hourly date job owns it), for created and updated', async () => {
+  const DB = dbWithCutoffs();
+  const writes = [];
+  const prepare = DB.prepare.bind(DB);
+  DB.prepare = (sql) => {
+    const st = prepare(sql);
+    if (/INSERT INTO settings|UPDATE settings/i.test(sql)) {
+      const bind = st.bind.bind(st);
+      st.bind = (...a) => { writes.push({ sql, args: a }); return bind(...a); };
+    }
+    return st;
+  };
+  const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' };
+  const first = await save(sunday('2026-09-20'), env);
+  assert.equal(first.calls.length, 1);
+  const second = await save(sunday('2026-09-20', { membersTithe: 0, holyCommunionOffering: 500, totalCollection: 500 }), env);
+  assert.equal(second.calls.length, 1);
+  assert.deepEqual(writes.filter(w => JSON.stringify(w.args).includes('remit_cutoff_signal')), []);
+});

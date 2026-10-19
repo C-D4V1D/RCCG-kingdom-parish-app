@@ -840,6 +840,33 @@ async function putSettingValue(DB, key, value) {
 }
 
 /**
+ * Claim the once-only cut-off date signal for a period. The marker row holds a state:
+ *   pending:<iso>  a run is sending it right now (reclaimable after 30 minutes if that run died)
+ *   sent:<iso>     the box accepted it
+ *   failed:<iso>   the send was not accepted, so the next hourly run may try again
+ * Returns 'claimed' | 'already' | 'error'. 'error' (the database would not take the write) means do NOT send.
+ */
+async function claimCutoffSignal(DB, key, nowIso) {
+  try {
+    const first = await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING`)
+      .bind(key, `pending:${nowIso}`).run();
+    if (first?.meta?.changes === 1) return 'claimed';
+    const staleBefore = `pending:${new Date(Date.parse(nowIso) - 30 * 60 * 1000).toISOString()}`;
+    const again = await DB.prepare(`UPDATE settings SET value=? WHERE key=? AND (value LIKE 'failed:%' OR (value LIKE 'pending:%' AND value<?))`)
+      .bind(`pending:${nowIso}`, key, staleBefore).run();
+    return again?.meta?.changes === 1 ? 'claimed' : 'already';
+  } catch { return 'error'; }
+}
+
+/** Move the claimed marker to its final state. Returns false when the database refused the write. */
+async function finishCutoffSignal(DB, key, state, iso) {
+  try {
+    const r = await DB.prepare(`UPDATE settings SET value=? WHERE key=?`).bind(`${state}:${iso}`, key).run();
+    return r?.meta?.changes === 1;
+  } catch { return false; }
+}
+
+/**
  * Build the list of unpaid month names for a partner, looking back up to 12
  * months and EXCLUDING any month before the partner joined the portal.
  *
@@ -4861,7 +4888,6 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
   if (satParish) { payload.satellite = true; payload.links = null; payload.linksExpireAt = null; }  // the box sends a satellite's own buttons
   // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
   const sent = await deliverMonthEndEvent(env, payload);
-  if (sent.ok && !satParish) await putSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd), new Date().toISOString()).catch(() => {});
   if (!sent.ok) {
     console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
   }
@@ -16960,7 +16986,8 @@ Requirements:
  * POST /api/internal/run-cutoff-date-signal (hourly, via the admin-cron Worker). The month-end filing starts ON the
  * set cut-off date whatever the weekday. On that date, if every Sunday of the period has its collection and the signal
  * has not gone out yet, send the same signed cut-off signal a Sunday save sends. Missing Sundays hold it (it retries
- * every hour and says which). A Sunday save on the cut-off date marks the period too, so it is never sent twice.
+ * every hour and says which). The Sunday-save path does NOT touch the marker: the box accepting a Sunday signal is not
+ * the same as filing having started (it may have refused at its not-open check), so only this job's own accepted send counts.
  */
 async function runCutoffDateSignal(DB, env, request) {
   const authErr = requireCronSecret(env, request);
@@ -16975,17 +17002,25 @@ async function runCutoffDateSignal(DB, env, request) {
     `SELECT DISTINCT date FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='')`
   ).bind(period.periodStart, period.periodEnd).all();
   const haveSundays = new Set((results || []).map(r => String(r.date).slice(0, 10)));
-  const marked = !!(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
+  const markerKey = cutoffSignalMarkerKey(period.periodEnd);
+  const marked = (await getSettingValue(DB, markerKey)).startsWith('sent:');
   const decision = decideCutoffSignal({ today, period, sundays, haveSundays, marked });
   if (decision.action === 'wait') {
     console.error(`[cutoff-signal] ${period.periodEnd}: waiting for Sunday collection(s) ${decision.missing.join(', ')}`);
     return ok({ ok: true, held: true, ...decision, periodEnd: period.periodEnd });
   }
   if (decision.action !== 'send') return ok({ ok: true, skipped: true, ...decision, periodEnd: period.periodEnd });
+  const savedAt = new Date().toISOString();
+  // Claim before sending: if the database will not take the marker we send nothing (no duplicate next hour).
+  const claim = await claimCutoffSignal(DB, markerKey, savedAt);
+  if (claim === 'error') {
+    console.error(`[cutoff-signal] ${period.periodEnd}: could not write the marker; NOT sending, will retry next hour`);
+    return ok({ ok: false, sent: false, reason: 'marker not writable', periodEnd: period.periodEnd });
+  }
+  if (claim === 'already') return ok({ ok: true, skipped: true, reason: 'another run holds or finished this period', periodEnd: period.periodEnd });
   const month = period.periodEnd.slice(0, 7);
   const exp = remitActionExpForCutoff(period.periodEnd);
   const links = await buildRemitActionLinks(env, requestOrigin({ url: request.url }) || requestOrigin(request), { month, exp, people: Object.keys((await actionButtonPeople(env)).people) });
-  const savedAt = new Date().toISOString();
   const payload = {
     event: 'cutoff_collection_saved',
     collectionDate: [...haveSundays].sort().pop() || today,
@@ -17002,11 +17037,13 @@ async function runCutoffDateSignal(DB, env, request) {
   };
   const sent = await deliverMonthEndEvent(env, payload);
   if (!sent.ok) {
+    await finishCutoffSignal(DB, markerKey, 'failed', new Date().toISOString());
     console.error(`[cutoff-signal] ${period.periodEnd}: signal not accepted by ${sent.to || 'anyone'}; will retry next hour`);
     return ok({ ok: false, sent: false, to: sent.to || null, periodEnd: period.periodEnd });
   }
-  await putSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd), savedAt);
-  return ok({ ok: true, sent: true, to: sent.to, periodEnd: period.periodEnd });
+  const marked2 = await finishCutoffSignal(DB, markerKey, 'sent', new Date().toISOString());
+  if (!marked2) console.error(`[cutoff-signal] ${period.periodEnd}: sent, but the marker could not be finalised; it stays pending and may resend after 30 minutes`);
+  return ok({ ok: true, sent: true, to: sent.to, markerFinal: marked2, periodEnd: period.periodEnd });
 }
 
 async function runNewMonthDraftFallback(DB, env, request) {
