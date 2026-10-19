@@ -8892,6 +8892,21 @@ async function saveRemCutoffDates(btn=null){
   }
 }
 
+/**
+ * The paid remittances that belong to the period on screen. A payment is stored with the period dates it was made for. If the
+ * cut-off date is moved afterwards (e.g. 18 Oct -> 21 Oct) the period on screen no longer has the same end date, and an
+ * exact from/to match made the payment vanish (Total Paid 0, Part A and B unpaid again). A payment still belongs to the period
+ * when it is for the same remittance month (the month of its end date, as the dashboard already reads it) and the two
+ * date ranges overlap. Pure; exported for tests.
+ */
+function remitPeriodPayments(allRems, fromDate, toDate){
+  const month = String(toDate||'').slice(0,7);
+  return (allRems||[]).filter(r=>r.status==='paid' && r.periodFrom && r.periodTo && (
+    (r.periodFrom===fromDate && r.periodTo===toDate) ||
+    (String(r.periodTo).slice(0,7)===month && r.periodFrom<=toDate && r.periodTo>=fromDate)
+  ));
+}
+
 async function renderRemittances(){
   const [allIncome, allRems, settings, allUsers, rr] = await Promise.all([
     DB.getIncome(), DB.getRemittances(), DB.getSettings(), DB.getUsers(), getRemRates()
@@ -9022,7 +9037,7 @@ async function renderRemittances(){
     .reduce((s,r)=>s+(r.totalCollection||0),0);
 
   // --- Check for period payment (per-part tracking) ---
-  const periodPayments=allRems.filter(r=>r.status==='paid'&&r.periodFrom===fromDate&&r.periodTo===toDate);
+  const periodPayments=remitPeriodPayments(allRems,fromDate,toDate);
   const totalPaid=periodPayments.reduce((s,r)=>s+(r.amount||0),0);
   // Legacy (no part) payments count toward both parts for backward compat
   const _legacyPaid=periodPayments.filter(r=>!r.part).reduce((s,r)=>s+(r.amount||0),0);
@@ -22308,6 +22323,7 @@ return {
   _computeCashPoolBreakdown: computeCashPoolBreakdown,
   _computeCashPoolPeriodSummary: computeCashPoolPeriodSummary,
   _computeSundayCashCycle: computeSundayCashCycle,
+  _remitPeriodPayments: remitPeriodPayments,
   _calcChurchBalanceFromOpening: calcChurchBalanceFromOpening,
   _calcOutstandingRemittancesFromFlow: calcOutstandingRemittancesFromFlow,
   _calcOutstandingRemittancesAsOf: calcOutstandingRemittancesAsOf,
