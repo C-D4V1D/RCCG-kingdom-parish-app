@@ -10,12 +10,32 @@ const CUTOFFS_2026 = [18, 22, 22, 19, 24, 21, 19, 23, 20, 18, 22, 13];
 function dbWithCutoffs(settings = { remCutoffDatesByYear: { 2026: CUTOFFS_2026 } }) {
   const DB = createFinanceDBMock();
   const prepare = DB.prepare.bind(DB);
+  DB.markers = new Map();       // start markers (the mock has no settings upsert): emulates the three statements the claim uses
+  DB.failMarkerWrites = false;
   DB.prepare = (sql) => {
     if (sql.includes("WHERE key IN ('remCutoffDatesByYear','remCutoffDates')")) {
       return {
         bind() { return this; },
         async all() { return { results: Object.entries(settings).map(([key, v]) => ({ key, value: JSON.stringify(v) })) }; },
       };
+    }
+    const isRead = sql === 'SELECT value FROM settings WHERE key=?';
+    const isClaim = /^INSERT INTO settings \(key,value\) VALUES \(\?,\?\) ON CONFLICT\(key\) DO NOTHING$/.test(sql);
+    const isReclaim = /^UPDATE settings SET value=\? WHERE key=\? AND \(value LIKE 'failed:%'/.test(sql);
+    const isFinish = sql === 'UPDATE settings SET value=? WHERE key=?';
+    if (isRead || isClaim || isReclaim || isFinish) {
+      let a = [];
+      const st = {
+        bind(...x) { a = x; return st; },
+        async first() { const v = DB.markers.get(a[0]); return v === undefined ? null : { value: v }; },
+        async run() {
+          if (DB.failMarkerWrites) throw new Error('marker write refused');
+          if (isClaim) { if (DB.markers.has(a[0])) return { meta: { changes: 0 } }; DB.markers.set(a[0], a[1]); return { meta: { changes: 1 } }; }
+          if (isReclaim) { const cur = DB.markers.get(a[1]); if (cur !== undefined && (cur.startsWith('failed:') || (cur.startsWith('pending:') && cur < a[2]))) { DB.markers.set(a[1], a[0]); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } }; }
+          if (DB.markers.has(a[1])) { DB.markers.set(a[1], a[0]); return { meta: { changes: 1 } }; } return { meta: { changes: 0 } };
+        },
+      };
+      return st;
     }
     return prepare(sql);
   };
@@ -136,39 +156,33 @@ test('a failing webhook is logged and never fails the save', async () => {
   assert.ok(errors.some(e => e.includes('401')));
 });
 
-test('a delivered Sunday-save signal records the shared start marker as sent:...|sunday, and its own re-saves still go out', async () => {
-  const DB = dbWithCutoffs();
-  const writes = [];
-  const prepare = DB.prepare.bind(DB);
-  DB.prepare = (sql) => {
-    const st = prepare(sql);
-    if (/INSERT INTO settings|UPDATE settings/i.test(sql)) {
-      const bind = st.bind.bind(st);
-      st.bind = (...a) => { writes.push({ sql, args: a }); return bind(...a); };
-    }
-    return st;
-  };
-  const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' };
-  const first = await save(sunday('2026-09-20'), env);
+const K_MARK = 'remit_cutoff_signal_2026-09-20';
+const envFor = (DB) => ({ DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' });
+
+test('Sunday save claims the shared start marker BEFORE sending (pending while in flight), then marks it sent:...|sunday; its own re-save still goes out', async () => {
+  const DB = dbWithCutoffs(); const seen = [];
+  const first = await save(sunday('2026-09-20'), envFor(DB), { fetchImpl: async () => { seen.push(DB.markers.get(K_MARK)); return new Response('ok'); } });
   assert.equal(first.calls.length, 1);
-  const second = await save(sunday('2026-09-20', { membersTithe: 0, holyCommunionOffering: 500, totalCollection: 500 }), env);
+  assert.match(seen[0], /^pending:/);                                     // claimed before the send: a button/job cannot slip in between
+  assert.match(DB.markers.get(K_MARK), /^sent:.*\|sunday$/);
+  const second = await save(sunday('2026-09-20', { membersTithe: 0, holyCommunionOffering: 500, totalCollection: 500 }), envFor(DB));
   assert.equal(second.calls.length, 1);
-  const mk = writes.filter(w => JSON.stringify(w.args).includes('remit_cutoff_signal'));
-  assert.ok(mk.length >= 1);
-  assert.ok(mk.every(w => /^sent:.*\|sunday$/.test(String(w.args[1]))));
 });
 
-test('a Sunday save sends NOTHING when the cut-off job or a button already started this period (shared start marker)', async () => {
-  const DB = dbWithCutoffs();
-  const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' };
-  const prep = DB.prepare.bind(DB);
-  DB.prepare = (sql) => {
-    if (sql === 'SELECT value FROM settings WHERE key=?') {
-      let k; const st = { bind(...a) { k = a[0]; return st; }, async first() { return k === 'remit_cutoff_signal_2026-09-20' ? { value: 'sent:2026-09-19T10:00:00.000Z' } : prep(sql).bind(k).first(); } };
-      return st;
-    }
-    return prep(sql);
-  };
-  const r = await save(sunday('2026-09-20'), env);
-  assert.equal(r.calls.length, 0);
+test('Sunday save sends nothing when a button or the cut-off job holds the marker (sent, or fresh pending)', async () => {
+  for (const v of ['sent:2026-09-19T10:00:00.000Z', 'pending:' + new Date().toISOString()]) {
+    const DB = dbWithCutoffs(); DB.markers.set(K_MARK, v);
+    const r = await save(sunday('2026-09-20'), envFor(DB));
+    assert.equal(r.calls.length, 0, v);
+  }
 });
+
+test('Sunday save: a rejected send releases the marker to failed (retryable); a marker that cannot be written means nothing is sent', async () => {
+  const DB = dbWithCutoffs();
+  const r = await save(sunday('2026-09-20'), envFor(DB), { fetchImpl: async () => new Response('no', { status: 401 }) });
+  assert.equal(r.calls.length >= 1, true); assert.match(DB.markers.get(K_MARK), /^failed:/);
+  const DB2 = dbWithCutoffs(); DB2.failMarkerWrites = true;
+  const r2 = await save(sunday('2026-09-20'), envFor(DB2));
+  assert.equal(r2.calls.length, 0);
+});
+

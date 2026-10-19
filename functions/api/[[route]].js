@@ -4894,27 +4894,33 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
     linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
   };
   if (satParish) { payload.satellite = true; payload.links = null; payload.linksExpireAt = null; }  // the box sends a satellite's own buttons
-  // Kingdom only: one shared start marker with the cut-off date job and the Filing buttons. If one of those already started
-  // (or is starting) this period, a Sunday save does not send a second start signal. Its own earlier send does not block its re-saves.
-  const sharedKey = satParish ? null : cutoffSignalMarkerKey(period.periodEnd);
-  if (sharedKey) {
-    try {
-      const cur = await getSettingValue(DB, sharedKey);
-      if ((cur.startsWith('sent:') && !cur.endsWith('|sunday')) || (cur.startsWith('pending:') && cur > `pending:${new Date(Date.now() - 30 * 60 * 1000).toISOString()}`)) {
-        console.error(`[remit-webhook] cut-off notice for ${collectionDate} not sent: the month-end run was already started by the cut-off job or a button`);
-        return;
-      }
-    } catch { /* marker unreadable: keep the old behaviour and send */ }
+  // One shared start marker per parish and period (Kingdom: the cut-off job's own marker; a satellite: its filing-button marker), so
+  // the Sunday save, the cut-off date job and the Filing buttons never start the same run twice. Claimed ATOMICALLY before sending
+  // (pending), then marked sent, or released to failed when the send is not accepted. A save that is a re-save of the Sunday's own
+  // earlier start (marker sent:...|sunday) goes out as before. If the marker cannot be written, nothing is sent (the box's own
+  // periodic look is the safety net), same rule as the cut-off date job.
+  const sharedKey = satParish ? remitManualMarkerKey(satParish, month) : cutoffSignalMarkerKey(period.periodEnd);
+  const markerDB = satParish ? env.DB : DB;   // markers live in Kingdom's database (a satellite request runs against its own)
+  const prior = markerDB ? await getSettingValue(markerDB, sharedKey) : '';
+  const ownResave = prior.startsWith('sent:') && prior.endsWith('|sunday');
+  let claimed = false;
+  if (!ownResave) {
+    const claim = !markerDB ? 'error' : await claimCutoffSignal(markerDB, sharedKey, new Date().toISOString());
+    if (claim !== 'claimed') {
+      console.error(`[remit-webhook] cut-off notice for ${collectionDate} not sent: ${claim === 'error' ? 'could not write the start marker' : 'the month-end run was already started (or is starting) by the cut-off job or a button'}`);
+      return;
+    }
+    claimed = true;
   }
   // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
-  const sent = await deliverMonthEndEvent(env, payload);
+  let sent;
+  try { sent = await deliverMonthEndEvent(env, payload); } catch { sent = { ok: false }; }
   if (!sent.ok) {
     console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
-  } else if (sharedKey) {
-    try {
-      await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value NOT LIKE 'sent:%' OR settings.value LIKE '%|sunday'`)
-        .bind(sharedKey, `sent:${new Date().toISOString()}|sunday`).run();
-    } catch { /* best effort */ }
+  }
+  if (claimed) {
+    const done = await finishCutoffSignal(markerDB, sharedKey, sent.ok ? 'sent' : 'failed', new Date().toISOString() + (sent.ok ? '|sunday' : ''));
+    if (!done) console.error(`[remit-webhook] ${collectionDate}: start marker could not be finalised; it stays pending for up to 30 minutes`);
   }
 }
 
