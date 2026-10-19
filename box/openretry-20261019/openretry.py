@@ -16,6 +16,7 @@ stops at the same confirmations (check emails, buttons) as any run.
      so monthend's own resume path picks it up). A run that stops tells people by itself (stop()).
   5. Health: pings a Healthchecks URL after every clean pass; /fail on an exception. Missing pings alert David.
 """
+import re
 import copy, datetime, fcntl, json, os, sys, time, urllib.request
 
 ROOT = os.environ.get("CLERK_ROOT", "/workspace")
@@ -47,15 +48,35 @@ def today():
     return datetime.datetime.now(M.UK).date()
 
 
+LINK_ACTIONS = ("generate_rrr", "refresh", "refresh_attendance")
+LINK_RE = re.compile(r"^https://[A-Za-z0-9.-]+/remit-action\?t=[A-Za-z0-9._~-]{40,}$")
+
+
+def _links_shape_ok(links):
+    """The shape the app signs: {person: {generate_rrr, refresh, refresh_attendance}}, each an https .../remit-action?t=<token> URL."""
+    if not isinstance(links, dict) or not links:
+        return False
+    for person, acts in links.items():
+        if not isinstance(person, str) or not isinstance(acts, dict):
+            return False
+        for a in LINK_ACTIONS:
+            u = acts.get(a)
+            if not isinstance(u, str) or not LINK_RE.match(u):
+                return False
+    return True
+
+
 def _links_ok(ev):
-    """The check emails need the app's signed button links; the box cannot make them. No links, or expired: do not start
-    (a run would fill the portal and then stop at '5 email')."""
-    if not ev.get("links"):
+    """The check emails need the app's signed button links; the box cannot make them. Missing, malformed or expired:
+    do not start (a run would fill the portal and then stop at '5 email')."""
+    if not _links_shape_ok(ev.get("links")):
         return False
     exp = str(ev.get("linksExpireAt") or "")
     try:
         t = datetime.datetime.fromisoformat(exp.replace("Z", "+00:00"))
     except ValueError:
+        return False
+    if t.tzinfo is None:
         return False
     return t > datetime.datetime.now(datetime.timezone.utc)
 
@@ -107,7 +128,13 @@ def run_once():
         if rc in QUIET_RC:
             M.log(f"openretry: portal still closed for {month}", key)
             continue
-        if rc not in (0, 12):
+        if rc == 12:
+            # a report for this month already exists on the portal and this flow did not create it: never start over it
+            M.log(f"openretry: portal already has a report for {month} not created by this flow, NOT starting", key)
+            M.tg("david", f"⚠️ The portal already has a {M.esc(M.month_label(month))} remittance report that this flow did not create. "
+                          "I have not started a run. Please check it on the portal.", f"openretry-rc12:{end}")
+            continue
+        if rc != 0:
             M.log(f"openretry: precheck exit {rc}, will try again: {M.short(j, err)}", key)
             continue
         newkey = f"{start}..{end}"
@@ -130,12 +157,13 @@ def run_once():
 
 
 def main():
-    lock = open(os.path.join(M.MD, "lock"), "w")
+    lock = None
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return 0  # month-end runner busy; next pass
-    try:
+        lock = open(os.path.join(M.MD, "lock"), "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return 0  # month-end runner busy; next pass
         r = run_once()
     except Exception as ex:
         M.log(f"openretry FAILED: {type(ex).__name__}: {ex}")

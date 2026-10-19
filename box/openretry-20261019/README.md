@@ -16,5 +16,7 @@ What it does (tools/openretry.py, cron every 30 min, off until `install.sh --ena
 - It will not start if the saved signal has no app-signed button links or they expired (the box cannot mint them).
 - Uses monthend's lock, so it never overlaps a run.
 
-Tests: `python3 test_openretry.py` (13 tests). Mutation checks: without the date gate, the once-only marker, the links guard, the missing-Sunday hold, or the +1 day (Sunday on the cut-off date) a test fails. NOT tested: the real live_cutoff after an open portal (stubbed), the real Telegram send, the live cron.
+Tests: `python3 test_openretry.py` (16 tests). Mutation checks: without the date gate, the once-only marker, the links guard, the missing-Sunday hold, or the +1 day (Sunday on the cut-off date) a test fails. NOT tested: the real live_cutoff after an open portal (stubbed), the real Telegram send, the live cron.
 Undo: `bash install.sh --disable`, then restore backups/openretry-20261019.
+
+- Review fixes: portal precheck exit 12 (a report already exists that this flow did not create) never starts a run, writes no once-marker and sends one warning line to David; the saved links must have the app-signed shape (every person has generate_rrr, refresh and refresh_attendance, each an https .../remit-action?t=<token> URL) and an unexpired timezone-aware linksExpireAt; the lock file is opened inside the try so any failure pings /fail.

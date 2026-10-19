@@ -17,8 +17,9 @@ def setup():
     O = importlib.import_module("openretry")
     return root, O
 
+GOODLINKS = {"david": {"generate_rrr": "https://app.example/remit-action?t=" + "a"*60, "refresh": "https://app.example/remit-action?t=" + "b"*60, "refresh_attendance": "https://app.example/remit-action?t=" + "c"*60}}
 BOX = {"event": "cutoff_collection_saved", "collectionDate": "2026-10-18", "periodStart": "2026-09-21", "periodEnd": "2026-10-18",
-       "action": "created", "recordId": "INC-1", "savedAt": "2026-10-18T14:10:11Z", "parish": "602757", "month": "2026-10", "handler": "box", "links": {"david": {"refresh": "x"}}, "linksExpireAt": "2099-01-01T00:00:00Z"}
+       "action": "created", "recordId": "INC-1", "savedAt": "2026-10-18T14:10:11Z", "parish": "602757", "month": "2026-10", "handler": "box", "links": GOODLINKS, "linksExpireAt": "2099-01-01T00:00:00Z"}
 
 class T(unittest.TestCase):
     def mk(self, day, rc, cutoff=21, enabled=True, key="2026-09-21..2026-10-18"):
@@ -80,7 +81,7 @@ class T(unittest.TestCase):
         self.assertEqual(M.rjson(M.STATE)["2026-09-21..2026-10-18"]["status"], "held")
 
     def test_no_links_or_expired_links_do_not_start(self):
-        for patch in ({"links": None}, {"linksExpireAt": "2020-01-01T00:00:00Z"}, {"linksExpireAt": "garbage"}):
+        for patch in ({"links": None}, {"linksExpireAt": "2020-01-01T00:00:00Z"}, {"linksExpireAt": "garbage"}, {"linksExpireAt": "2099-01-01T00:00:00"}):
             _, O, M = self.mk(21, 0)
             e = M.rjson(M.STATE); k = "2026-09-21..2026-10-18"; e[k]["boxEvent"].update(patch); M.wjson(M.STATE, e)
             self.assertEqual(O.run_once(), "waiting"); self.assertEqual(self.calls["live"], []); self.assertEqual(self.calls["tg"], [])
@@ -120,6 +121,30 @@ class T(unittest.TestCase):
     def test_main_pings_ok_when_waiting(self):
         _, O, _ = self.mk(21, 10)
         self.assertEqual(O.main(), 0); self.assertEqual(self.calls["ping"], [""])
+
+    def test_malformed_links_do_not_start(self):
+        bad = [{"david": {"refresh": "x"}}, {"david": "x"}, "x", {"david": {}}, [], {"david": {a: "http://app.example/remit-action?t=" + "a"*60 for a in ("generate_rrr", "refresh", "refresh_attendance")}},
+               {"david": {a: "https://app.example/other?t=" + "a"*60 for a in ("generate_rrr", "refresh", "refresh_attendance")}},
+               {"david": {a: "https://app.example/remit-action?t=short" for a in ("generate_rrr", "refresh", "refresh_attendance")}},
+               {"david": {"generate_rrr": "https://app.example/remit-action?t=" + "a"*60, "refresh": "https://app.example/remit-action?t=" + "a"*60}}]
+        for links in bad:
+            _, O, M = self.mk(21, 0)
+            e = M.rjson(M.STATE); e["2026-09-21..2026-10-18"]["boxEvent"]["links"] = links; M.wjson(M.STATE, e)
+            self.assertEqual(O.run_once(), "waiting", links); self.assertEqual(self.calls["live"], []); self.assertEqual(self.calls["tg"], [])
+
+    def test_report_already_exists_rc12_never_starts_no_marker_one_message(self):
+        _, O, M = self.mk(21, 12)
+        self.assertEqual(O.run_once(), "waiting"); self.assertEqual(O.run_once(), "waiting")
+        self.assertEqual(self.calls["live"], [])
+        self.assertEqual(len(self.calls["tg"]), 2)                      # one per pass, the sender dedups on this key
+        self.assertEqual({k for _, _, k in self.calls["tg"]}, {"openretry-rc12:2026-10-21"})
+        self.assertNotIn("2026-09-21..2026-10-18", (M.rjson(O.STATEF, {}) or {}).get("done", {}))
+        self.assertTrue(all("portal is open" not in t.lower() for _, t, _ in self.calls["tg"]))
+
+    def test_lock_failure_pings_fail(self):
+        _, O, M = self.mk(21, 0)
+        M.MD = os.path.join(M.MD, "does", "not", "exist")
+        self.assertEqual(O.main(), 1); self.assertIn("/fail", self.calls["ping"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
