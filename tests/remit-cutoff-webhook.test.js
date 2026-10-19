@@ -136,7 +136,7 @@ test('a failing webhook is logged and never fails the save', async () => {
   assert.ok(errors.some(e => e.includes('401')));
 });
 
-test('a delivered Sunday-save signal writes NO once-marker (only the hourly date job owns it), for created and updated', async () => {
+test('a delivered Sunday-save signal records the shared start marker as sent:...|sunday, and its own re-saves still go out', async () => {
   const DB = dbWithCutoffs();
   const writes = [];
   const prepare = DB.prepare.bind(DB);
@@ -153,5 +153,15 @@ test('a delivered Sunday-save signal writes NO once-marker (only the hourly date
   assert.equal(first.calls.length, 1);
   const second = await save(sunday('2026-09-20', { membersTithe: 0, holyCommunionOffering: 500, totalCollection: 500 }), env);
   assert.equal(second.calls.length, 1);
-  assert.deepEqual(writes.filter(w => JSON.stringify(w.args).includes('remit_cutoff_signal')), []);
+  const mk = writes.filter(w => JSON.stringify(w.args).includes('remit_cutoff_signal'));
+  assert.ok(mk.length >= 1);
+  assert.ok(mk.every(w => /^sent:.*\|sunday$/.test(String(w.args[1]))));
+});
+
+test('a Sunday save sends NOTHING when the cut-off job or a button already started this period (shared start marker)', async () => {
+  const DB = dbWithCutoffs();
+  const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit', REMIT_WEBHOOK_KEY: 'k-1' };
+  await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING`).bind("remit_cutoff_signal_2026-09-20", "sent:2026-09-19T10:00:00.000Z").run();
+  const r = await save(sunday('2026-09-20'), env);
+  assert.equal(r.calls.length, 0);
 });
