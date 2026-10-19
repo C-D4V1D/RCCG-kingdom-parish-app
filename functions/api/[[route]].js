@@ -21,6 +21,7 @@ import {
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
+import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal } from '../_lib/cutoff-date-signal.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -4860,6 +4861,7 @@ async function sendCutoffCollectionWebhook(DB, env, data, result, origin = '', s
   if (satParish) { payload.satellite = true; payload.links = null; payload.linksExpireAt = null; }  // the box sends a satellite's own buttons
   // To the Clerk AI or the Clerk box, whichever runs the month-end (Automations → Month-end run by).
   const sent = await deliverMonthEndEvent(env, payload);
+  if (sent.ok && !satParish) await putSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd), new Date().toISOString()).catch(() => {});
   if (!sent.ok) {
     console.error(`[remit-webhook] cut-off notice for ${collectionDate} (${payload.action} ${saved.id}) not accepted by ${sent.to || 'anyone'}`);
   }
@@ -14340,6 +14342,7 @@ function cronJobRunners() {
     ['actionitem-sms',  'run-actionitem-sms',           runActionItemDeadlineSms],
     ['scheduled-sms',   'run-scheduled-sms',            runScheduledSms],
     ['newmonth-draft',  'run-newmonth-draft-fallback',  runNewMonthDraftFallback],
+    ['cutoff-signal',   'run-cutoff-date-signal',       runCutoffDateSignal],
     ['followups',       'run-followups',                runFollowups],
     ['prebriefs',       'run-prebriefs',                runPrebriefs],
     // Never moves money by itself (only classifies a balance movement and records the
@@ -16953,6 +16956,59 @@ Requirements:
 // as any tick gets through. Work is done at most once a day: `skipIfExists`
 // short-circuits once a draft for the target month exists, and the attempt
 // stamp stops a DeepSeek outage being retried every 30 minutes all day.
+/**
+ * POST /api/internal/run-cutoff-date-signal (hourly, via the admin-cron Worker). The month-end filing starts ON the
+ * set cut-off date whatever the weekday. On that date, if every Sunday of the period has its collection and the signal
+ * has not gone out yet, send the same signed cut-off signal a Sunday save sends. Missing Sundays hold it (it retries
+ * every hour and says which). A Sunday save on the cut-off date marks the period too, so it is never sent twice.
+ */
+async function runCutoffDateSignal(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+  if (!monthEndConfigured(env)) return ok({ ok: true, skipped: true, reason: 'no month-end destination configured' });
+  const today = dublinToday();
+  const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB), today);
+  if (!period) return ok({ ok: true, skipped: true, reason: 'not a cut-off date', today });
+  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+  const sundays = sundaysBetween(period.periodStart, period.periodEnd).filter(d => !isYmd(gateFrom) || d >= gateFrom);
+  const { results } = await DB.prepare(
+    `SELECT DISTINCT date FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='')`
+  ).bind(period.periodStart, period.periodEnd).all();
+  const haveSundays = new Set((results || []).map(r => String(r.date).slice(0, 10)));
+  const marked = !!(await getSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd)));
+  const decision = decideCutoffSignal({ today, period, sundays, haveSundays, marked });
+  if (decision.action === 'wait') {
+    console.error(`[cutoff-signal] ${period.periodEnd}: waiting for Sunday collection(s) ${decision.missing.join(', ')}`);
+    return ok({ ok: true, held: true, ...decision, periodEnd: period.periodEnd });
+  }
+  if (decision.action !== 'send') return ok({ ok: true, skipped: true, ...decision, periodEnd: period.periodEnd });
+  const month = period.periodEnd.slice(0, 7);
+  const exp = remitActionExpForCutoff(period.periodEnd);
+  const links = await buildRemitActionLinks(env, requestOrigin({ url: request.url }) || requestOrigin(request), { month, exp, people: Object.keys((await actionButtonPeople(env)).people) });
+  const savedAt = new Date().toISOString();
+  const payload = {
+    event: 'cutoff_collection_saved',
+    collectionDate: [...haveSundays].sort().pop() || today,
+    periodStart: period.periodStart,
+    periodEnd: period.periodEnd,
+    action: 'created',
+    trigger: 'cutoff_date',
+    recordId: `cutoff-date-${period.periodEnd}`,
+    savedAt,
+    parish: REMIT_ACTION_PARISH,
+    month,
+    links,
+    linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
+  };
+  const sent = await deliverMonthEndEvent(env, payload);
+  if (!sent.ok) {
+    console.error(`[cutoff-signal] ${period.periodEnd}: signal not accepted by ${sent.to || 'anyone'}; will retry next hour`);
+    return ok({ ok: false, sent: false, to: sent.to || null, periodEnd: period.periodEnd });
+  }
+  await putSettingValue(DB, cutoffSignalMarkerKey(period.periodEnd), savedAt);
+  return ok({ ok: true, sent: true, to: sent.to, periodEnd: period.periodEnd });
+}
+
 async function runNewMonthDraftFallback(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;

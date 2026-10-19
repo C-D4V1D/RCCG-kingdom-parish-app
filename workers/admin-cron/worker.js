@@ -16,6 +16,7 @@ export const JOBS = [
   "run-actionitem-sms",
   "run-scheduled-sms",
   "run-newmonth-draft-fallback",
+  "run-cutoff-date-signal",
   "run-followups",
   "run-prebriefs",
   "run-bank-recon",
