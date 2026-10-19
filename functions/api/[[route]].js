@@ -21,6 +21,7 @@ import {
   REMIT_ACTION_TEST_TTL_S,
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
+import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal } from '../_lib/cutoff-date-signal.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -836,6 +837,33 @@ async function putSettingValue(DB, key, value) {
     await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`)
       .bind(key, String(value ?? '')).run();
   } catch { /* marker write is best-effort */ }
+}
+
+/**
+ * Claim the once-only cut-off date signal for a period. The marker row holds a state:
+ *   pending:<iso>  a run is sending it right now (reclaimable after 30 minutes if that run died)
+ *   sent:<iso>     the box accepted it
+ *   failed:<iso>   the send was not accepted, so the next hourly run may try again
+ * Returns 'claimed' | 'already' | 'error'. 'error' (the database would not take the write) means do NOT send.
+ */
+async function claimCutoffSignal(DB, key, nowIso) {
+  try {
+    const first = await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING`)
+      .bind(key, `pending:${nowIso}`).run();
+    if (first?.meta?.changes === 1) return 'claimed';
+    const staleBefore = `pending:${new Date(Date.parse(nowIso) - 30 * 60 * 1000).toISOString()}`;
+    const again = await DB.prepare(`UPDATE settings SET value=? WHERE key=? AND (value LIKE 'failed:%' OR (value LIKE 'pending:%' AND value<?))`)
+      .bind(`pending:${nowIso}`, key, staleBefore).run();
+    return again?.meta?.changes === 1 ? 'claimed' : 'already';
+  } catch { return 'error'; }
+}
+
+/** Move the claimed marker to its final state. Returns false when the database refused the write. */
+async function finishCutoffSignal(DB, key, state, iso) {
+  try {
+    const r = await DB.prepare(`UPDATE settings SET value=? WHERE key=?`).bind(`${state}:${iso}`, key).run();
+    return r?.meta?.changes === 1;
+  } catch { return false; }
 }
 
 /**
@@ -14340,6 +14368,7 @@ function cronJobRunners() {
     ['actionitem-sms',  'run-actionitem-sms',           runActionItemDeadlineSms],
     ['scheduled-sms',   'run-scheduled-sms',            runScheduledSms],
     ['newmonth-draft',  'run-newmonth-draft-fallback',  runNewMonthDraftFallback],
+    ['cutoff-signal',   'run-cutoff-date-signal',       runCutoffDateSignal],
     ['followups',       'run-followups',                runFollowups],
     ['prebriefs',       'run-prebriefs',                runPrebriefs],
     // Never moves money by itself (only classifies a balance movement and records the
@@ -16953,6 +16982,70 @@ Requirements:
 // as any tick gets through. Work is done at most once a day: `skipIfExists`
 // short-circuits once a draft for the target month exists, and the attempt
 // stamp stops a DeepSeek outage being retried every 30 minutes all day.
+/**
+ * POST /api/internal/run-cutoff-date-signal (hourly, via the admin-cron Worker). The month-end filing starts ON the
+ * set cut-off date whatever the weekday. On that date, if every Sunday of the period has its collection and the signal
+ * has not gone out yet, send the same signed cut-off signal a Sunday save sends. Missing Sundays hold it (it retries
+ * every hour and says which). The Sunday-save path does NOT touch the marker: the box accepting a Sunday signal is not
+ * the same as filing having started (it may have refused at its not-open check), so only this job's own accepted send counts.
+ */
+async function runCutoffDateSignal(DB, env, request) {
+  const authErr = requireCronSecret(env, request);
+  if (authErr) return authErr;
+  if (!monthEndConfigured(env)) return ok({ ok: true, skipped: true, reason: 'no month-end destination configured' });
+  const today = dublinToday();
+  const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB), today);
+  if (!period) return ok({ ok: true, skipped: true, reason: 'not a cut-off date', today });
+  const gateFrom = (await getSettingValue(DB, 'attendanceGateFrom')).replace(/^"|"$/g, '');
+  const sundays = sundaysBetween(period.periodStart, period.periodEnd).filter(d => !isYmd(gateFrom) || d >= gateFrom);
+  const { results } = await DB.prepare(
+    `SELECT DISTINCT date FROM income WHERE date>=? AND date<=? AND (source='sunday_collection' OR source IS NULL OR source='')`
+  ).bind(period.periodStart, period.periodEnd).all();
+  const haveSundays = new Set((results || []).map(r => String(r.date).slice(0, 10)));
+  const markerKey = cutoffSignalMarkerKey(period.periodEnd);
+  const marked = (await getSettingValue(DB, markerKey)).startsWith('sent:');
+  const decision = decideCutoffSignal({ today, period, sundays, haveSundays, marked });
+  if (decision.action === 'wait') {
+    console.error(`[cutoff-signal] ${period.periodEnd}: waiting for Sunday collection(s) ${decision.missing.join(', ')}`);
+    return ok({ ok: true, held: true, ...decision, periodEnd: period.periodEnd });
+  }
+  if (decision.action !== 'send') return ok({ ok: true, skipped: true, ...decision, periodEnd: period.periodEnd });
+  const savedAt = new Date().toISOString();
+  // Claim before sending: if the database will not take the marker we send nothing (no duplicate next hour).
+  const claim = await claimCutoffSignal(DB, markerKey, savedAt);
+  if (claim === 'error') {
+    console.error(`[cutoff-signal] ${period.periodEnd}: could not write the marker; NOT sending, will retry next hour`);
+    return ok({ ok: false, sent: false, reason: 'marker not writable', periodEnd: period.periodEnd });
+  }
+  if (claim === 'already') return ok({ ok: true, skipped: true, reason: 'another run holds or finished this period', periodEnd: period.periodEnd });
+  const month = period.periodEnd.slice(0, 7);
+  const exp = remitActionExpForCutoff(period.periodEnd);
+  const links = await buildRemitActionLinks(env, requestOrigin({ url: request.url }) || requestOrigin(request), { month, exp, people: Object.keys((await actionButtonPeople(env)).people) });
+  const payload = {
+    event: 'cutoff_collection_saved',
+    collectionDate: [...haveSundays].sort().pop() || today,
+    periodStart: period.periodStart,
+    periodEnd: period.periodEnd,
+    action: 'created',
+    trigger: 'cutoff_date',
+    recordId: `cutoff-date-${period.periodEnd}`,
+    savedAt,
+    parish: REMIT_ACTION_PARISH,
+    month,
+    links,
+    linksExpireAt: links ? new Date(exp * 1000).toISOString() : null,
+  };
+  const sent = await deliverMonthEndEvent(env, payload);
+  if (!sent.ok) {
+    await finishCutoffSignal(DB, markerKey, 'failed', new Date().toISOString());
+    console.error(`[cutoff-signal] ${period.periodEnd}: signal not accepted by ${sent.to || 'anyone'}; will retry next hour`);
+    return ok({ ok: false, sent: false, to: sent.to || null, periodEnd: period.periodEnd });
+  }
+  const marked2 = await finishCutoffSignal(DB, markerKey, 'sent', new Date().toISOString());
+  if (!marked2) console.error(`[cutoff-signal] ${period.periodEnd}: sent, but the marker could not be finalised; it stays pending and may resend after 30 minutes`);
+  return ok({ ok: true, sent: true, to: sent.to, markerFinal: marked2, periodEnd: period.periodEnd });
+}
+
 async function runNewMonthDraftFallback(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
