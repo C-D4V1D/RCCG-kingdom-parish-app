@@ -47,6 +47,19 @@ def today():
     return datetime.datetime.now(M.UK).date()
 
 
+def _links_ok(ev):
+    """The check emails need the app's signed button links; the box cannot make them. No links, or expired: do not start
+    (a run would fill the portal and then stop at '5 email')."""
+    if not ev.get("links"):
+        return False
+    exp = str(ev.get("linksExpireAt") or "")
+    try:
+        t = datetime.datetime.fromisoformat(exp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return t > datetime.datetime.now(datetime.timezone.utc)
+
+
 def candidates():
     for key, e in (M.rjson(M.STATE, {}) or {}).items():
         f = (e or {}).get("failure") or {}
@@ -73,8 +86,23 @@ def run_once():
         if not per:
             continue
         start, end = per
+        if not _links_ok(ev):
+            M.log("openretry: saved signal has no usable button links (missing or expired), not starting", key)
+            continue
         if today() < end:
             continue  # before the saved cut-off date: no portal checks at all
+        # the same check as the app's earlier-Sundays gate: every Sunday of the period needs a saved collection
+        f = MI.facts(month, today())
+        if f.get("error"):
+            raise RuntimeError(f"collections check unreadable: {f['error']}")
+        missing = MI.missing_collections(f, before=end + datetime.timedelta(days=1))
+        if missing:
+            days = ", ".join(d.isoformat() for d in missing)
+            M.log(f"openretry: waiting, no collection saved for {days}", key)
+            M.tg("david", f"⏸️ {M.esc(M.month_label(month))} remittance is waiting: no Sunday collection is saved in the app for "
+                          f"{M.esc(days)}. Save it and the run starts by itself (checked every 30 minutes).",
+                 f"openretry-missing:{end}:{days}")
+            continue
         rc, j, err = M.node("api-fill.js", "precheck", "--month", month, retry=False)
         if rc in QUIET_RC:
             M.log(f"openretry: portal still closed for {month}", key)

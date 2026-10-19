@@ -18,7 +18,7 @@ def setup():
     return root, O
 
 BOX = {"event": "cutoff_collection_saved", "collectionDate": "2026-10-18", "periodStart": "2026-09-21", "periodEnd": "2026-10-18",
-       "action": "created", "recordId": "INC-1", "savedAt": "2026-10-18T14:10:11Z", "parish": "602757", "month": "2026-10", "handler": "box"}
+       "action": "created", "recordId": "INC-1", "savedAt": "2026-10-18T14:10:11Z", "parish": "602757", "month": "2026-10", "handler": "box", "links": {"david": {"refresh": "x"}}, "linksExpireAt": "2099-01-01T00:00:00Z"}
 
 class T(unittest.TestCase):
     def mk(self, day, rc, cutoff=21, enabled=True, key="2026-09-21..2026-10-18"):
@@ -29,6 +29,12 @@ class T(unittest.TestCase):
         self.calls = {"node": 0, "tg": [], "live": [], "ping": []}
         O.MI.app_get = lambda p: {"remCutoffDatesByYear": {"2026": [0, 0, 0, 0, 0, 0, 0, 0, 20, cutoff, 0, 0]}}
         O.today = lambda: datetime.date(2026, 10, day)
+        def facts(month, today=None, **k):
+            sun = [datetime.date(2026, 9, 27), datetime.date(2026, 10, 4), datetime.date(2026, 10, 11), datetime.date(2026, 10, 18)] + getattr(self, 'extra', [])
+            miss = getattr(self, "miss", [])
+            return {"month": month, "start": datetime.date(2026, 9, 21), "end": datetime.date(2026, 10, 21), "today": today,
+                    "sundays": [{"date": d, "collection": d not in miss, "attendance": None} for d in sun]}
+        O.MI.facts = facts
         def node(*a, **k):
             self.calls["node"] += 1; return rc, {}, ""
         M.node = node
@@ -72,6 +78,37 @@ class T(unittest.TestCase):
         ev, resumed = self.calls["live"][0]
         self.assertTrue(resumed); self.assertEqual(ev["periodEnd"], "2026-10-18")
         self.assertEqual(M.rjson(M.STATE)["2026-09-21..2026-10-18"]["status"], "held")
+
+    def test_no_links_or_expired_links_do_not_start(self):
+        for patch in ({"links": None}, {"linksExpireAt": "2020-01-01T00:00:00Z"}, {"linksExpireAt": "garbage"}):
+            _, O, M = self.mk(21, 0)
+            e = M.rjson(M.STATE); k = "2026-09-21..2026-10-18"; e[k]["boxEvent"].update(patch); M.wjson(M.STATE, e)
+            self.assertEqual(O.run_once(), "waiting"); self.assertEqual(self.calls["live"], []); self.assertEqual(self.calls["tg"], [])
+
+    def test_missing_sunday_holds_and_reports_once_then_starts_when_saved(self):
+        _, O, M = self.mk(21, 0)
+        self.miss = [datetime.date(2026, 10, 4)]
+        self.assertEqual(O.run_once(), "waiting"); self.assertEqual(O.run_once(), "waiting")
+        self.assertEqual(self.calls["node"], 0); self.assertEqual(self.calls["live"], [])
+        self.assertEqual(len(self.calls["tg"]), 2)  # sent each pass; the real tg() dedups on the key
+        self.assertEqual(self.calls["tg"][0][2], self.calls["tg"][1][2]); self.assertIn("2026-10-04", self.calls["tg"][0][1])
+        self.miss = []
+        self.assertEqual(O.run_once(), "started"); self.assertEqual(len(self.calls["live"]), 1)
+
+    def test_last_sunday_before_cutoff_counts_too(self):
+        _, O, _ = self.mk(21, 0)
+        self.miss = [datetime.date(2026, 10, 18)]
+        self.assertEqual(O.run_once(), "waiting"); self.assertEqual(self.calls["live"], [])
+
+    def test_sunday_on_the_cutoff_date_itself_counts(self):
+        _, O, _ = self.mk(21, 0)
+        self.extra = [datetime.date(2026, 10, 21)]; self.miss = [datetime.date(2026, 10, 21)]
+        self.assertEqual(O.run_once(), "waiting"); self.assertEqual(self.calls["live"], [])
+
+    def test_collections_unreadable_raises_for_health_alarm(self):
+        _, O, _ = self.mk(21, 0)
+        O.MI.facts = lambda *a, **k: {"error": "couldn't read the app"}
+        with self.assertRaises(RuntimeError): O.run_once()
 
     def test_settings_unreadable_raises_for_health_alarm(self):
         _, O, _ = self.mk(21, 0)
