@@ -20,13 +20,13 @@ async function withFetch(sent, fn) {
 }
 const cutEvents = (sent) => sent.filter(b => b.event === 'cutoff_collection_saved');
 
-async function setupSat() {
+async function setupSat(cut = [18, 22, 22, 19, 24, 21, 19, 23, 20, 18, 22, 13]) {
   const DB = createSqliteD1(), SAT = createSqliteD1(), waits = [];
   const env = { DB, SAT_659840: SAT };
   const call = (path, opts = {}, extra = {}) => onRequest({ request: mkReq(path, opts), env: { ...env, ...extra }, waitUntil: p => waits.push(p) });
   assert.equal((await call('init', { headers: FINANCE_AUTH_HEADER })).status, 200);
   const put = (k, v) => DB.prepare(`INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)`).bind(k, JSON.stringify(v)).run();
-  await put('remCutoffDatesByYear', { 2026: [18, 22, 22, 19, 24, 21, 19, 23, 20, 18, 22, 13] });
+  await put('remCutoffDatesByYear', { 2026: cut });
   await put('satParishes', [{ code: '659840', name: 'Sanctuary of Favour Parish', active: true }]);
   const created = await (await call('users', { method: 'POST', headers: FINANCE_AUTH_HEADER, body: { name: 'Pastor Tunde', role: 'satellite', pin: '4321', parishCode: '659840' } })).json();
   const pastor = { Authorization: `Bearer ${await financeToken({ uid: created.id, role: 'satellite' })}` };
@@ -84,4 +84,13 @@ test('a button tap AFTER the hourly cut-off job started it sends nothing', async
     assert.equal(await k.button(), 'already');
   });
   assert.equal(cutEvents(sent).length, 1);
+});
+
+test('month boundary: a cut-off on the last day of a month and one on the first day of the next get different markers, each keyed by its own calendar month', async () => {
+  const cut = [18, 22, 22, 19, 24, 21, 19, 23, 20, 31, 1, 13];           // Oct 31 and Nov 1 are both cut-off dates
+  const s = await setupSat(cut); const sent = [];
+  await withFetch(sent, async () => { await satSave(s, '2026-10-31'); await satSave(s, '2026-11-01'); });
+  assert.equal(cutEvents(sent).length, 2);
+  const keys = (await s.DB.prepare(`SELECT key FROM settings WHERE key LIKE 'remit_manual_signal_659840_%' ORDER BY key`).all()).results.map(r => r.key);
+  assert.deepEqual(keys, ['remit_manual_signal_659840_2026-10', 'remit_manual_signal_659840_2026-11']);   // the same key the filing button reads for that month
 });
