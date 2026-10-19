@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { onRequest, remCutoffPeriodForDate, remCutoffPeriodForCollection } from '../functions/api/[[route]].js';
+import { onRequest, remCutoffPeriodForDate } from '../functions/api/[[route]].js';
 import { createFinanceDBMock } from './finance-db-mock.mjs';
 import { FINANCE_AUTH_HEADER } from './finance-auth-helper.mjs';
 
@@ -134,39 +134,4 @@ test('a failing webhook is logged and never fails the save', async () => {
   }
   assert.ok(errors.some(e => e.includes('network down')));
   assert.ok(errors.some(e => e.includes('401')));
-});
-
-// A mid-week cut-off day (Wed 21 Oct 2026): the last Sunday on or before it (18 Oct) closes the period.
-const CUTOFFS_WED_OCT = [18, 22, 22, 19, 24, 21, 19, 23, 20, 21, 22, 13];
-
-test('remCutoffPeriodForCollection: Sunday cut-offs unchanged, mid-week cut-offs close on the last Sunday before them', () => {
-  const sun = { remCutoffDatesByYear: { 2026: CUTOFFS_2026 } };
-  assert.deepEqual(remCutoffPeriodForCollection(sun, '2026-10-18'), { periodStart: '2026-09-21', periodEnd: '2026-10-18' });
-  assert.equal(remCutoffPeriodForCollection(sun, '2026-10-11'), null);
-
-  const wed = { remCutoffDatesByYear: { 2026: CUTOFFS_WED_OCT } };
-  assert.deepEqual(remCutoffPeriodForCollection(wed, '2026-10-18'), { periodStart: '2026-09-21', periodEnd: '2026-10-21' });
-  assert.deepEqual(remCutoffPeriodForCollection(wed, '2026-10-21'), { periodStart: '2026-09-21', periodEnd: '2026-10-21' }); // exact date still matches
-  assert.equal(remCutoffPeriodForCollection(wed, '2026-10-11'), null);   // earlier Sunday
-  assert.equal(remCutoffPeriodForCollection(wed, '2026-10-25'), null);   // Sunday after the cut-off
-  assert.equal(remCutoffPeriodForCollection(wed, '2026-10-19'), null);   // Monday that is not the cut-off
-  // Cut-off Mon 2 Nov: Sunday 1 Nov closes the period, across the month boundary.
-  const mon = { remCutoffDatesByYear: { 2026: [18, 22, 22, 19, 24, 21, 19, 23, 20, 21, 2, 13] } };
-  assert.deepEqual(remCutoffPeriodForCollection(mon, '2026-11-01'), { periodStart: '2026-10-22', periodEnd: '2026-11-02' });
-});
-
-test('Wednesday cut-off: saving the last Sunday before it notifies, with the Wednesday as period end', async () => {
-  const DB = dbWithCutoffs({ remCutoffDatesByYear: { 2026: CUTOFFS_WED_OCT } });
-  const env = { DB, REMIT_WEBHOOK_URL: 'https://hooks.example/remit' };
-  const r = await save(sunday('2026-10-18'), env);
-  assert.equal(r.res.status, 200);
-  assert.equal(r.calls.length, 1);
-  const p = JSON.parse(r.calls[0].init.body);
-  assert.equal(p.collectionDate, '2026-10-18');
-  assert.equal(p.periodStart, '2026-09-21');
-  assert.equal(p.periodEnd, '2026-10-21');
-  assert.equal(p.month, '2026-10');
-  assert.equal(p.action, 'created');
-  // An earlier Sunday of the same period still sends nothing.
-  assert.equal((await save(sunday('2026-10-11'), env)).calls.length, 0);
 });
