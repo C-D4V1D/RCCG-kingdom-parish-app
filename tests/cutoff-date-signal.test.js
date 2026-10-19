@@ -20,11 +20,6 @@ test('a Sunday without a collection holds the start and names it', () => {
   assert.equal(r.action, 'wait');
   assert.deepEqual(r.missing, ['2026-10-11']);
 });
-test('a Sunday ON the cut-off date also needs its collection', () => {
-  const p = { periodStart: '2026-10-19', periodEnd: '2026-10-25' };
-  const r = decideCutoffSignal({ today: '2026-10-25', period: p, sundays: ['2026-10-25'], haveSundays: new Set(), marked: false });
-  assert.equal(r.action, 'wait');
-});
 test('once only: already sent means skip', () => {
   assert.equal(decideCutoffSignal({ today: '2026-10-21', period, sundays, haveSundays: all, marked: true }).action, 'skip');
 });
@@ -41,4 +36,10 @@ test('marker key is per period', () => {
 test("a Sunday AFTER the cut-off date without a collection does not hold the start", () => {
   const r = decideCutoffSignal({ today: "2026-10-21", period, sundays: [...sundays, "2026-10-25"], haveSundays: all, marked: false });
   assert.equal(r.action, "send");
+});
+
+test('a cut-off date that is a Sunday is never sent by this job (the Sunday save is the trigger, no second signal)', () => {
+  const p = { periodStart: '2026-10-19', periodEnd: '2026-10-25' };
+  const r = decideCutoffSignal({ today: '2026-10-25', period: p, sundays: ['2026-10-25'], haveSundays: new Set(['2026-10-25']), marked: false });
+  assert.equal(r.action, 'skip'); assert.match(r.reason, /Sunday/);
 });

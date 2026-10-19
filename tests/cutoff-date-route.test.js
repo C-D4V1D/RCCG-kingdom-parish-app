@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { onRequest } from '../functions/api/[[route]].js';
 import { dublinToday, cutoffSignalMarkerKey } from '../functions/_lib/cutoff-date-signal.js';
@@ -111,4 +111,18 @@ test('a Sunday of the period without a collection holds the start: nothing sent,
   const DB = makeDB({ noSundays: true });
   const a = await runJob(DB);
   assert.equal(a.json.held, true); assert.equal(a.calls.length, 0); assert.equal(DB.settings.has(KEY), false);
+});
+
+test('route: a cut-off date that is a Sunday sends nothing from the hourly job (no second signal that could stop a filing)', async () => {
+  // Pin the clock to a Sunday that is the configured cut-off date.
+  mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-25T10:00:00Z') });
+  try {
+    const sun = '2026-10-25';
+    assert.equal(dublinToday(), sun);
+    const DB = makeDB();
+    DB.settings.set('remCutoffDatesByYear', JSON.stringify({ 2026: Array(12).fill(20).map((v, i) => (i === 9 ? 25 : i === 8 ? 10 : v)) }));
+    const a = await runJob(DB);
+    assert.equal(a.calls.length, 0); assert.equal(a.json.skipped, true); assert.match(a.json.reason, /Sunday/);
+    assert.equal(DB.settings.has(cutoffSignalMarkerKey(sun)), false);
+  } finally { mock.timers.reset(); }
 });
