@@ -48,7 +48,7 @@ test('links: four personal links, exp 21 days after the cut-off, null without a 
   const links = await buildRemitActionLinks({ REMIT_WEBHOOK_KEY: KEY }, 'https://app.example', { month: '2026-10', exp });
   assert.deepEqual(Object.keys(links), ['david', 'divine']);
   for (const person of ['david', 'divine']) {
-    for (const action of ['generate_rrr', 'refresh', 'refresh_attendance']) {
+    for (const action of ['generate_rrr', 'refresh', 'refresh_attendance', 'refresh_both']) {
       const u = new URL(links[person][action]);
       assert.equal(u.origin + u.pathname, 'https://app.example/remit-action');
       const v = await verifyRemitActionToken(KEY, u.searchParams.get('t'), Date.parse('2026-10-19T00:00:00Z'));
@@ -118,6 +118,25 @@ test('confirm page: refresh_attendance renders "Refresh attendance for <Month YY
   assert.deepEqual(Object.keys(n).sort(), ['action', 'clickedAt', 'event', 'month', 'parish', 'person', 'test']);
   assert.match(post.html, /<th>Attendance<\/th><td>October 2026<\/td>/, 'result page uses the same label');
   assert.deepEqual({ ...n, clickedAt: 'x' }, { event: 'remit_action', action: 'refresh_attendance', parish: '602757', month: '2026-10', person: 'david', test: false, clickedAt: 'x' });
+});
+
+test('confirm page: refresh_both renders "Refresh both for <Month YYYY>" and forwards the right action', async () => {
+  const t = await signRemitActionToken(KEY, { ...base, person: 'david', action: 'refresh_both', exp: future() });
+  const get = await run(new Request(`https://app.example/remit-action?t=${t}`), env);
+  assert.equal(get.res.status, 200);
+  assert.equal(get.calls.length, 0);
+  assert.match(get.html, /Refresh both for October 2026/);
+  assert.match(get.html, /<th>Remittance \+ attendance<\/th><td>October 2026<\/td>/, 'month row is labelled Remittance + attendance');
+
+  const post = await run(new Request('https://app.example/remit-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `t=${t}`,
+  }), env);
+  assert.equal(post.res.status, 200);
+  assert.equal(post.calls.length, 1);
+  const n = JSON.parse(post.calls[0].init.body);
+  assert.deepEqual(Object.keys(n).sort(), ['action', 'clickedAt', 'event', 'month', 'parish', 'person', 'test']);
+  assert.match(post.html, /<th>Remittance \+ attendance<\/th><td>October 2026<\/td>/, 'result page uses the same label');
+  assert.deepEqual({ ...n, clickedAt: 'x' }, { event: 'remit_action', action: 'refresh_both', parish: '602757', month: '2026-10', person: 'david', test: false, clickedAt: 'x' });
 });
 
 // Buttons per person from Automations → People ("buttons" on), checked when the link is made AND when it is used.
