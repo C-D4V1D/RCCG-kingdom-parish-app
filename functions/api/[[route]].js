@@ -4858,7 +4858,7 @@ function remCutoffPeriodForDate(settings, date) {
 // shared with the /remit-action confirm page so both authenticate the same way.
 //
 // Each payload also carries signed one-tap links (see ../_lib/remit-action-token.js and
-// functions/remit-action.js): links.<person>.{generate_rrr,refresh,refresh_attendance} for each person with buttons on
+// functions/remit-action.js): links.<person>.{generate_rrr,refresh,refresh_attendance,refresh_both} for each person with buttons on
 // in Automations → People (David and Bro. Divine when the settings can't be read). They are null
 // when REMIT_WEBHOOK_KEY is unset (nothing to sign with).
 

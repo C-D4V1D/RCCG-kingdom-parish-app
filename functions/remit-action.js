@@ -39,12 +39,18 @@ const ACTIONS = {
     title: 'Refresh attendance',
     what: 'Church Clerk will re-read this month\'s attendance and Monthly report from the parish app and send a new check email. Nothing already submitted on the portal is changed.',
   },
+  refresh_both: {
+    button: 'Confirm Refresh both',
+    title: 'Refresh both',
+    what: 'Church Clerk will re-read the parish app and the RCCG portal (this month\'s remittance AND attendance with the Monthly report) and send new check emails. Nothing already submitted on the portal is changed.',
+  },
 };
 
 // Title for the page heading and the "Action" row. refresh_attendance includes the month
 // (e.g. "Refresh attendance for October 2026"); the others use their fixed ACTIONS title.
 function actionTitle(p) {
   if (p.action === 'refresh_attendance') return `Refresh attendance for ${monthLabel(p.month)}`;
+  if (p.action === 'refresh_both') return `Refresh both for ${monthLabel(p.month)}`;
   return ACTIONS[p.action].title;
 }
 
@@ -150,7 +156,7 @@ function monthLabel(ym) {
 function details(p) {
   return `<table class="kv" role="presentation">
   <tr><th>Parish</th><td>${esc(PARISH_NAME)}</td></tr>
-  <tr><th>${p.action === 'refresh_attendance' ? 'Attendance' : 'Remittance'}</th><td>${esc(monthLabel(p.month))}</td></tr>
+  <tr><th>${p.action === 'refresh_attendance' ? 'Attendance' : p.action === 'refresh_both' ? 'Remittance + attendance' : 'Remittance'}</th><td>${esc(monthLabel(p.month))}</td></tr>
   <tr><th>Confirming as</th><td>${esc(p.personLabel || REMIT_ACTION_PEOPLE[p.person] || p.person)}</td></tr>
   <tr><th>Action</th><td>${esc(actionTitle(p))}</td></tr>
 </table>`;
