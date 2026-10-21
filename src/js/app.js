@@ -10855,7 +10855,7 @@ async function printRemittanceReport(fromOverride, toOverride){
   const tgTotal=tgLine?.total||0;
   const tgNatlAmt=tgLine?.national||0;
   const tgDistributed=tgTotal-tgNatlAmt-(tgLine?.seed||0)-(tgLine?.local||0); // area+pastor+ministers only
-  const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0); // incl. TG national
+  const totalToHQ=rem.lines.reduce((s,l)=>s+(l.national||0),0)+(rem.drda||0)+(rem.foreignMission||0); // incl. TG national + the DRDA/FM carve (carved out of the lines' national shares)
   const totalParishLocal=rem.lines.reduce((s,l)=>s+(l.local||0),0);
   const childrenDeptTotal=rem.childrenDept||0;
 
@@ -10970,6 +10970,11 @@ async function printRemittanceReport(fromOverride, toOverride){
   if((rem.insuranceGen||0)>0) pushA({ desc:`Insurance Fund (GEN TITHE) — ${+(rr.insuranceGenTithe*100).toFixed(2)}% of Members' Tithe`, type:`${+(rr.insuranceGenTithe*100).toFixed(2)}% Based`, amount:rem.insuranceGen });
   // 15. Insurance Fund (MIN TITHE)
   if((rem.insuranceMin||0)>0) pushA({ desc:`Insurance Fund (MIN TITHE) — ${+(rr.insuranceMinTithe*100).toFixed(2)}% of Ministers' Tithe`, type:`${+(rr.insuranceMinTithe*100).toFixed(2)}% Based`, amount:rem.insuranceMin });
+  // 16. Province DRDA (carved out of the Members' Tithe national share - the lines
+  // already exclude it, so without this row Part A and the balance come up short)
+  if((rem.drda||0)>0) pushA({ desc:`Province DRDA → National HQ (${+(rr.drda*100).toFixed(2)}% of Members' Tithe)`, type:`${+(rr.drda*100).toFixed(2)}% Based`, amount:rem.drda });
+  // 17. Province Foreign Mission (same carve)
+  if((rem.foreignMission||0)>0) pushA({ desc:`Province Foreign Mission → National HQ (${+(rr.foreignMission*100).toFixed(2)}% of Members' Tithe)`, type:`${+(rr.foreignMission*100).toFixed(2)}% Based`, amount:rem.foreignMission });
   // Fixed RCCG quotas (excluding pastoral Zonal Mummy Stipend)
   rccgQuotas.forEach(q=>{ if((q.amount||0)>0) partARows.push({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }); });
   const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
