@@ -17382,6 +17382,7 @@ function renderAdminRates(s){
           <td><span id="localLbl_${t.key}" style="color:var(--text3);font-size:13px">${localPct}%</span></td></tr>`;
       }).join('')}
     </table></div>
+    ${((r.drda||0)+(r.foreignMission||0))>0 ? `<p style="font-size:12px;color:var(--text3);margin:8px 0 0">On the remittance, the Members' Tithe national share is itemised the portal way: General Tithe (${decToPct((r.membersTithe?.natl??0)-(r.drda||0)-(r.foreignMission||0))}%) + Province DRDA (${decToPct(r.drda||0)}%) + Province Foreign Mission (${decToPct(r.foreignMission||0)}%). Edit the two levy rates below, not the Members' Tithe rate above.</p>` : ''}
     <hr class="divider">
     <div class="modal-title" style="font-size:13px;margin-bottom:8px;color:var(--text2)">Thanksgiving (TG) Split</div>
     <div class="table-wrap"><table>
@@ -17404,6 +17405,8 @@ function renderAdminRates(s){
     <div class="table-wrap"><table>
       <tr><th>Levy</th><th>Basis</th><th>Rate %</th></tr>
       <tr><td>CRM Add-on → National HQ</td><td style="font-size:11px;color:var(--text3)">% of total CRM collection</td><td>${rateInput('rate_crmAddon', r.crmAddon ?? DEFAULT_REMITTANCE_RATES.crmAddon)}</td></tr>
+      <tr><td>Province DRDA → National HQ</td><td style="font-size:11px;color:var(--text3)">% of Members' Tithe total</td><td>${rateInput('rate_drda', r.drda ?? 0)}</td></tr>
+      <tr><td>Province Foreign Mission → National HQ</td><td style="font-size:11px;color:var(--text3)">% of Members' Tithe total</td><td>${rateInput('rate_foreignMission', r.foreignMission ?? 0)}</td></tr>
       <tr><td>Coastline Worship Centre</td><td style="font-size:11px;color:var(--text3)">% of Ministers' Tithe total</td><td>${rateInputFine('rate_coastline', r.coastline ?? DEFAULT_REMITTANCE_RATES.coastline)}</td></tr>
       <tr><td>Insurance Fund (GEN TITHE)</td><td style="font-size:11px;color:var(--text3)">% of Members' Tithe total</td><td>${rateInputFine('rate_insuranceGenTithe', r.insuranceGenTithe ?? DEFAULT_REMITTANCE_RATES.insuranceGenTithe)}</td></tr>
       <tr><td>Insurance Fund (MIN TITHE)</td><td style="font-size:11px;color:var(--text3)">% of Ministers' Tithe total</td><td>${rateInputFine('rate_insuranceMinTithe', r.insuranceMinTithe ?? DEFAULT_REMITTANCE_RATES.insuranceMinTithe)}</td></tr>
@@ -17432,7 +17435,7 @@ async function saveRates(btn=null){
     showAlert(`National HQ % out of range for: ${badRows.join(', ')}. Please correct before saving.`,'danger');
     return;
   }
-  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','tgLocal','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe'].forEach(k=>{
+  ['tgNational','tgArea','tgPastor','tgMinisters','tgSeed','tgLocal','provinceRebate','crmAddon','coastline','insuranceGenTithe','insuranceMinTithe','drda','foreignMission'].forEach(k=>{
     const v = pct2dec(`rate_${k}`);
     if(v!==null) r[k] = v;
   });
