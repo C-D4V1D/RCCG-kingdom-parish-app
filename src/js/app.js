@@ -499,7 +499,8 @@ const DEFAULT_REMITTANCE_RATES = {
   holyCommunionOffering: { natl:1.00, local:0.00 },
   tgNational:0.75, tgArea:0.05, tgPastor:0.10, tgMinisters:0.09, tgSeed:0.01, tgLocal:0,
   provinceRebate:0.20,
-  crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125
+  crmAddon:0.25, coastline:0.01, insuranceGenTithe:0.0125, insuranceMinTithe:0.0125,
+  drda:0.04, foreignMission:0.04
 };
 const PIN_REGEX = /^\d{4,6}$/;
 
@@ -1803,7 +1804,9 @@ async function getRemRates(){
     crmAddon:         r.crmAddon          ?? DEFAULT_REMITTANCE_RATES.crmAddon,
     coastline:        r.coastline         ?? DEFAULT_REMITTANCE_RATES.coastline,
     insuranceGenTithe:r.insuranceGenTithe ?? DEFAULT_REMITTANCE_RATES.insuranceGenTithe,
-    insuranceMinTithe:r.insuranceMinTithe ?? DEFAULT_REMITTANCE_RATES.insuranceMinTithe
+    insuranceMinTithe:r.insuranceMinTithe ?? DEFAULT_REMITTANCE_RATES.insuranceMinTithe,
+    drda:             r.drda              ?? DEFAULT_REMITTANCE_RATES.drda,
+    foreignMission:   r.foreignMission    ?? DEFAULT_REMITTANCE_RATES.foreignMission
   };
 }
 
@@ -2441,7 +2444,7 @@ async function calcRemittances(income, preRates){
   const res = { lines:[], totalNatl:0, totalArea:0, totalPastor:0, totalMinisters:0, totalSeed:0,
                 childrenDept:0,
                 localBefore:0, localTithe:0, provinceRebate:0, netLocal:0,
-                crmAddon:0, coastline:0, insuranceGen:0, insuranceMin:0 };
+                crmAddon:0, coastline:0, insuranceGen:0, insuranceMin:0, drda:0, foreignMission:0 };
   let rawCrm=0, rawMembersTithe=0, rawMinisTithe=0;
   INCOME_TYPES.forEach(t=>{
     const amt = income[t.key]||0;
@@ -2456,7 +2459,11 @@ async function calcRemittances(income, preRates){
     } else {
       const rateEntry = (rr.rates[t.key]) || { natl: t.natl||0, local: t.local||0 };
       const local = amt*(rateEntry.local);
-      const natl  = amt*(rateEntry.natl);
+      // The portal itemises the national Members' Tithe share as General Tithe + Province DRDA
+      // + Province Foreign Mission. Carve those two out of the national share here and re-add
+      // them as their own lines below, so the parish total is unchanged and both sides align.
+      const titheCarve = t.key==='membersTithe' ? (rr.drda||0)+(rr.foreignMission||0) : 0;
+      const natl  = amt*Math.max(0, rateEntry.natl - titheCarve);
       // The Teen/Children's Offering local share is handed straight to the Children
       // Teacher for the department's own use. The parish never holds it, never banks it
       // and never records what it is spent on — the cash-with-accountant and church
@@ -2487,6 +2494,9 @@ async function calcRemittances(income, preRates){
   res.coastline   = rawMinisTithe   * (rr.coastline          || 0);
   res.insuranceGen= rawMembersTithe * (rr.insuranceGenTithe  || 0);
   res.insuranceMin= rawMinisTithe   * (rr.insuranceMinTithe  || 0);
+  res.drda          = rawMembersTithe * (rr.drda           || 0);
+  res.foreignMission= rawMembersTithe * (rr.foreignMission || 0);
+  res.totalNatl    += res.drda + res.foreignMission;
   res.netLocal = res.localBefore - res.provinceRebate - res.crmAddon - res.coastline - res.insuranceGen - res.insuranceMin;
   return res;
 }
@@ -7930,6 +7940,8 @@ async function viewIncome(id){
     <div class="status-row"><div class="status-row-label">Province Rebate</div><div class="status-row-amt td-amber">${fmt(rem.provinceRebate)}</div></div>
     ${(rem.crmAddon||0)>0?`<div class="status-row"><div class="status-row-label">CRM Add-on → National HQ</div><div class="status-row-amt td-amber">${fmt(rem.crmAddon)}</div></div>`:''}
     ${(rem.coastline||0)>0?`<div class="status-row"><div class="status-row-label">Coastline Worship Centre</div><div class="status-row-amt td-amber">${fmt(rem.coastline)}</div></div>`:''}
+    ${(rem.drda||0)>0?`<div class="status-row"><div class="status-row-label">Province DRDA</div><div class="status-row-amt td-amber">${fmt(rem.drda)}</div></div>`:''}
+    ${(rem.foreignMission||0)>0?`<div class="status-row"><div class="status-row-label">Province Foreign Mission</div><div class="status-row-amt td-amber">${fmt(rem.foreignMission)}</div></div>`:''}
     ${(rem.insuranceGen||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (GEN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceGen)}</div></div>`:''}
     ${(rem.insuranceMin||0)>0?`<div class="status-row"><div class="status-row-label">Insurance Fund (MIN TITHE)</div><div class="status-row-amt td-amber">${fmt(rem.insuranceMin)}</div></div>`:''}
     ${perSundayQuotaLines.map(q=>`<div class="status-row"><div class="status-row-label">${esc(q.label)}</div><div class="status-row-amt td-amber">${fmt(q.amount)}</div></div>`).join('')}
@@ -9016,6 +9028,8 @@ async function renderRemittances(){
   const levyLines=[
     rem.crmAddon>0   ?{ label:`CRM Add-on → National HQ (${Math.round((rr.crmAddon||0)*100)}% of CRM)`,                     amount:rem.crmAddon,    section:'levy', pct:Math.round((rr.crmAddon||0)*100) }:null,
     rem.coastline>0  ?{ label:`Coastline Worship Centre → National HQ (${+(((rr.coastline||0)*100).toFixed(2))}% of Min. Tithe)`, amount:rem.coastline,   section:'levy', pct:+(((rr.coastline||0)*100).toFixed(2)) }:null,
+    rem.drda>0          ?{ label:`Province DRDA → National HQ (${+(((rr.drda||0)*100).toFixed(2))}% of Mbr Tithe)`, amount:rem.drda, section:'levy', pct:+(((rr.drda||0)*100).toFixed(2)) }:null,
+    rem.foreignMission>0?{ label:`Province Foreign Mission → National HQ (${+(((rr.foreignMission||0)*100).toFixed(2))}% of Mbr Tithe)`, amount:rem.foreignMission, section:'levy', pct:+(((rr.foreignMission||0)*100).toFixed(2)) }:null,
     rem.insuranceGen>0?{ label:`Insurance Fund (GEN TITHE) → National HQ (${+(((rr.insuranceGenTithe||0)*100).toFixed(4))}% of Mbr Tithe)`, amount:rem.insuranceGen, section:'levy', pct:+(((rr.insuranceGenTithe||0)*100).toFixed(4)) }:null,
     rem.insuranceMin>0?{ label:`Insurance Fund (MIN TITHE) → National HQ (${+(((rr.insuranceMinTithe||0)*100).toFixed(4))}% of Min. Tithe)`, amount:rem.insuranceMin, section:'levy', pct:+(((rr.insuranceMinTithe||0)*100).toFixed(4)) }:null,
   ].filter(Boolean);
@@ -9845,6 +9859,8 @@ async function showRemittancePaymentModal(part){
     // Additional RCCG Levies
     if((rem.crmAddon||0)>0) lines.push({ label:`CRM Add-on → National HQ (${Math.round(rr.crmAddon*100)}% of CRM)`, amount:rem.crmAddon });
     if((rem.coastline||0)>0) lines.push({ label:`Coastline Worship Centre (${+(((rr.coastline||0)*100).toFixed(2))}% of Min. Tithe)`, amount:rem.coastline });
+    if((rem.drda||0)>0) lines.push({ label:`Province DRDA (${+(((rr.drda||0)*100).toFixed(2))}% of Mbr Tithe)`, amount:rem.drda });
+    if((rem.foreignMission||0)>0) lines.push({ label:`Province Foreign Mission (${+(((rr.foreignMission||0)*100).toFixed(2))}% of Mbr Tithe)`, amount:rem.foreignMission });
     if((rem.insuranceGen||0)>0) lines.push({ label:`Insurance Fund — GEN TITHE (${+(((rr.insuranceGenTithe||0)*100).toFixed(4))}% of Mbr Tithe)`, amount:rem.insuranceGen });
     if((rem.insuranceMin||0)>0) lines.push({ label:`Insurance Fund — MIN TITHE (${+(((rr.insuranceMinTithe||0)*100).toFixed(4))}% of Min. Tithe)`, amount:rem.insuranceMin });
     // Fixed quotas (excluding Mummy Stipend)
