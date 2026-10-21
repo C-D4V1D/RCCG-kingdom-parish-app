@@ -11179,6 +11179,8 @@ async function shareRemittanceReport(fromOverride, toOverride){
     if((rem.coastline||0)>0) pushA({ desc:`Coastline Worship Centre — ${Math.round(rr.coastline*100)}% of Ministers' Tithe`, type:`${Math.round(rr.coastline*100)}% Based`, amount:rem.coastline });
     if((rem.insuranceGen||0)>0) pushA({ desc:`Insurance Fund (GEN TITHE) — ${+(rr.insuranceGenTithe*100).toFixed(2)}% of Members' Tithe`, type:`${+(rr.insuranceGenTithe*100).toFixed(2)}% Based`, amount:rem.insuranceGen });
     if((rem.insuranceMin||0)>0) pushA({ desc:`Insurance Fund (MIN TITHE) — ${+(rr.insuranceMinTithe*100).toFixed(2)}% of Ministers' Tithe`, type:`${+(rr.insuranceMinTithe*100).toFixed(2)}% Based`, amount:rem.insuranceMin });
+    if((rem.drda||0)>0) pushA({ desc:`Province DRDA → National HQ (${+(((rr.drda||0)*100).toFixed(2))}% of Members' Tithe)`, type:`${+(((rr.drda||0)*100).toFixed(2))}% Based`, amount:rem.drda });
+    if((rem.foreignMission||0)>0) pushA({ desc:`Province Foreign Mission → National HQ (${+(((rr.foreignMission||0)*100).toFixed(2))}% of Members' Tithe)`, type:`${+(((rr.foreignMission||0)*100).toFixed(2))}% Based`, amount:rem.foreignMission });
     rccgQuotas.forEach(q=>{ if((q.amount||0)>0) partARows.push({ desc:q.label, type:quotaTypeTextForReport(q), amount:q.amount||0 }); });
     const subTotalA=partARows.reduce((s,r)=>s+r.amount,0);
     const partBRows=[
