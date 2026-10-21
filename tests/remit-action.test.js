@@ -42,11 +42,11 @@ test('token: refresh_attendance is a valid action; unknown actions are rejected'
   assert.equal((await verifyRemitActionToken(KEY, unknown)).reason, 'invalid');
 });
 
-test('links: four personal links, exp 21 days after the cut-off, null without a key', async () => {
+test('links: personal links + payer paid links, exp 21 days after the cut-off, null without a key', async () => {
   const exp = remitActionExpForCutoff('2026-10-18');
   assert.equal(new Date(exp * 1000).toISOString(), '2026-11-08T23:59:59.000Z');
   const links = await buildRemitActionLinks({ REMIT_WEBHOOK_KEY: KEY }, 'https://app.example', { month: '2026-10', exp });
-  assert.deepEqual(Object.keys(links), ['david', 'divine']);
+  assert.deepEqual(Object.keys(links), ['david', 'divine', 'fabian']);
   for (const person of ['david', 'divine']) {
     for (const action of ['generate_rrr', 'refresh', 'refresh_attendance', 'refresh_both']) {
       const u = new URL(links[person][action]);
@@ -55,7 +55,41 @@ test('links: four personal links, exp 21 days after the cut-off, null without a 
       assert.deepEqual(v.payload, { v: 1, parish: '602757', month: '2026-10', person, action, exp });
     }
   }
+  assert.equal(links.divine.paid, undefined, 'non-payers get no paid link');
+  for (const payer of ['david', 'fabian']) {
+    const u = new URL(links[payer].paid);
+    assert.equal(u.origin + u.pathname, 'https://app.example/remit-action');
+    const v = await verifyRemitActionToken(KEY, u.searchParams.get('t'), Date.parse('2026-10-19T00:00:00Z'));
+    assert.deepEqual(v.payload, { v: 1, parish: '602757', month: '2026-10', person: payer, action: 'paid', exp });
+  }
+  assert.deepEqual(Object.keys(links.fabian), ['paid'], 'a payer who is not a button person gets only the paid link');
   assert.equal(await buildRemitActionLinks({}, 'https://app.example', { month: '2026-10', exp }), null);
+});
+
+test('confirm page: paid - a payer confirms the payment, a non-payer is refused', async () => {
+  const t = await signRemitActionToken(KEY, { ...base, person: 'fabian', action: 'paid', exp: future() });
+  const get = await run(new Request(`https://app.example/remit-action?t=${t}`), env);
+  assert.equal(get.res.status, 200);
+  assert.equal(get.calls.length, 0);
+  assert.match(get.html, /I&#39;ve paid - October 2026 remittance/);
+  assert.match(get.html, /Bro\. Fabian/);
+  assert.match(get.html, /Confirm - I have paid/);
+  assert.match(get.html, /moves no money/);
+  assert.match(get.html, /<th>Remittance<\/th><td>October 2026<\/td>/);
+
+  const post = await run(new Request('https://app.example/remit-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `t=${t}`,
+  }), env);
+  assert.equal(post.res.status, 200);
+  assert.match(post.html, /mark the month as paid/);
+  assert.equal(post.calls.length, 1);
+  const n = JSON.parse(post.calls[0].init.body);
+  assert.deepEqual({ ...n, clickedAt: 'x' }, { event: 'remit_action', action: 'paid', parish: '602757', month: '2026-10', person: 'fabian', test: false, clickedAt: 'x' });
+
+  const divine = await signRemitActionToken(KEY, { ...base, person: 'divine', action: 'paid', exp: future() });
+  const refused = await run(new Request(`https://app.example/remit-action?t=${divine}`), env);
+  assert.equal(refused.calls.length, 0, 'a non-payer never reaches the webhook with a paid token');
+  assert.ok(!refused.html.includes('Confirm - I have paid'));
 });
 
 async function run(req, env) {
@@ -184,7 +218,7 @@ test('links: one set per person passed in; bad keys skipped; default unchanged',
   const v = await verifyRemitActionToken(KEY, new URL(links.fabian.refresh).searchParams.get('t'));
   assert.equal(v.payload.person, 'fabian');
   assert.deepEqual(Object.keys(await buildRemitActionLinks({ REMIT_WEBHOOK_KEY: KEY }, 'https://app.example', { month: '2026-10', exp })),
-    ['david', 'divine']);
+    ['david', 'divine', 'fabian']);   // the payers always get a paid link, even with default people
 });
 
 test('confirm page: a person whose buttons are off is refused on open and on press; on -> works with their name', async () => {

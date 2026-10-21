@@ -6,7 +6,7 @@
 //
 // Token = base64url(JSON payload) + '.' + base64url(HMAC-SHA256(REMIT_WEBHOOK_KEY, <payload part>))
 // Payload = { v:1, parish:'602757', month:'YYYY-MM', person:<Automations person key with buttons on>,
-//             action:'generate_rrr'|'refresh'|'refresh_attendance'|'refresh_both', exp:<unix seconds>[, test:true] }
+//             action:'generate_rrr'|'refresh'|'refresh_attendance'|'refresh_both'|'paid', exp:<unix seconds>[, test:true] }
 // The key is the existing REMIT_WEBHOOK_KEY Pages secret; it never leaves the server.
 
 export const REMIT_ACTION_PARISH = '602757';
@@ -14,7 +14,10 @@ export const REMIT_ACTION_PARISH = '602757';
 // month-end-events.js. This list is only the fallback when those settings can't be read (as before).
 export const REMIT_ACTION_PEOPLE = Object.freeze({ david: 'David', divine: 'Bro. Divine' });
 export const REMIT_ACTION_PERSON_RE = /^[a-z][a-z0-9_]{0,31}$/;   // an Automations person key
-export const REMIT_ACTION_ACTIONS = Object.freeze(['generate_rrr', 'refresh', 'refresh_attendance', 'refresh_both']);
+export const REMIT_ACTION_ACTIONS = Object.freeze(['generate_rrr', 'refresh', 'refresh_attendance', 'refresh_both', 'paid']);
+// Who may press "I've paid": the remittance payers. Static on purpose - paying is a parish-office role,
+// not an Automations button setting. The Clerk box only acts on paid notices from these keys.
+export const REMIT_PAID_PEOPLE = Object.freeze({ david: 'David', fabian: 'Bro. Fabian' });
 export const REMIT_ACTION_PATH = '/remit-action';
 export const REMIT_ACTION_LINK_DAYS = 21;           // links stay valid 21 days after the cut-off Sunday
 export const REMIT_ACTION_TEST_TTL_S = 24 * 3600;   // webhook_test links: 24 hours
@@ -111,14 +114,18 @@ export function remitActionExpForCutoff(periodEnd) {
  * Returns null when there is no secret (links can't be signed) or anything goes wrong,
  * so the caller's webhook still goes out without them.
  */
-export async function buildRemitActionLinks(env, origin, { month, exp, test = false, people = Object.keys(REMIT_ACTION_PEOPLE) }) {
+export async function buildRemitActionLinks(env, origin, { month, exp, test = false, people = Object.keys(REMIT_ACTION_PEOPLE), payers = Object.keys(REMIT_PAID_PEOPLE) }) {
   const secret = remitActionSecret(env);
   if (!secret || !origin || !MONTH_RE.test(String(month || '')) || !Number.isFinite(exp)) return null;
   try {
     const links = {};
-    for (const person of [...new Set(people || [])].filter(k => typeof k === 'string' && REMIT_ACTION_PERSON_RE.test(k))) {
+    const payerKeys = [...new Set(payers || [])].filter(k => typeof k === 'string' && REMIT_ACTION_PERSON_RE.test(k));
+    const peopleKeys = [...new Set(people || [])].filter(k => typeof k === 'string' && REMIT_ACTION_PERSON_RE.test(k));
+    for (const person of [...new Set([...peopleKeys, ...payerKeys])]) {
       links[person] = {};
       for (const action of REMIT_ACTION_ACTIONS) {
+        // I've-paid links are for the payers only; the other actions stay with the Automations button people
+        if (action === 'paid' ? !payerKeys.includes(person) : !peopleKeys.includes(person)) continue;
         const payload = { v: 1, parish: REMIT_ACTION_PARISH, month, person, action, exp };
         if (test) payload.test = true;
         links[person][action] = `${origin}${REMIT_ACTION_PATH}?t=${await signRemitActionToken(secret, payload)}`;
