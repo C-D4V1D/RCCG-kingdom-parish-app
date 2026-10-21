@@ -53,7 +53,8 @@ test('the trailing days are absorbed, never dropped — spending on them still c
   for (let i = 1; i < w.length; i++) {
     const prevEnd = new Date(w[i - 1].to + 'T00:00:00');
     prevEnd.setDate(prevEnd.getDate() + 1);
-    assert.equal(w[i].from, prevEnd.toISOString().slice(0, 10), `week ${i} must start the day after week ${i - 1} ends`);
+    const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    assert.equal(w[i].from, ymd(prevEnd), `week ${i} must start the day after week ${i - 1} ends`);
   }
 });
 
