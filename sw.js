@@ -1,4 +1,4 @@
-// build:3bc69f9459b
+// build:3bc69f9459b-r1
 const CACHE = 'kpadmin-v38';
 const SHELL = [
   '/',
@@ -42,7 +42,7 @@ async function staleWhileRevalidate(request, cacheKey = request) {
   const cached = await cache.match(cacheKey);
   // Kick off a background refresh regardless of a cache hit, so the cache is
   // up to date for the next load. Never blocks the response when we have a hit.
-  const networked = fetch(request)
+  const networked = fetch(new Request(request, { cache: no-cache }))
     .then(res => { if (res.ok) cache.put(cacheKey, res.clone()); return res; })
     .catch(() => null);
   if (cached) return cached;
@@ -55,7 +55,7 @@ self.addEventListener('install', e => {
   // allSettled so one slow/failed asset doesn't abort install
   e.waitUntil(
     caches.open(CACHE)
-      .then(c => Promise.allSettled(SHELL.map(url => c.add(url))))
+      .then(c => Promise.allSettled(SHELL.map(url => c.add(new Request(url, { cache: no-cache })))))
       .then(() => self.skipWaiting())
   );
 });
