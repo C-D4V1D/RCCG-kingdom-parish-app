@@ -1,11 +1,5 @@
 // build:125fc666d0
-<<<<<<< HEAD
-// build:df514d7d2a
-const CACHE = 'kpadmin-v36';
-=======
-// build:684b77227d
-const CACHE = 'kpadmin-v35';
->>>>>>> 3dd25429 (Remittances: itemise national tithe as General Tithe + Province DRDA + Province Foreign Mission (portal alignment))
+const CACHE = 'kpadmin-v37';
 const SHELL = [
   '/',
   '/index.html',
