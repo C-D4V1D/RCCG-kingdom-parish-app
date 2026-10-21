@@ -16,6 +16,7 @@ import {
   verifyRemitActionToken,
   remitActionSecret,
   REMIT_ACTION_PEOPLE,
+  REMIT_PAID_PEOPLE,
 } from './_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople } from './_lib/month-end-events.js';
 
@@ -44,6 +45,11 @@ const ACTIONS = {
     title: 'Refresh both',
     what: 'Church Clerk will re-read the parish app and the RCCG portal (this month\'s remittance AND attendance with the Monthly report) and send new check emails. Nothing already submitted on the portal is changed.',
   },
+  paid: {
+    button: 'Confirm - I have paid',
+    title: "I've paid",
+    what: "Church Clerk will record that this month's remittance has been paid on Remita, mark the month as paid and stop the unpaid reminders. This button moves no money: the payment itself is made on Remita with the RRR. Only press it after the payment has gone through.",
+  },
 };
 
 // Title for the page heading and the "Action" row. refresh_attendance includes the month
@@ -51,6 +57,7 @@ const ACTIONS = {
 function actionTitle(p) {
   if (p.action === 'refresh_attendance') return `Refresh attendance for ${monthLabel(p.month)}`;
   if (p.action === 'refresh_both') return `Refresh both for ${monthLabel(p.month)}`;
+  if (p.action === 'paid') return `I've paid - ${monthLabel(p.month)} remittance`;
   return ACTIONS[p.action].title;
 }
 
@@ -72,7 +79,9 @@ async function handleGet(request, env) {
   if (!secret) return notConfigured();
   const v = await verifyRemitActionToken(secret, token);
   if (!v.ok) return invalidPage(v);
-  const allowed = await actionButtonPeople(env);   // the person's buttons must still be on in Automations
+  const allowed = v.payload.action === 'paid'
+    ? { people: REMIT_PAID_PEOPLE }   // paying is a parish-office role, not an Automations button setting
+    : await actionButtonPeople(env);  // the person's buttons must still be on in Automations
   if (!Object.prototype.hasOwnProperty.call(allowed.people, v.payload.person)) return buttonsOffPage();
 
   const p = { ...v.payload, personLabel: allowed.people[v.payload.person] };
@@ -116,7 +125,9 @@ async function handlePost(request, env) {
   }
   const v = await verifyRemitActionToken(secret, token);
   if (!v.ok) return invalidPage(v);
-  const allowed = await actionButtonPeople(env);   // checked again on press: switched off since the email -> refused
+  const allowed = v.payload.action === 'paid'
+    ? { people: REMIT_PAID_PEOPLE }   // checked again on press: the payers list is fixed
+    : await actionButtonPeople(env);  // checked again on press: switched off since the email -> refused
   if (!Object.prototype.hasOwnProperty.call(allowed.people, v.payload.person)) return buttonsOffPage();
 
   const p = { ...v.payload, personLabel: allowed.people[v.payload.person] };
@@ -139,7 +150,7 @@ async function handlePost(request, env) {
   const body = `
 ${p.test ? testBanner() : ''}
 <div class="ok">&#10003; Sent.</div>
-<p class="lead">Church Clerk is working on it and will email the result shortly.</p>
+<p class="lead">${p.action === 'paid' ? 'Church Clerk will mark the month as paid, stop the reminders and confirm by email.' : 'Church Clerk is working on it and will email the result shortly.'}</p>
 ${p.test ? '<p>This was a test: Church Clerk will only send David a chat message. Nothing is done on the portal.</p>' : ''}
 ${details(p)}
 <p class="small">You can close this page.</p>`;
