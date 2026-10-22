@@ -22,6 +22,7 @@ import {
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
 import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal, missingSundays } from '../_lib/cutoff-date-signal.js';
+import { planReceipt, checkRead } from '../_lib/receipt-record.js';
 import { planSatAlign, applyPlanToList, undoFromList } from '../_lib/sat-align.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
@@ -2592,6 +2593,9 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'DELETE' &&  param) return await deleteRemittance(DB, param, body?.force === true);
     }
 
+    // Reads the date, debit amount, reference and RRR off a payment receipt photo, to pre-fill the remittance payment form.
+    if (route === 'remittance-receipt-read' && method === 'POST' && !param) return await ocrReceipt(env, body, DB);
+
     // ── /api/satellite-funds ────────────────────────────────────
     // Pass-through fund received from / remitted on behalf of satellite parishes.
     // Excluded from income/expense totals by design — see satellite_funds table.
@@ -3046,6 +3050,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       }
       // The box's "Fix alignment" button (x-watchdog-token): plan, apply or undo adding a missing fixed quota to a satellite parish.
       if (method === 'POST' && param === 'satellite-align') return await satelliteAlign(DB, env, request, body);
+      if (method === 'POST' && param === 'remittance-receipt') return await remittanceReceipt(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-church-bank-charge-email') return await ingestChurchBankChargeEmail(DB, env, request, body);
     }
@@ -11410,7 +11415,8 @@ async function ocrReceipt(env, data, DB) {
   "date": "YYYY-MM-DD or null — date on receipt",
   "amount": "number or null — total amount in major currency units (e.g. 12500.00 for ₦12,500)",
   "currency": "NGN|USD|GBP|EUR or null",
-  "reference": "string or null — receipt or invoice number",
+  "reference": "string or null — receipt, transaction or invoice number",
+  "rrr": "string or null — a 12-digit Remita RRR / beneficiary id if shown, digits only",
   "items_summary": "string or null — one-line description of goods/services purchased"
 }`;
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -11440,6 +11446,7 @@ async function ocrReceipt(env, data, DB) {
             amount: parsed.amount ?? null,
             currency: parsed.currency ?? null,
             reference: parsed.reference ?? null,
+            rrr: parsed.rrr ?? null,
             itemsSummary: parsed.items_summary ?? null,
             method: 'openai_vision',
           });
@@ -17203,6 +17210,72 @@ async function satelliteAlign(DB, env, request, body) {
   try { await auditStatement(DB, 'sat_align', `Fix alignment for ${parish.name || code} (${month}) by ${by}: added ${plan.changes.map(c => `${c.label} ₦${c.amount}`).join(', ')} to the parish's quotas (undo id ${id}).`, by).run(); } catch { /* best-effort */ }
   return ok({ ok: true, action, parish: code, month, applied: true, changeId: id, changes: plan.changes, noops: plan.noops, needsPerson: plan.human });
 }
+
+// ── Scripted recording of a Remita payment from its receipt ───────────────────────────────────
+// POST /api/internal/remittance-receipt   (header x-watchdog-token = the box's token; nothing else is accepted)
+//   { action:'preview'|'record', rrr, billAmount, part:'a', label, periodFrom, periodTo, by, authorizedBy, breakdownSnapshot?,
+//     receipt:{ imageBase64, mimeType, name }  OR  read:{ amount, date, reference, rrr } (already read by the caller) }
+// The receipt must show the same RRR, a date not in the future and a reference; its debit must not be below the bill.
+// record: saves the payment AT THE BILL (paid, bank transfer, settlement snapshot = bill) and, when the receipt debit is above
+//   the bill, the difference as a bank-charge expense with the receipt attached. Once per RRR (a repeat changes nothing).
+// Anything it cannot do comes back as { ok:false, needsPerson:'reason' } and nothing is saved. Nothing else is touched.
+async function remittanceReceipt(DB, env, request, body) {
+  const want = String(env?.CLERK_WATCHDOG_TOKEN || '').trim();
+  const sent = request.headers.get('x-watchdog-token') || '';
+  if (!want || !sent || !constantTimeEqual(sent, want)) return err('Not allowed.', 401);
+  const action = String(body?.action || '');
+  if (!['preview', 'record'].includes(action)) return err('action must be preview or record.', 400);
+  const rrr = String(body?.rrr || '').replace(/\D/g, '');
+  if (rrr.length < 10) return err('rrr is required.', 400);
+  const stop = reason => ok({ ok: false, action, needsPerson: reason });
+
+  let read = body?.read || null;
+  const img = body?.receipt;
+  if (!read && img?.imageBase64) {
+    const r = await ocrReceipt(env, { imageBase64: img.imageBase64, mimeType: img.mimeType || 'image/jpeg' }, DB);
+    read = await r.json().catch(() => null);
+    if (!read || read.amount == null) return stop(read?.error || 'The receipt could not be read.');
+  }
+  const bad = checkRead(read, { rrr, today: dublinToday() });
+  if (bad) return stop(bad);
+  const plan = planReceipt({ billAmount: body?.billAmount, receiptAmount: read.amount });
+  if (plan.status !== 'ok') return stop(plan.reason);
+  const part = String(body?.part || 'a');
+  const reference = String(read.reference).trim().slice(0, 120);
+
+  const dup = await DB.prepare(`SELECT id FROM remittances WHERE reference=? AND part=? AND period_from=?`).bind(reference, part, String(body?.periodFrom || '')).first();
+  const summary = { rrr, bill: plan.bill, receiptDebit: r2num(read.amount), charge: plan.charge, date: read.date, reference };
+  if (dup) return ok({ ok: true, action, already: true, remittanceId: dup.id, ...summary });
+  if (action === 'preview') return ok({ ok: true, action, wouldRecord: summary });
+
+  const by = String(body?.by || 'box').replace(/[^a-z0-9_ .-]/gi, '').slice(0, 40) || 'box';
+  const dataUrl = img?.imageBase64 ? `data:${img.mimeType || 'image/jpeg'};base64,${img.imageBase64}` : '';
+  const fileName = String(img?.name || '').slice(0, 120);
+  const remRes = await createRemittance(DB, {
+    label: String(body?.label || 'Part A').slice(0, 120), amount: plan.bill, paidDate: read.date, reference,
+    authorizedBy: String(body?.authorizedBy || by).slice(0, 200),
+    notes: `${fileName ? 'Receipt: ' + fileName + '\n' : ''}Recorded by script from the receipt for RRR ${rrr} (receipt debit ${r2num(read.amount)}, bill ${plan.bill}).`,
+    paymentMethod: 'bank_transfer', bankAmount: plan.bill, cashAmount: 0,
+    periodFrom: String(body?.periodFrom || ''), periodTo: String(body?.periodTo || ''),
+    submittedBy: by, status: 'paid', dueAtTimeOfPayment: part === 'a' ? plan.bill : 0, part,
+    breakdownSnapshot: typeof body?.breakdownSnapshot === 'string' ? body.breakdownSnapshot : '',
+    areaTotalPaid: 0, otherParishesAmount: 0, satelliteFundRef: '',
+  });
+  const remittanceId = (await remRes.json()).id;
+  let expenseId = '';
+  if (plan.charge > 0) {
+    const exRes = await createExpense(DB, {
+      date: read.date, category: 'bank', subCategory: 'Money transfer charges',
+      description: `Bank charge on Remita payment (${reference})`, amount: plan.charge,
+      paymentMethod: 'bank_transfer', status: 'approved', receiptNo: reference, receiptImage: dataUrl, receiptFileName: fileName,
+      recordedBy: by, notes: `RRR ${rrr}: receipt debit ${r2num(read.amount)} minus bill ${plan.bill}`,
+    });
+    expenseId = (await exRes.json()).id;
+  }
+  try { await auditStatement(DB, 'remittance_receipt', `Remittance recorded from receipt by ${by}: RRR ${rrr}, ${plan.bill} paid ${read.date}${plan.charge ? `, bank charge ${plan.charge} as expense` : ''}.`, by).run(); } catch { /* best-effort */ }
+  return ok({ ok: true, action, remittanceId, expenseId, ...summary });
+}
+const r2num = n => Math.round((Number(n) || 0) * 100 + 1e-7) / 100;
 
 /** The month a tap files: this month (Dublin), or last month. Returns { month, period } or null when no cut-off is set for it. */
 async function remitFileMonthAndPeriod(DB, wanted) {

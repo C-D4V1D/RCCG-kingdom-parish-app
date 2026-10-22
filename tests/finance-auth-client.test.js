@@ -76,8 +76,9 @@ test('the direct fetch() call sites use authFetch, which sends the token too', a
   // 6 former direct calls, plus 5 for the Automations page (health x2 — initial load
   // and its 60s auto-refresh — config GET/PUT, and the test-alert button), plus 1 for
   // the satellite quota grid (reads the Automations parish list when settings.satParishes
-  // is still empty), plus 1 for IT Admin's "Download full backup" (a file, not JSON).
-  assert.equal([...src.matchAll(/authFetch\('\/api\//g)].length, 13, 'the six former direct calls, the Automations page\'s five, the satellite quota grid\'s one and the full backup download');
+  // is still empty), plus 1 for IT Admin's "Download full backup" (a file, not JSON), plus 1 for
+  // the remittance form reading a payment receipt (remittance-receipt-read).
+  assert.equal([...src.matchAll(/authFetch\('\/api\//g)].length, 14, 'the six former direct calls, the Automations page\'s five, the satellite quota grid\'s one, the full backup download and the receipt reader');
   signIn('fin1.direct.sig');
   const calls = mockFetch(() => jsonResponse(200, { ok: true }));
   await App._authFetch('/api/cash-transactions/c1', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}' });

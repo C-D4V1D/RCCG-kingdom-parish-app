@@ -142,3 +142,20 @@ test('satMissingQuotas warns for Kingdom quotas no active satellite has, until t
   assert.deepEqual(App._satMissingQuotas(['New'], parishes, {}, ['RMF']).map(x => x.parishes), [['Sanctuary', 'GIA']]);
   assert.deepEqual(App._satMissingQuotas(labels, parishes, { A: [{ label: 'Open Heavens', amount: 0 }] }, []).map(x => x.label), ['RMF', 'Open Heavens']);
 });
+
+test('remReceiptPlan: October receipt (debit 79,289.41, bill 79,189.41) is a 100.00 bank charge, payment recorded at the bill', () => {
+  const P = App._remReceiptPlan;
+  const a = P({ due: 79189.40, receiptAmount: 79289.41, billAmount: 79189.41 });
+  assert.equal(a.status, 'charge'); assert.equal(a.charge, 100); assert.equal(a.bill, 79189.41); assert.equal(a.shareAt, 79189.41);
+  // without the bill figure the odd kobo cannot be told from rounding: ask for it
+  assert.equal(P({ due: 79189.40, receiptAmount: 79289.41, billAmount: 0 }).status, 'needBill');
+  // receipt equals the bill, or is within a naira of our due
+  assert.equal(P({ due: 79189.40, receiptAmount: 79189.41, billAmount: 79189.41 }).status, 'match');
+  assert.equal(P({ due: 79189.40, receiptAmount: 79189.41, billAmount: 0 }).status, 'match');
+  // whole-naira extra without a bill figure is a charge
+  assert.deepEqual([P({ due: 5000, receiptAmount: 5050, billAmount: 0 }).status, P({ due: 5000, receiptAmount: 5050, billAmount: 0 }).charge], ['charge', 50]);
+  // less than the bill: refused; unreadable receipt: no data; a bill 5 naira away is not rounding
+  assert.equal(P({ due: 5000, receiptAmount: 4000, billAmount: 0 }).status, 'short');
+  assert.equal(P({ due: 5000, receiptAmount: 0, billAmount: 0 }).status, 'nodata');
+  assert.equal(P({ due: 5000, receiptAmount: 5000, billAmount: 5005 }).shareAt, 0);
+});
