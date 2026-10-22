@@ -68,7 +68,6 @@ class TF(unittest.TestCase):
         self.ok[0] = False; self.assertEqual(self.f.forward(self.U(mid=3)), "queued")
         self.ok[0] = True; n = len(self.out); self.f.flush(); self.assertEqual(len(self.out), n + 1)
         self.assertEqual(self.f.forward(self.U(mid=3)), "duplicate")
-if __name__ == "__main__": unittest.main()
 
 class TN(unittest.TestCase):
     def test_updater_notice_is_quiet_email_only(self):
@@ -85,3 +84,5 @@ class TN(unittest.TestCase):
         d = {"mail": lambda to, s, b: out.append("mail") or True, "topic": lambda t: False, "ping": lambda t: out.append("PING") or True}
         N.main(["--component", "filing", "--kind", "filing", "--error", "x"], d, os.path.join(tempfile.mkdtemp(), "s.json"))
         self.assertEqual(out, ["mail", "PING"])
+
+if __name__ == "__main__": unittest.main()
