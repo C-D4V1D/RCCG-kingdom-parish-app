@@ -21,24 +21,38 @@ R = {"preview": {"ok": True, "changes": [{"label": "Open Heavens", "amount": 140
      "apply": {"ok": True, "applied": True, "changeId": "saabc123", "changes": [{"label": "Open Heavens", "amount": 1400}], "needsPerson": []},
      "undo": {"ok": True, "removed": [{"label": "Open Heavens", "amount": 1400}]}}
 
+HASH = A.set_hash(CTX["lines"], R["preview"]["changes"])
+
 class T(unittest.TestCase):
+    def test_stale_or_missing_binding_refuses_and_re_previews(self):
+        for bound in ("deadbeef00", None):
+            f = Fake(R); A.run("fix_apply", CTX, f.deps(), bound=bound)
+            self.assertNotIn("apply", [c[0] for c in f.calls])        # never reached the app's apply
+            self.assertIn("nothing was applied", f.sent[0][0]); self.assertIn("Apply", str(f.sent[1][1]))
+        changed = dict(CTX, lines=CTX["lines"] + [{"item": "X", "portal": 5, "app": None}])
+        f = Fake(R); A.run("fix_apply", changed, f.deps(), bound=HASH)
+        self.assertNotIn("apply", [c[0] for c in f.calls])
+    def test_proposal_changed_on_app_refuses(self):
+        f = Fake(dict(R, preview={"changes": [{"label": "Open Heavens", "amount": 999}], "needsPerson": []}))
+        A.run("fix_apply", CTX, f.deps(), bound=HASH); self.assertNotIn("apply", [c[0] for c in f.calls])
     def test_preview_shows_exact_change_and_hands_rest_to_instinct(self):
         f = Fake(R); A.run("fix_preview", CTX, f.deps())
         text, buttons = f.sent[0]
-        self.assertIn("Open Heavens: ₦1,400.00", text); self.assertIn("Mystery", text)
-        self.assertEqual([b["callback_data"] for b in buttons[0]], ["mend|659840|2026-10|fix_apply", "mend|659840|2026-10|fix_cancel"])
+        self.assertIn("Open Heavens: ₦1,400.00", text); self.assertNotIn("Mystery", text); self.assertNotIn("Mystery", "".join(x[0] for x in f.sent))
+        h = A.set_hash(CTX["lines"], R["preview"]["changes"])
+        self.assertEqual([b["callback_data"] for b in buttons[0]], [f"mend|659840|2026-10|fix_apply|{h}", "mend|659840|2026-10|fix_cancel"])
         self.assertEqual(len(f.alerts), 1); self.assertEqual(f.sent[1][0], "I am handling the rest.")
         self.assertEqual(f.calls[0][0], "preview")            # preview never calls apply
     def test_nothing_fixable_has_no_buttons(self):
         f = Fake({"preview": {"changes": [], "needsPerson": []}}); A.run("fix_preview", CTX, f.deps())
         self.assertIsNone(f.sent[0][1]); self.assertEqual(f.alerts, [])
     def test_apply_reports_before_after_with_undo(self):
-        f = Fake(R); text = A.run("fix_apply", CTX, f.deps())
+        f = Fake(R); text = A.run("fix_apply", CTX, f.deps(), bound=HASH)
         self.assertIn("₦8,200.75 → <b>₦9,600.75</b>", text); self.assertIn("1 → <b>0</b>", text)
         self.assertEqual(f.sent[0][1][0][0]["callback_data"], "mend|659840|2026-10|fix_undo|saabc123")
         self.assertLessEqual(len(f.sent[0][1][0][0]["callback_data"].encode()), 64)
     def test_apply_with_nothing_applied_changes_nothing(self):
-        f = Fake({"apply": {"ok": True, "applied": False, "needsPerson": [{"item": "m"}]}}); A.run("fix_apply", CTX, f.deps())
+        f = Fake({"preview": R["preview"], "apply": {"ok": True, "applied": False, "needsPerson": [{"item": "m"}]}}); A.run("fix_apply", CTX, f.deps(), bound=HASH)
         self.assertEqual(f.sent[0][0], "Nothing was changed."); self.assertEqual(len(f.alerts), 1)
     def test_undo_and_refused_undo(self):
         f = Fake(R); A.run("fix_undo", CTX, f.deps(), "saabc123"); self.assertIn("undone", f.sent[0][0])

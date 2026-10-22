@@ -41,7 +41,13 @@ def _lines(items, fmt):
     return [("• " + fmt(x)) for x in items]
 
 
-def preview_message(name, month, r, code):
+def set_hash(lines, changes):
+    """Fingerprint of exactly what was previewed: the check's lines and the changes the app proposed for them."""
+    norm = lambda xs: sorted(json.dumps(x, sort_keys=True, ensure_ascii=False) for x in (xs or []))
+    return hashlib.sha1(json.dumps([norm(lines), norm(changes)]).encode()).hexdigest()[:10]
+
+
+def preview_message(name, month, r, code, lines=None):
     ch, hu = r.get("changes") or [], r.get("needsPerson") or []
     L = [f"🛠 <b>Fix alignment: {esc(name)}</b> ({esc(month)})", ""]
     if ch:
@@ -50,12 +56,11 @@ def preview_message(name, month, r, code):
         L.append("The portal and payments are not touched. You can undo it.")
     else:
         L.append("Nothing here can be fixed by the script.")
-    if hu:
-        L += ["", "Not fixed by the script (Instinct is handling these):"]
-        L += _lines(hu, lambda h: esc(h.get("item") or h.get("label") or "a line"))
+    # Items the script cannot fix are never listed to the presser: they go to Instinct only (Alerter).
     buttons = None
     if ch:
-        buttons = [[{"text": "✅ Apply", "callback_data": f"mend|{code}|{month}|fix_apply"},
+        h = set_hash(lines, ch)
+        buttons = [[{"text": "✅ Apply", "callback_data": f"mend|{code}|{month}|fix_apply|{h}"},
                     {"text": "✖ Cancel", "callback_data": f"mend|{code}|{month}|fix_cancel"}]]
     return "\n".join(L), buttons
 
@@ -68,7 +73,8 @@ def _after(name, month, before, after, head):
     return "\n".join(L)
 
 
-def run(action, ctx, deps, change_id=None):
+def run(action, ctx, deps, change_id=None, bound=None):
+    """`bound` = the set hash carried by the Apply button; `change_id` = the id carried by the Undo button."""
     code, name, month = ctx["code"], ctx["name"], ctx["month"]
     call, send = deps["call"], deps["send"]
     if action == "fix_cancel":
@@ -76,13 +82,18 @@ def run(action, ctx, deps, change_id=None):
         return "cancelled"
     if action == "fix_preview":
         r = call("preview", parish=code, month=month, lines=ctx["lines"], by=ctx["person"])
-        text, buttons = preview_message(name, month, r, code)
+        text, buttons = preview_message(name, month, r, code, ctx["lines"])
         send(text, buttons)
         if r.get("needsPerson"):
             deps["alert"](code, name, month, r["needsPerson"])
             send("I am handling the rest.")
         return text
     if action == "fix_apply":
+        # Apply only the exact set that was previewed. Re-ask the app now; if the lines or its proposal changed, refuse and re-preview.
+        now = call("preview", parish=code, month=month, lines=ctx["lines"], by=ctx["person"])
+        if not bound or set_hash(ctx["lines"], now.get("changes")) != bound:
+            send("The figures changed since the preview, so nothing was applied. Here is the new preview.")
+            return run("fix_preview", ctx, deps)
         before = deps["refresh"]()          # measured before
         r = call("apply", parish=code, month=month, lines=ctx["lines"], by=ctx["person"])
         if not r.get("applied"):
