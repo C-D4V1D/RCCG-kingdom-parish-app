@@ -71,3 +71,24 @@ test('endpoint: anything wrong goes back as needsPerson and nothing is saved', a
     assert.equal(DB.rows.remittances.length + DB.rows.expenses.length, 0);
   }
 });
+
+test('endpoint: update fixes label and lines on a script-recorded payment only, and the lines must add up', async () => {
+  const DB = fakeDb();
+  DB.rows.remittances.push({ id: 'REM-x', label: 'Part A', amount: 100, notes: `Recorded by script from the receipt for RRR ${RRR}`, breakdown_snapshot: '' });
+  DB.rows.remittances.push({ id: 'REM-hand', label: 'Part A', amount: 100, notes: 'typed by hand' });
+  const orig = DB.prepare;
+  DB.prepare = sql => { const st = orig.call(DB, sql); const f = st.first, r = st.run; let a = [];
+    const b = st.bind; st.bind = (...x) => { a = x; return b(...x); };
+    st.first = async () => /FROM remittances WHERE id=/.test(sql) ? DB.rows.remittances.find(x => x.id === a[0]) || null : f();
+    st.run = async () => { if (/UPDATE remittances SET label/.test(sql)) { const row = DB.rows.remittances.find(x => x.id === a[2]); row.label = a[0]; row.breakdown_snapshot = a[1]; return { meta: { changes: 1 } }; } return r(); };
+    return st; };
+  const up = (o) => call(DB, { action: 'update', rrr: RRR, ...o });
+  assert.equal((await up({ id: 'REM-hand', label: 'X' })).json.ok, false);
+  assert.equal((await up({ id: 'REM-x', breakdown: [{ label: 'a', amount: 60 }, { label: 'b', amount: 30 }] })).json.ok, false);
+  assert.equal(DB.rows.remittances[0].breakdown_snapshot, '');
+  const r = await up({ id: 'REM-x', label: 'Part A — RCCG Authorities', breakdown: [{ label: 'a', amount: 60.25 }, { label: 'b', amount: 39.75 }] });
+  assert.equal(r.json.ok, true);
+  assert.equal(DB.rows.remittances[0].label, 'Part A — RCCG Authorities');
+  assert.equal(JSON.parse(DB.rows.remittances[0].breakdown_snapshot).length, 2);
+  assert.equal((await call(DB, { action: 'update', rrr: RRR, id: 'REM-x', label: 'Z' }, 'bad')).status, 401);
+});
