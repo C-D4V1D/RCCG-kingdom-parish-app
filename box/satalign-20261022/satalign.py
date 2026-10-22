@@ -14,6 +14,7 @@ deps = {"call": f(action, **payload)->dict, "send": f(html, buttons=None), "refr
 import hashlib, html, json, os, urllib.request
 
 ALERT_TO = "cdavid@mail.instinct.com"
+USER_AGENT = "kp-box-satalign/1"
 
 
 def naira(v):
@@ -32,7 +33,9 @@ def call_app(base, token, action, parish, month, lines=None, by="box", change_id
     if change_id:
         body["changeId"] = change_id
     req = urllib.request.Request(base.rstrip("/") + "/api/internal/satellite-align", data=json.dumps(body).encode(),
-                                 headers={"content-type": "application/json", "x-watchdog-token": token}, method="POST")
+                                 headers={"content-type": "application/json", "x-watchdog-token": token,
+                                          # Cloudflare answers 403 (error 1010) to the default Python-urllib agent, before the app sees the token
+                                          "user-agent": USER_AGENT}, method="POST")
     with opener(req, timeout=40) as r:
         return json.loads(r.read().decode())
 
