@@ -17282,6 +17282,28 @@ function satBuildParishes(parishes, existing){
   return out;
 }
 
+/**
+ * Warning for the satellite quotas grid: a Kingdom quota that no active satellite parish has an amount for, and that
+ * nobody has looked at yet. `seen` = labels the grid was last saved with (settings.satQuotaSeen); saving the grid marks
+ * every current label as looked at, so a deliberate 0 stops warning. Returns [{label, parishes:[name]}].
+ */
+function satMissingQuotas(labels, parishes, existing, seen){
+  const known = new Set((Array.isArray(seen) ? seen : []).map(String));
+  const out = [];
+  for(const label of (labels || [])){
+    if(!label || known.has(label)) continue;
+    const missing = (parishes || []).filter(p=>p.active !== false && !((existing && existing[p.code]) || [])
+      .some(q=>q && q.label === label && Number(q.amount) > 0)).map(p=>p.name || p.code);
+    if(missing.length) out.push({ label, parishes: missing });
+  }
+  return out;
+}
+function satMissingWarnHtml(){
+  const g = state.satQuota;
+  const m = satMissingQuotas(g.labels, g.parishes, g.existing, g.seen);
+  if(!m.length) return '';
+  return `<div class="alert alert-warn" id="satQuotaWarn"><span class="alert-icon">⚠</span><span><b>Some Kingdom quotas have no amount for a satellite parish yet.</b> The portal may still charge them, and the app will then show a difference.<ul style="margin:6px 0 0 18px">${m.map(x=>`<li><b>${esc(x.label)}</b>: nothing entered for ${esc(x.parishes.join(', '))}</li>`).join('')}</ul><span style="display:block;margin-top:6px;font-size:12px">Fill in the amounts below and save. If 0 is right for a parish, just save, and this warning goes away.</span></span></div>`;
+}
 function satQuotaGridHtml(){
   const g = state.satQuota;
   if(!g.parishes.length){
@@ -17295,7 +17317,7 @@ function satQuotaGridHtml(){
     const prev = (g.existing[p.code] || []).find(q=>q && q.label === label);
     return `<td><input type="number" class="form-input sat-quota-in" data-code="${esc(p.code)}" data-i="${i}" min="0" step="any" inputmode="decimal" placeholder="0" value="${prev && Number(prev.amount) > 0 ? esc(String(prev.amount)) : ''}" aria-label="${esc(label)} for ${esc(p.name || p.code)} (₦)" /></td>`;
   }).join('')}</tr>`).join('');
-  return `<div class="table-wrap"><table class="sat-quota-table">
+  return `${satMissingWarnHtml()}<div class="table-wrap"><table class="sat-quota-table">
       <tr><th>Quota (₦)</th>${head}</tr>${rows}
     </table></div>
     <div class="sat-q-actions">
@@ -17337,6 +17359,7 @@ async function initSatQuotaGrid(settings){
     labels: getQuotaList(settings).map(q=>String(q.label || '').trim()),
     existing: (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {},
     log: (l=>Array.isArray(l)?l:[])(satParseJson(settings?.satAlignLog, [])),
+    seen: (l=>Array.isArray(l)?l:[])(satParseJson(settings?.satQuotaSeen, [])),
   };
   box.innerHTML = satQuotaGridHtml();
 }
@@ -17364,8 +17387,10 @@ async function saveSatQuotas(btn=null){
     const s = await DB.getSettings();
     const cur = satParseJson(s.satQuotas, {});
     const satQuotas = satBuildQuotas(cur, columns, g.labels);
-    await DB.saveSettings({ satQuotas });
-    g.existing = satQuotas;
+    const satQuotaSeen = g.labels.slice();
+    await DB.saveSettings({ satQuotas, satQuotaSeen });
+    g.existing = satQuotas; g.seen = satQuotaSeen;
+    const w = document.getElementById('satQuotaWarn'); if(w) w.remove();
     DB.addAudit('sat_quotas_updated', `Satellite monthly quotas updated (${g.parishes.map(p=>p.code).join(', ')})`, state.user?.name);
     showAlert('Satellite quotas saved. Each parish picks them up on its next visit.', 'success');
     restore();
@@ -22331,7 +22356,7 @@ return {
   addAutomationParish, deleteAutomationParish, saveAutomationsConfig, sendTestAlert,
   atRefreshPicks, atPortalToggle, atClearPortalPw, atCopyInvite, atCopyPin, atCreateLogin, atResetPin, atRemoveLogin, atAddParishPerson, atParishesToggle, atReloadArea,
   satQuotaCopyFirst, saveSatQuotas,
-  _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
+  _satBuildQuotas: satBuildQuotas, _satMissingQuotas: satMissingQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
   _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
   _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _automationsEffectiveConfig: automationsEffectiveConfig, _automationsHelpText: automationsHelpText, _collectAutomationsConfig: (saved)=>{ state.automations = { ...(state.automations||{}), config: saved }; return collectAutomationsConfig(); }, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,
