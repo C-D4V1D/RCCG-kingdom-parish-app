@@ -17245,9 +17245,10 @@ async function remittanceReceipt(DB, env, request, body) {
     const label = body?.label !== undefined ? String(body.label).trim().slice(0, 120) : String(row.label || '');
     if (!label) return stop('label cannot be empty.');
     const snap = lines ? JSON.stringify(lines) : String(row.breakdown_snapshot || '');
-    await DB.prepare(`UPDATE remittances SET label=?, breakdown_snapshot=? WHERE id=?`).bind(label, snap, row.id).run();
-    try { await auditStatement(DB, 'remittance_receipt_update', `Remittance ${row.id} tidied by script: label "${row.label}" -> "${label}"; breakdown ${row.breakdown_snapshot ? 'replaced (old kept in this row: ' + String(row.breakdown_snapshot).slice(0, 1500) + ')' : 'filled'}.`, String(body?.by || 'box').slice(0, 40)).run(); } catch { /* best-effort */ }
-    return ok({ ok: true, action, id: row.id, label, lines: lines ? lines.length : undefined });
+    const payer = body?.authorizedBy !== undefined ? String(body.authorizedBy).trim().slice(0, 200) : String(row.authorized_by || '');
+    await DB.prepare(`UPDATE remittances SET label=?, breakdown_snapshot=?, authorized_by=? WHERE id=?`).bind(label, snap, payer, row.id).run();
+    try { await auditStatement(DB, 'remittance_receipt_update', `Remittance ${row.id} tidied by script: label "${row.label}" -> "${label}"; payer "${row.authorized_by || ''}" -> "${payer}"; breakdown ${row.breakdown_snapshot ? 'replaced (old kept in this row: ' + String(row.breakdown_snapshot).slice(0, 1500) + ')' : 'filled'}.`, String(body?.by || 'box').slice(0, 40)).run(); } catch { /* best-effort */ }
+    return ok({ ok: true, action, id: row.id, label, authorizedBy: payer, lines: lines ? lines.length : undefined });
   }
 
   let read = body?.read || null;
@@ -17274,7 +17275,7 @@ async function remittanceReceipt(DB, env, request, body) {
   const fileName = String(img?.name || '').slice(0, 120);
   const remRes = await createRemittance(DB, {
     label: String(body?.label || 'Part A').slice(0, 120), amount: plan.bill, paidDate: read.date, reference,
-    authorizedBy: String(body?.authorizedBy || by).slice(0, 200),
+    authorizedBy: String(body?.authorizedBy || body?.by || '').slice(0, 200),
     notes: `${fileName ? 'Receipt: ' + fileName + '\n' : ''}Recorded by script from the receipt for RRR ${rrr} (receipt debit ${r2num(read.amount)}, bill ${plan.bill}).`,
     paymentMethod: 'bank_transfer', bankAmount: plan.bill, cashAmount: 0,
     periodFrom: String(body?.periodFrom || ''), periodTo: String(body?.periodTo || ''),

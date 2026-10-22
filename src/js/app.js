@@ -9287,7 +9287,7 @@ async function renderRemittances(){
 
         <div class="card" style="margin-bottom:12px">
           <div class="card-header"><span class="card-title">Payment History</span></div>
-          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>{
+          ${allPaidRems.length?remHistoryPage(allPaidRems).rows.map(r=>{
             const isWrittenOff=r.status==='written_off';
             return `
             <div class="feed-item">
@@ -9300,6 +9300,7 @@ async function renderRemittances(){
               <div class="feed-right" style="color:${isWrittenOff?'var(--amber)':'var(--success)'}">${fmt(r.amount)}</div>
             </div>`;
           }).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
+          ${remHistoryPager(allPaidRems)}
         </div>
 
         <div class="card">
@@ -10461,6 +10462,25 @@ async function submitRemittance(btn=null){
     showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.${rollbackNote}`,'danger');
   }
 }
+
+// Payment History: 10 a page, newest first, Previous / Next.
+const REM_HISTORY_PAGE_SIZE = 10;
+function remHistoryPage(all, page = state.remHistPage || 1, size = REM_HISTORY_PAGE_SIZE){
+  const pages = Math.max(1, Math.ceil((all?.length || 0) / size));
+  const p = Math.min(Math.max(1, Math.floor(Number(page)) || 1), pages);
+  return { page:p, pages, size, total:all?.length || 0, rows:(all || []).slice((p-1)*size, p*size) };
+}
+function remHistoryPager(all){
+  const h = remHistoryPage(all);
+  if(h.pages <= 1) return '';
+  const btn = (label, to, off) => `<button class="btn btn-sm" ${off?'disabled':''} style="min-width:92px;min-height:40px" onclick="App.setRemHistPage(${to})">${label}</button>`;
+  return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 4px 4px;flex-wrap:wrap">
+    ${btn('‹ Previous', h.page-1, h.page<=1)}
+    <span style="font-size:12px;color:var(--text3)">Page ${h.page} of ${h.pages} · ${h.total} payments</span>
+    ${btn('Next ›', h.page+1, h.page>=h.pages)}
+  </div>`;
+}
+function setRemHistPage(n){ state.remHistPage = Math.max(1, Math.floor(Number(n)) || 1); renderRemittances(); }
 
 async function approveRemittance(id, btn=null){
   if(!can('signoff')){ showAlert('You do not have permission to approve remittances.','danger'); return; }
@@ -22439,7 +22459,7 @@ return {
   attendancePeriodReport, attConfirmSubmitFurther, attSubmitFurther, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, setRemHistPage, _remHistoryPage: remHistoryPage, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
