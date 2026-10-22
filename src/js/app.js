@@ -9039,6 +9039,10 @@ async function renderRemittances(){
   const mummyQuotaLines=quotaLines.filter(q=>isMummyQuotaLabel(q.label));
   const partALines=[...incomeLines,...provinceLines,...levyLines,...rccgQuotaLines];
   const partBLines=[...tgLines,...mummyQuotaLines];
+  // The portal's RRR total wins for Part A (it rounds each beneficiary to the kobo). Only a gap of ₦1 or less is
+  // absorbed, as one visible line; a bigger gap means the lines really differ and is left alone.
+  const _rrrAdj = rrrRoundingLine(partALines.reduce((s,l)=>s+l.amount,0), settings?.rrrTotals?.[toDate]);
+  if(_rrrAdj) partALines.push(_rrrAdj);
   const partATotal=partALines.reduce((s,l)=>s+l.amount,0);
   const partBTotal=partBLines.reduce((s,l)=>s+l.amount,0);
   const allLines=[...partALines,...partBLines];
@@ -10461,6 +10465,15 @@ async function submitRemittance(btn=null){
       : '';
     showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.${rollbackNote}`,'danger');
   }
+}
+
+// Part A due follows the portal's RRR total. Returns an adjustment line, or null when there is nothing to absorb.
+function rrrRoundingLine(partASum, entry){
+  const total = Number(entry?.total);
+  if(!(total > 0)) return null;
+  const diff = Math.round((total - partASum) * 100) / 100;
+  if(Math.abs(diff) < 0.005 || Math.abs(diff) > 1) return null;
+  return { label:`Portal rounding (RRR ${entry.rrr || ''} total ${fmt(total)})`, amount:diff, section:'adjust', pct:null };
 }
 
 // Payment History: 10 a page, newest first, Previous / Next.
@@ -22459,7 +22472,7 @@ return {
   attendancePeriodReport, attConfirmSubmitFurther, attSubmitFurther, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, setRemHistPage, _remHistoryPage: remHistoryPage, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, setRemHistPage, _remHistoryPage: remHistoryPage, _rrrRoundingLine: rrrRoundingLine, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
