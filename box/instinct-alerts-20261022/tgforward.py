@@ -6,12 +6,18 @@ Messages not from David are skipped. A message already forwarded (same chat and 
 restart or a re-read of the same update does not double up. If the email fails the message stays queued and is retried by the next
 forward() or flush() call; the existing relay is not touched by this module.
 """
-import datetime, json, os, sys
+import datetime, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from satalign import ALERT_TO
+    from satalign import ALERT_TO, defang
 except ImportError:                                # pragma: no cover
+    _U = re.compile(r"(?i)\b(?:https?|ftp)://([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*|\bwww\.([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*")
+    def defang(t):
+        def host(m):
+            tail = re.search(r"[.,;:!?]+$", m.group(0))
+            return (m.group(1) or "www." + m.group(2)).rsplit("@", 1)[-1].rstrip(".,;:!?") + (tail.group(0) if tail else "")
+        return _U.sub(host, str(t))
     ALERT_TO = "cdavid@mail.instinct.com"
 
 KINDS = ("photo", "video", "voice", "audio", "document", "sticker", "video_note", "location", "contact", "poll")
@@ -31,7 +37,7 @@ def build(msg, topic):
     subject = f"[David-telegram] {topic}"
     body = "\n".join([describe(msg), "", "---", f"topic: {topic}", f"message id: {msg.get('message_id')}",
                       f"chat id: {chat.get('id')}", f"thread id: {msg.get('message_thread_id', '')}", f"sent: {when}"])
-    return subject, body
+    return defang(subject), defang(body)
 
 
 class Forwarder:

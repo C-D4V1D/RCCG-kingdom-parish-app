@@ -85,4 +85,25 @@ class TN(unittest.TestCase):
         N.main(["--component", "filing", "--kind", "filing", "--error", "x"], d, os.path.join(tempfile.mkdtemp(), "s.json"))
         self.assertEqual(out, ["mail", "PING"])
 
+
+class TU(unittest.TestCase):
+    URLS = "see https://user:pw@api.example.com/v1/x?token=abc#f and http://a.test:8080/p, www.site.org/page. (https://b.test/q) end"
+    def test_defang(self):
+        import satalign as S
+        out = S.defang(self.URLS)
+        self.assertNotIn("://", out); self.assertNotIn("token=abc", out); self.assertNotIn("pw@", out)
+        self.assertEqual(out, "see api.example.com and a.test:8080, site.org. (b.test) end".replace("site.org.", "www.site.org."))
+        self.assertEqual(S.defang("no links, ₦1,400 stays"), "no links, ₦1,400 stays")
+    def test_error_email_has_no_urls(self):
+        out = []
+        r = A.ErrorRouter(os.path.join(tempfile.mkdtemp(), "e.json"), {"mail": lambda to, s, b: out.append((s, b)) or True, "topic": lambda t: True, "ping": lambda t: True})
+        r.report("filing https://x.test/y", "HTTP 502 from https://portal.example/api/z?k=1", "other", {"fix_certain": True, "url": "https://q.test/a"})
+        s, b = out[0]; self.assertNotIn("://", s + b); self.assertIn("portal.example", b); self.assertIn("HTTP 502", b)
+    def test_telegram_forward_has_no_urls(self):
+        out = []
+        f = F.Forwarder(os.path.join(tempfile.mkdtemp(), "f.json"), {"is_david": lambda u: True, "topic_name": lambda c, t: "Links https://t.test/x",
+                                                                    "mail": lambda to, s, b: out.append((s, b)) or True})
+        f.forward({"message": {"message_id": 9, "from": {"id": 1}, "chat": {"id": 2}, "date": 1, "text": "look https://drive.example.com/file/d/1?usp=sharing ok"}})
+        s, b = out[0]; self.assertNotIn("://", s + b); self.assertIn("drive.example.com", b); self.assertIn("look", b); self.assertIn("ok", b)
+
 if __name__ == "__main__": unittest.main()

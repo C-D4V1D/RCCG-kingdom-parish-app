@@ -94,6 +94,10 @@ class TA(unittest.TestCase):
         self.assertEqual(self.al(mail_ok=False).alert("1", "P", "2026-10", self.ITEMS), "topic")
         self.assertEqual(self.al(mail_ok=False, topic_ok=False).alert("2", "P", "2026-10", self.ITEMS), "failed")
         self.assertEqual(self.al().alert("2", "P", "2026-10", self.ITEMS), "email")   # failed one was not recorded
+    def test_alignment_alert_has_no_urls(self):
+        items = [{"item": "Mystery https://portal.example/inv/1", "portal": 5, "app": None, "reason": "see http://x.test/a"}]
+        self.al().alert("1", "P", "2026-10", items)
+        self.assertNotIn("://", self.out[0][2] + self.out[0][3]); self.assertIn("portal.example", self.out[0][3])
     def test_empty(self):
         self.assertEqual(self.al().alert("1", "P", "m", []), "empty")
 

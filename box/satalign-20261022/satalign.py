@@ -11,10 +11,23 @@ ctx  = {"code", "name", "month", "lines": [{"item","portal","app"}], "person"}
 deps = {"call": f(action, **payload)->dict, "send": f(html, buttons=None), "refresh": f()->{"app","portal","bad"},
         "alert": f(code, name, month, items)}
 """
-import hashlib, html, json, os, urllib.request
+import hashlib, html, json, os, re, urllib.request
 
 ALERT_TO = "cdavid@mail.instinct.com"
 USER_AGENT = "kp-box-satalign/1"
+
+
+_URL = re.compile(r"(?i)\b(?:https?|ftp)://([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*|\bwww\.([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*")
+
+
+def defang(text):
+    """Alert emails must carry no URLs (Instinct's mailbox refuses to open mail with a link that fails its check).
+    Every http(s)/ftp/www link becomes its host only, e.g. https://a.example/x?y=1 -> a.example. Everything else is kept."""
+    def host(m):
+        h = m.group(1) or ("www." + m.group(2))
+        tail = re.search(r"[.,;:!?]+$", m.group(0))          # keep sentence punctuation that followed the link
+        return h.rsplit("@", 1)[-1].rstrip(".,;:!?") + (tail.group(0) if tail else "")
+    return _URL.sub(host, str(text if text is not None else ""))
 
 
 def naira(v):
@@ -148,9 +161,10 @@ class Alerter:
         seen = self._seen()
         if fp in seen:
             return "duplicate"
-        subject = f"[Instinct-alert] satellite alignment {name} {month}"
+        subject = defang(f"[Instinct-alert] satellite alignment {name} {month}")
         body = "\n".join([f"parish={code} ({name}) month={month}", "Lines the Fix alignment script cannot fix (one JSON per line):"]
                          + [json.dumps(x, ensure_ascii=False, sort_keys=True) for x in items])
+        body = defang(body)
         how = "email" if self.mail(self.to, subject, body) else None
         if not how and self.topic(subject + "\n" + body):
             how = "topic"

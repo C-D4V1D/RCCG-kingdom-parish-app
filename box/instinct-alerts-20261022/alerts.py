@@ -22,9 +22,15 @@ import datetime, hashlib, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from satalign import Alerter, ALERT_TO       # same drop-in folder on the box (tools/)
+    from satalign import Alerter, ALERT_TO, defang       # same drop-in folder on the box (tools/)
 except ImportError:                                # pragma: no cover - fallback so this file also stands alone
     Alerter, ALERT_TO = object, "cdavid@mail.instinct.com"
+    _U = re.compile(r"(?i)\b(?:https?|ftp)://([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*|\bwww\.([^\s/?#\"'<>)\]]+)[^\s\"'<>)\]]*")
+    def defang(t):
+        def host(m):
+            tail = re.search(r"[.,;:!?]+$", m.group(0))
+            return (m.group(1) or "www." + m.group(2)).rsplit("@", 1)[-1].rstrip(".,;:!?") + (tail.group(0) if tail else "")
+        return _U.sub(host, str(t))
 
 CRITICAL = ("money", "filing_unverified", "data_loss", "uncertain")
 TTL_HOURS = 6
@@ -82,10 +88,11 @@ class ErrorRouter:
         fresh = bool(last) and now - datetime.datetime.fromisoformat(last["at"]) < datetime.timedelta(hours=TTL_HOURS)
         if fresh and last.get("how"):
             return {"cls": cls, "how": "duplicate", "ping": False}
-        subject = f"[Instinct-alert] clerk-box {component}"
+        subject = defang(f"[Instinct-alert] clerk-box {component}")
         body = json.dumps({"component": component, "time": now.isoformat(timespec="seconds"), "kind": kind, "class": cls,
                            "critical": is_critical(cls), "error": str(error), "facts": facts or {}},
                           ensure_ascii=False, sort_keys=True, indent=1)
+        body = defang(body)
         how = "email" if self.d["mail"](self.to, subject, body) else ("topic" if self.d["topic"](subject + "\n" + body) else None)
         ping = False
         if is_critical(cls) and not (fresh and last.get("pinged")):
