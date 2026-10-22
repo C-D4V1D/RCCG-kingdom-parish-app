@@ -14,3 +14,5 @@ Quiet (email Instinct only): box down and brought back; filing where the earlier
    `python3 /workspace/tools/instinct_notify.py --component updater --kind other --fix-certain --error "update skipped: files edited by hand: $FILES"`  (subject becomes `[Instinct-alert] clerk-box updater`).
 3. **Telegram forward**: in the poller, at the top of its per-update handling call `Forwarder("/workspace/state/tg-forward.json", deps).forward(update)` with `deps = {is_david: id == David's bot-admin id, topic_name: f(chat_id, thread_id) (forum topic names the poller already knows, else None), mail: mailer_send}`; call `.flush()` on each poll loop. Subject `[David-telegram] <topic>`, body = full text, topic, message id, chat id, thread id, time. Never sent twice for the same message id; failed sends are queued and retried.
 Undo: remove the calls.
+
+Alert and David-telegram email bodies and subjects carry no URLs: every link is written as its host only (satalign.defang, used by alerts, tgforward and the satellite Alerter).
