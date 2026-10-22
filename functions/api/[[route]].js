@@ -17040,6 +17040,40 @@ async function runCutoffDateSignal(DB, env, request) {
   const authErr = requireCronSecret(env, request);
   if (authErr) return authErr;
   if (!monthEndConfigured(env)) return ok({ ok: true, skipped: true, reason: 'no month-end destination configured' });
+  const kingdom = await runKingdomCutoffDateSignal(DB, env, request);
+  // The other parishes follow the same cut-off date, whatever Kingdom's own result was (it may already be filed).
+  let satellites = [];
+  try { satellites = await runSatelliteCutoffDateSignals(DB, env, request); }
+  catch (e) { console.error('[cutoff-signal] satellite parishes:', e?.message || e); satellites = [{ status: 'failed', reason: 'could not run' }]; }
+  if (!satellites.length) return kingdom;
+  const body = await kingdom.clone().json().catch(() => ({}));
+  return ok({ ...body, satellites });
+}
+
+/**
+ * The same date-driven start for each active satellite parish: on the cut-off date (a weekday that is not a Sunday), each parish that is not
+ * started yet and has every Sunday collection is started through remitFileOne (its own start marker, the missing-Sunday hold, the same signal
+ * the "File month-end now" button sends). A parish with missing Sundays is held and retried every hour that day. A Sunday cut-off date is left to
+ * the parish's own Sunday save, like Kingdom. Never throws for one parish.
+ */
+async function runSatelliteCutoffDateSignals(DB, env, request) {
+  const today = dublinToday();
+  const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB), today);
+  if (!period || period.periodEnd !== today) return [];
+  if (new Date(`${period.periodEnd}T00:00:00Z`).getUTCDay() === 0) return [];
+  const month = period.periodEnd.slice(0, 7);
+  const out = [];
+  for (const t of (await remitFileTargets(DB, env)).filter(x => x.sat)) {
+    const st = remitMarkerState(await getSettingValue(DB, remitStartKey(t, month, period)));
+    if (st.state === 'sent') { out.push({ parish: t.key, status: 'already' }); continue; }
+    const r = await remitFileOne(DB, env, request, t, month, period, 'cut-off date job', 'cutoff_date');
+    if (r.status === 'failed') console.error(`[cutoff-signal] ${t.key} ${period.periodEnd}: ${r.reason}`);
+    out.push({ parish: r.parish, status: r.status, reason: r.status === 'started' || r.status === 'already' ? undefined : r.reason });
+  }
+  return out;
+}
+
+async function runKingdomCutoffDateSignal(DB, env, request) {
   const today = dublinToday();
   const period = remCutoffPeriodForDate(await readRemCutoffSettings(DB), today);
   if (!period) return ok({ ok: true, skipped: true, reason: 'not a cut-off date', today });
@@ -17157,7 +17191,7 @@ async function remitFileStatus(DB, env, authz, wantedMonth) {
   return ok({ month, periodEnd: period?.periodEnd || null, cutoffSet: !!period, parishes });
 }
 
-async function remitFileOne(DB, env, request, t, month, period, who) {
+async function remitFileOne(DB, env, request, t, month, period, who, trigger = 'manual_button') {
   const base = { parish: t.key, name: t.name };
   try {
     const key = remitStartKey(t, month, period);
@@ -17186,9 +17220,9 @@ async function remitFileOne(DB, env, request, t, month, period, who) {
       periodStart: period.periodStart,
       periodEnd: period.periodEnd,
       action: 'created',
-      trigger: 'manual_button',
+      trigger,
       requestedBy: who,
-      recordId: `manual-${t.key}-${month}`,
+      recordId: `${trigger === 'cutoff_date' ? 'cutoff-date' : 'manual'}-${t.key}-${month}`,
       savedAt,
       parish: t.sat ? t.key : REMIT_ACTION_PARISH,
       month,
@@ -17203,7 +17237,7 @@ async function remitFileOne(DB, env, request, t, month, period, who) {
     }
     await finishCutoffSignal(DB, key, 'sent', new Date().toISOString());
     try {
-      await auditStatement(DB, 'remit_file_now', `Month-end run for ${t.name} (${month}) started from the Remittances page by ${who}.`, who).run();
+      await auditStatement(DB, 'remit_file_now', trigger === 'cutoff_date' ? `Month-end run for ${t.name} (${month}) started automatically on the cut-off date.` : `Month-end run for ${t.name} (${month}) started from the Remittances page by ${who}.`, who).run();
     } catch { /* the audit line is best-effort */ }
     return { ...base, status: 'started', to: sent.to };
   } catch (e) {
