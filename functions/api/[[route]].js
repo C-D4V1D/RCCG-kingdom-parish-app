@@ -3051,6 +3051,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       // The box's "Fix alignment" button (x-watchdog-token): plan, apply or undo adding a missing fixed quota to a satellite parish.
       if (method === 'POST' && param === 'satellite-align') return await satelliteAlign(DB, env, request, body);
       if (method === 'POST' && param === 'remittance-receipt') return await remittanceReceipt(DB, env, request, body);
+      if (method === 'POST' && param === 'rrr-total') return await rrrTotal(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-church-bank-charge-email') return await ingestChurchBankChargeEmail(DB, env, request, body);
     }
@@ -17209,6 +17210,30 @@ async function satelliteAlign(DB, env, request, body) {
   await save(applyPlanToList(cur, plan.changes), entry);
   try { await auditStatement(DB, 'sat_align', `Fix alignment for ${parish.name || code} (${month}) by ${by}: added ${plan.changes.map(c => `${c.label} ₦${c.amount}`).join(', ')} to the parish's quotas (undo id ${id}).`, by).run(); } catch { /* best-effort */ }
   return ok({ ok: true, action, parish: code, month, applied: true, changeId: id, changes: plan.changes, noops: plan.noops, needsPerson: plan.human });
+}
+
+// POST /api/internal/rrr-total  (header x-watchdog-token). The box posts the RCCG portal's RRR figure when an RRR is generated:
+//   { rrr, total, fee?, vat?, periodTo:'YYYY-MM-DD' }
+// The app keeps it per period (settings key rrrTotals) and the Remittances page shows Part A due = this total, so the
+// portal's per-line kobo rounding can never leave "due" a kobo away from what was paid. It changes nothing else:
+// no payment, no expense, no rates. Posting again for the same period replaces the entry (an RRR is regenerated).
+async function rrrTotal(DB, env, request, body) {
+  const want = String(env?.CLERK_WATCHDOG_TOKEN || '').trim();
+  const sent = request.headers.get('x-watchdog-token') || '';
+  if (!want || !sent || !constantTimeEqual(sent, want)) return err('Not allowed.', 401);
+  const rrr = String(body?.rrr || '').replace(/\D/g, '');
+  const total = r2num(body?.total);
+  const periodTo = String(body?.periodTo || '');
+  if (rrr.length < 10) return err('rrr is required.', 400);
+  if (!(total > 0) || total > 100000000) return err('total must be a positive amount.', 400);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(periodTo)) return err('periodTo must be YYYY-MM-DD.', 400);
+  let map = {};
+  try { map = JSON.parse((await getSettingValue(DB, 'rrrTotals')) || '{}') || {}; } catch { map = {}; }
+  const prev = map[periodTo] || null;
+  map[periodTo] = { rrr, total, fee: r2num(body?.fee), vat: r2num(body?.vat), at: new Date().toISOString() };
+  await DB.prepare(`INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind('rrrTotals', JSON.stringify(map)).run();
+  try { await auditStatement(DB, 'rrr_total_stored', `RRR ${rrr} total ${total} stored for period ending ${periodTo}${prev ? ` (replaced RRR ${prev.rrr} total ${prev.total})` : ''}.`, 'box').run(); } catch { /* best-effort */ }
+  return ok({ ok: true, periodTo, total, replaced: !!prev });
 }
 
 // ── Scripted recording of a Remita payment from its receipt ───────────────────────────────────
