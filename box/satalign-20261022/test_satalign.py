@@ -67,10 +67,10 @@ class T(unittest.TestCase):
             def __exit__(s, *a): pass
             def read(s): return b'{"ok": true}'
         def opener(req, timeout):
-            seen.update(url=req.full_url, tok=req.get_header("X-watchdog-token"), body=json.loads(req.data)); return Resp()
+            seen.update(url=req.full_url, tok=req.get_header("X-watchdog-token"), ua=req.get_header("User-agent"), body=json.loads(req.data)); return Resp()
         r = A.call_app("https://x.test/", "T0K", "undo", "659840", "2026-10", by="d", change_id="sa1", opener=opener)
         self.assertEqual(seen["url"], "https://x.test/api/internal/satellite-align"); self.assertEqual(seen["tok"], "T0K")
-        self.assertEqual(seen["body"]["changeId"], "sa1"); self.assertTrue(r["ok"])
+        self.assertEqual(seen["ua"], "kp-box-satalign/1"); self.assertEqual(seen["body"]["changeId"], "sa1"); self.assertTrue(r["ok"])
 
 class TA(unittest.TestCase):
     def setUp(self):

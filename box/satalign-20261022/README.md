@@ -19,3 +19,9 @@ Needs `box/satcheck-20261022/satcheck.py` too (portal 0 vs app blank counts as a
 
 Alert goes to cdavid@mail.instinct.com, subject `[Instinct-alert] satellite alignment <parish name> <month>`, once per parish, month and set of lines.
 Undo: restore the previous `satmonthend.py` / `satbot.py`.
+
+## 403 on the first live preview (22 Oct): cause and fix
+Route expects header `x-watchdog-token` = the app's `CLERK_WATCHDOG_TOKEN` (same token as run-bank-recon). A wrong or missing token gets **401** from the app.
+The 403 was **not** the token: Cloudflare in front of the app answers 403 (body `error code: 1010`) to Python's default `Python-urllib` User-Agent,
+before the app sees the request (reproduced: same request with a `curl` or custom agent reaches the app and gets 401). `call_app` now sends
+`User-Agent: kp-box-satalign/1`. If the operator calls the route another way, set any non-default User-Agent.
