@@ -22,6 +22,7 @@ import {
 } from '../_lib/remit-action-token.js';
 import { deliverMonthEndEvent, monthEndConfigured, actionButtonPeople, postSundayRecord } from '../_lib/month-end-events.js';
 import { dublinToday, cutoffSignalMarkerKey, decideCutoffSignal, missingSundays } from '../_lib/cutoff-date-signal.js';
+import { planSatAlign, applyPlanToList, undoFromList } from '../_lib/sat-align.js';
 import {
   backupDatabases, buildFullBackup, restoreTableChunk,
   timeTravelBookmark, timeTravelConfigured, timeTravelRestore, timeTravelDatabaseIds, PRODUCTION_HOST,
@@ -3043,6 +3044,8 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'POST' && cronJobRunners().some(([, ep]) => ep === param)) {
         return await runSingleCronJob(DB, env, request, param);
       }
+      // The box's "Fix alignment" button (x-watchdog-token): plan, apply or undo adding a missing fixed quota to a satellite parish.
+      if (method === 'POST' && param === 'satellite-align') return await satelliteAlign(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-bank-charge-email') return await ingestBankChargeEmail(DB, env, request, body);
       if (method === 'POST' && param === 'ingest-church-bank-charge-email') return await ingestChurchBankChargeEmail(DB, env, request, body);
     }
@@ -17136,6 +17139,70 @@ const remitManualMarkerKey = (parish, month) => `remit_manual_signal_${parish}_$
 // Kingdom shares ONE start marker with the cut-off date job and the Sunday save (remit_cutoff_signal_<periodEnd>), so whichever
 // starts the month-end run first blocks the others. A satellite has its own manual marker.
 const remitStartKey = (t, month, period) => (!t.sat && period) ? cutoffSignalMarkerKey(period.periodEnd) : remitManualMarkerKey(t.key, month);
+
+// ── "Fix alignment" for a satellite parish's remittance check ─────────────────────────────────
+// POST /api/internal/satellite-align  (header x-watchdog-token = the box's token; nothing else is accepted)
+//   { action:'preview'|'apply'|'undo', parish:'659840', month:'2026-10', lines:[{item,portal,app}], by:'divine', changeId }
+// preview: says exactly what would change and what needs a person. Writes nothing.
+// apply:   adds each safe missing fixed-quota line to settings.satQuotas[parish] at the portal's amount, logs it
+//          (settings.satAlignLog, with an undo id and the list before and after), audits it, and syncs the parish database.
+// undo:    takes back the lines of one logged change while they still hold the amount that change set.
+// Only the satellite quota list in Kingdom's settings changes. The portal and payments are never touched.
+async function satelliteAlign(DB, env, request, body) {
+  const want = String(env?.CLERK_WATCHDOG_TOKEN || '').trim();
+  const sent = request.headers.get('x-watchdog-token') || '';
+  if (!want || !sent || !constantTimeEqual(sent, want)) return err('Not allowed.', 401);
+  const action = String(body?.action || '');
+  const code = String(body?.parish || '').trim();
+  const month = String(body?.month || '').trim();
+  const by = String(body?.by || 'box').replace(/[^a-z0-9_ .-]/gi, '').slice(0, 40) || 'box';
+  if (!['preview', 'apply', 'undo'].includes(action)) return err('action must be preview, apply or undo.', 400);
+  if (!SAT_CODE_RE.test(code)) return err('parish must be a satellite parish code.', 400);
+  const parish = await satelliteParishInfo(DB, code);
+  if (!parish || parish.active === false) return err('That parish is not an active satellite parish here.', 404);
+  const rows = await kingdomSettingsRows(DB, ['quotaList', 'satQuotas', 'satAlignLog']);
+  const kingdomList = safeJsonParse(rows.quotaList, []);
+  const satQuotas = (v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {})(safeJsonParse(rows.satQuotas, {}));
+  const cur = Array.isArray(satQuotas[code]) ? satQuotas[code] : [];
+  const log = (v => Array.isArray(v) ? v : [])(safeJsonParse(rows.satAlignLog, []));
+
+  const save = async (list, entry) => {
+    const next = { ...satQuotas, [code]: list };
+    const nextLog = [...log, entry].slice(-50);
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES ('satQuotas',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(JSON.stringify(next)).run();
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES ('satAlignLog',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(JSON.stringify(nextLog)).run();
+    const SDB = satelliteDb(env, code);
+    if (SDB) { _satReady.delete(SDB); await prepareSatelliteDb(DB, SDB, code, parish).catch(e => console.error('[sat-align] sync:', e?.message || e)); }
+  };
+
+  if (action === 'undo') {
+    const id = String(body?.changeId || '');
+    const entry = log.find(e => e && e.id === id && e.parish === code);
+    if (!entry) return err('No such change for this parish.', 404);
+    if (entry.undone) return ok({ ok: true, action, already: true, changeId: id });
+    const { list, removed, kept } = undoFromList(cur, entry.added || []);
+    if (!removed.length) return ok({ ok: false, action, changeId: id, removed: [], kept });
+    const undoEntry = { ...entry, undone: true, undoneAt: new Date().toISOString(), undoneBy: by };
+    const nextLog = log.map(e => (e && e.id === id) ? undoEntry : e);
+    const next = { ...satQuotas, [code]: list };
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES ('satQuotas',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(JSON.stringify(next)).run();
+    await DB.prepare(`INSERT INTO settings (key,value) VALUES ('satAlignLog',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(JSON.stringify(nextLog)).run();
+    const SDB = satelliteDb(env, code);
+    if (SDB) { _satReady.delete(SDB); await prepareSatelliteDb(DB, SDB, code, parish).catch(() => {}); }
+    try { await auditStatement(DB, 'sat_align_undo', `Fix alignment undone for ${parish.name || code} (${entry.month}): ${removed.map(r => `${r.label} ₦${r.amount}`).join(', ')}.`, by).run(); } catch { /* best-effort */ }
+    return ok({ ok: true, action, changeId: id, removed, kept });
+  }
+
+  const plan = planSatAlign(body?.lines, kingdomList, cur);
+  if (action === 'preview' || !plan.changes.length) {
+    return ok({ ok: true, action, parish: code, month, changes: plan.changes, noops: plan.noops, needsPerson: plan.human, applied: false });
+  }
+  const id = 'sa' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const entry = { id, at: new Date().toISOString(), by, parish: code, month, added: plan.changes.map(c => ({ label: c.label, amount: c.amount })), before: cur };
+  await save(applyPlanToList(cur, plan.changes), entry);
+  try { await auditStatement(DB, 'sat_align', `Fix alignment for ${parish.name || code} (${month}) by ${by}: added ${plan.changes.map(c => `${c.label} ₦${c.amount}`).join(', ')} to the parish's quotas (undo id ${id}).`, by).run(); } catch { /* best-effort */ }
+  return ok({ ok: true, action, parish: code, month, applied: true, changeId: id, changes: plan.changes, noops: plan.noops, needsPerson: plan.human });
+}
 
 /** The month a tap files: this month (Dublin), or last month. Returns { month, period } or null when no cut-off is set for it. */
 async function remitFileMonthAndPeriod(DB, wanted) {

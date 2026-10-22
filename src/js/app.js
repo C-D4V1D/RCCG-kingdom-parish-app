@@ -17301,7 +17301,17 @@ function satQuotaGridHtml(){
     <div class="sat-q-actions">
       <button type="button" class="btn" onclick="App.satQuotaCopyFirst()">Copy first column to all</button>
       <button type="button" class="btn btn-primary" onclick="App.saveSatQuotas(this)">Save satellite quotas</button>
-    </div>`;
+    </div>${satAlignLogHtml()}`;
+}
+/** Read-only list of what the "Fix alignment" button added to a parish's quotas (newest first), so nothing it changes is hidden. */
+function satAlignLogHtml(){
+  const log = (state.satQuota && Array.isArray(state.satQuota.log)) ? state.satQuota.log.filter(e=>e && e.id) : [];
+  if(!log.length) return '';
+  const name = code => ((state.satQuota.parishes || []).find(p=>p.code === code) || {}).name || code;
+  const rows = log.slice().reverse().map(e=>`<tr><td>${esc(String(e.at || '').slice(0,16).replace('T',' '))}</td><td>${esc(name(e.parish))}</td><td>${esc(e.month || '')}</td><td>${esc((e.added || []).map(x=>x.label + ' ₦' + x.amount).join(', '))}</td><td>${esc(e.by || '')}</td><td>${e.undone ? 'Undone' : 'Applied'}</td></tr>`).join('');
+  return `<h4 style="margin:18px 0 6px">Added by the Fix alignment button</h4>
+    <p style="font-size:12px;color:var(--text3);margin:0 0 6px">Each line was added to the parish's quotas to match the portal. To change one, edit the grid above and save.</p>
+    <div class="table-wrap"><table class="sat-quota-table"><tr><th>When</th><th>Parish</th><th>Month</th><th>Added</th><th>By</th><th>State</th></tr>${rows}</table></div>`;
 }
 async function initSatQuotaGrid(settings){
   if(!document.getElementById('satQuotaBody')) return;
@@ -17326,6 +17336,7 @@ async function initSatQuotaGrid(settings){
     parishes,
     labels: getQuotaList(settings).map(q=>String(q.label || '').trim()),
     existing: (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {},
+    log: (l=>Array.isArray(l)?l:[])(satParseJson(settings?.satAlignLog, [])),
   };
   box.innerHTML = satQuotaGridHtml();
 }
