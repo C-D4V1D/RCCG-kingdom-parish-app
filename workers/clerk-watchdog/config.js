@@ -54,10 +54,12 @@ export const DEFAULT_CONFIG = {
       divine: { telegram: true, email: true },
       pastor: { telegram: true, email: true },
     }),
+    // Pastor (Henry Ofunne): email only, Telegram stays off (David, 22 Oct 2026). Kept here so a reset keeps it.
     rrr_generated: route({
       david: { telegram: true, email: true },
       divine: { telegram: true, email: true },
       fabian: { telegram: true, email: true },
+      pastor: { telegram: false, email: true },
     }),
     parish_remittance_check: route({ david: { telegram: true, email: true } }),
     monthly_statement: route({
