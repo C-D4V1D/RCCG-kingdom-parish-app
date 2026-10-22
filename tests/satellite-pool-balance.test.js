@@ -676,7 +676,8 @@ test('submitRemittance Part A: always resolves to bank_transfer (bankAmount=paid
       // Unknown ids (e.g. 'pageContent', hit by the fire-and-forget renderRemittances()
       // re-render on the success path below) fall back to an inert stub element instead
       // of null, so incidental .innerHTML writes don't crash after this test has moved on.
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       // The only radio Part A's markup can ever produce is bank_transfer — there is no
       // cash/split option to select, mirroring the new HTML in showRemittancePaymentModal.
       querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
@@ -804,7 +805,8 @@ test('submitSatelliteFund edit: delete-old-then-create-new both happen, in order
     };
     const editDocStub = {
       ...documentStub,
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'cash' } : null; },
       querySelectorAll() { return []; },
     };
@@ -861,7 +863,8 @@ test('submitSatelliteFund edit: DELETE succeeds but the create fails — surface
     };
     const editDocStub = {
       ...documentStub,
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       querySelector(sel) { return sel === 'input[name="sf_channel"]:checked' ? { value: 'bank' } : null; },
       querySelectorAll() { return []; },
     };
@@ -1012,7 +1015,8 @@ test('Part A adjusted share: pool overage derives from the ADJUSTED share, remit
     };
     const remittanceDocStub = {
       ...documentStub,
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
       querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
     };
@@ -1070,7 +1074,8 @@ test('Part A adjusted share without a reason is blocked before any network call'
     };
     const remittanceDocStub = {
       ...documentStub,
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
       querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
     };
@@ -1110,7 +1115,8 @@ test('Part A with the Adjust box open but a BLANK share field is blocked — no 
     };
     const remittanceDocStub = {
       ...documentStub,
-      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
+      getElementById(id) { if (id === 'rem_receipt') return { value: '', files: [{ name: 'fake-receipt.png', type: 'image/png' }] };
+      return (id in fieldValues) ? { value: fieldValues[id], files: [] } : makeElement(); },
       querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
       querySelectorAll(sel) { return sel === 'input[name="rem_sig"]:checked' ? [] : []; },
     };
@@ -1130,5 +1136,25 @@ test('Part A with the Adjust box open but a BLANK share field is blocked — no 
     globalThis.document = savedDocument;
     globalThis.window.document = savedWindowDocument;
     globalThis.fetch = savedFetch;
+  }
+});
+
+test('submitRemittance: a bank payment without a receipt is refused and nothing is saved', async () => {
+  const savedDocument = globalThis.document, savedWindowDocument = globalThis.window.document, savedFetch = globalThis.fetch;
+  const calls = [];
+  try {
+    const fieldValues = { rem_part: 'a', rem_date: '2026-07-01', rem_ref: 'TX-1', rem_notes: '', rem_auth_text: 'Test Signatory', rem_total_due: '98671.2', rem_area_total: '', rem_breakdown_snapshot: '' };
+    const stub = {
+      ...documentStub,
+      getElementById(id) { return (id in fieldValues) ? { value: fieldValues[id], files: [] } : (id === 'rem_receipt' ? { value: '', files: [] } : makeElement()); },
+      querySelector(sel) { return sel === 'input[name="rem_method"]:checked' ? { value: 'bank_transfer' } : null; },
+      querySelectorAll() { return []; },
+    };
+    globalThis.document = stub; globalThis.window.document = stub;
+    globalThis.fetch = async (url, opts) => { calls.push({ url, method: opts?.method || 'GET' }); return { ok: true, status: 200, json: async () => ([]) }; };
+    await App.submitRemittance(null);
+    assert.equal(calls.filter(c => c.method === 'POST').length, 0, 'no payment, satellite entry or expense was saved');
+  } finally {
+    globalThis.document = savedDocument; globalThis.window.document = savedWindowDocument; globalThis.fetch = savedFetch;
   }
 });
