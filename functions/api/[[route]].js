@@ -17224,10 +17224,31 @@ async function remittanceReceipt(DB, env, request, body) {
   const sent = request.headers.get('x-watchdog-token') || '';
   if (!want || !sent || !constantTimeEqual(sent, want)) return err('Not allowed.', 401);
   const action = String(body?.action || '');
-  if (!['preview', 'record'].includes(action)) return err('action must be preview or record.', 400);
+  if (!['preview', 'record', 'update'].includes(action)) return err('action must be preview, record or update.', 400);
   const rrr = String(body?.rrr || '').replace(/\D/g, '');
   if (rrr.length < 10) return err('rrr is required.', 400);
   const stop = reason => ok({ ok: false, action, needsPerson: reason });
+
+  // update: tidy a payment THIS route recorded (label and line breakdown only; amount, date, status, reference never change).
+  // The lines must add up to the amount paid to the cent. The old values go into the audit row so it can be put back.
+  if (action === 'update') {
+    const row = await DB.prepare(`SELECT * FROM remittances WHERE id=?`).bind(String(body?.id || '')).first();
+    if (!row) return stop('No remittance with that id.');
+    if (!String(row.notes || '').includes('Recorded by script') || !String(row.notes || '').includes(`RRR ${rrr}`)) return stop('That payment was not recorded by this route for this RRR; not touched.');
+    let lines = null;
+    if (body?.breakdown !== undefined) {
+      lines = Array.isArray(body.breakdown) ? body.breakdown.map(l => ({ label: String(l?.label || '').slice(0, 160), amount: Number(l?.amount) })) : null;
+      if (!lines || !lines.length || lines.some(l => !l.label || !Number.isFinite(l.amount) || l.amount < 0)) return stop('breakdown must be a list of {label, amount}.');
+      const sum = Math.round(lines.reduce((t, l) => t + l.amount, 0) * 100) / 100;
+      if (Math.abs(sum - Number(row.amount)) > 0.005) return stop(`The lines add up to ${sum}, the payment is ${row.amount}; not changed.`);
+    }
+    const label = body?.label !== undefined ? String(body.label).trim().slice(0, 120) : String(row.label || '');
+    if (!label) return stop('label cannot be empty.');
+    const snap = lines ? JSON.stringify(lines) : String(row.breakdown_snapshot || '');
+    await DB.prepare(`UPDATE remittances SET label=?, breakdown_snapshot=? WHERE id=?`).bind(label, snap, row.id).run();
+    try { await auditStatement(DB, 'remittance_receipt_update', `Remittance ${row.id} tidied by script: label "${row.label}" -> "${label}"; breakdown ${row.breakdown_snapshot ? 'replaced (old kept in this row: ' + String(row.breakdown_snapshot).slice(0, 1500) + ')' : 'filled'}.`, String(body?.by || 'box').slice(0, 40)).run(); } catch { /* best-effort */ }
+    return ok({ ok: true, action, id: row.id, label, lines: lines ? lines.length : undefined });
+  }
 
   let read = body?.read || null;
   const img = body?.receipt;
