@@ -131,3 +131,14 @@ test('Automations page: box key enables the password field; a satellite link sho
   assert.ok(!/at-par-pw"[^>]*disabled/.test(html));
   assert.match(html, /Telegram connected ✓/);
 });
+
+test('satMissingQuotas warns for Kingdom quotas no active satellite has, until the grid is saved', () => {
+  const parishes = [{ code: 'A', name: 'Sanctuary', active: true }, { code: 'B', name: 'Paused', active: false }, { code: 'C', name: 'GIA', active: true }];
+  const existing = { A: [{ label: 'RMF', amount: 200 }, { label: 'Open Heavens', amount: 1400 }], C: [{ label: 'RMF', amount: 200 }] };
+  const labels = ['RMF', 'Open Heavens'];
+  assert.deepEqual(App._satMissingQuotas(labels, parishes, existing, []), [{ label: 'Open Heavens', parishes: ['GIA'] }]);
+  assert.deepEqual(App._satMissingQuotas(labels, parishes, existing, ['RMF', 'Open Heavens']), []);
+  assert.deepEqual(App._satMissingQuotas(labels, parishes, existing, undefined).length, 1);
+  assert.deepEqual(App._satMissingQuotas(['New'], parishes, {}, ['RMF']).map(x => x.parishes), [['Sanctuary', 'GIA']]);
+  assert.deepEqual(App._satMissingQuotas(labels, parishes, { A: [{ label: 'Open Heavens', amount: 0 }] }, []).map(x => x.label), ['RMF', 'Open Heavens']);
+});
