@@ -892,21 +892,22 @@ test('safetyCushion: real-data auto mode falls back to the 10% floor (₦10,620)
     mode: 'auto',
     periodTotals: [87088, 86011, 169413, 86831, 101655],
     normal: 106200,
+    roundTotalTo: 0,
   });
   assert.equal(cushion, 10620);
 });
 
 test('safetyCushion: auto mode uses the robust spread once there are 6+ periods (no floor)', () => {
   const totals = [87088, 86011, 169413, 86831, 101655, 90000];
-  const cushion = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200 });
+  const cushion = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, roundTotalTo: 0 });
   assert.equal(cushion, robustSpread(totals));
   assert.notEqual(cushion, Math.round(0.10 * 106200));
 });
 
 test('safetyCushion: percent mode is a clamped 0–100% of normal monthly spending', () => {
-  assert.equal(safetyCushion({ mode: 'percent', percent: 10, normal: 106200 }), 10620);
-  assert.equal(safetyCushion({ mode: 'percent', percent: 150, normal: 106200 }), 106200, 'percent is clamped at 100');
-  assert.equal(safetyCushion({ mode: 'percent', percent: -20, normal: 106200 }), 0, 'percent is clamped at 0');
+  assert.equal(safetyCushion({ mode: 'percent', percent: 10, normal: 106200, roundTotalTo: 0 }), 10620);
+  assert.equal(safetyCushion({ mode: 'percent', percent: 150, normal: 106200, roundTotalTo: 0 }), 106200, 'percent is clamped at 100');
+  assert.equal(safetyCushion({ mode: 'percent', percent: -20, normal: 106200, roundTotalTo: 0 }), 0, 'percent is clamped at 0');
 });
 
 test('knownBillSchedule: real-data rent (₦203,000, paid Jul 2026, due Feb 2028) gives ₦10,684/month and ₦32,052 saved by Oct 2026', () => {
@@ -1234,13 +1235,36 @@ test('heldBackByCategory: caps limit the pot, zero-held categories are left out,
   assert.equal(result.total, 55000);
 });
 
+test('safetyCushion: total period budget (normal + cushion) rounds UP to the next 500, rows still add up', () => {
+  const run = (normal, raw) => {
+    const c = safetyCushion({ mode: 'percent', percent: (raw / normal) * 100, normal });
+    return { cushion: c, total: normal + c };
+  };
+  // David's examples: 110,396 -> 110,500 ; 110,634 -> 111,000
+  assert.equal(run(100000, 10396).total, 110500);
+  assert.equal(run(100000, 10634).total, 111000);
+  // exact multiples stay put; one naira over goes up a full step
+  assert.equal(run(100000, 10500).total, 110500);
+  assert.equal(run(100000, 10501).total, 111000);
+  // cushion is never reduced, and grows by less than 500
+  for (const raw of [1, 499, 500, 9999, 10396, 10634]) {
+    const { cushion } = run(100000, raw);
+    assert.ok(cushion >= raw && cushion - raw < 500, `raw ${raw} -> ${cushion}`);
+  }
+  // real-data case: 106,200 + 10,620 = 116,820 -> 117,000
+  assert.equal(106200 + safetyCushion({ mode: 'auto', periodTotals: [87088, 86011, 169413, 86831, 101655], normal: 106200 }), 117000);
+  // zero budget stays zero; rounding can be switched off
+  assert.equal(safetyCushion({ mode: 'percent', percent: 10, normal: 0 }), 0);
+  assert.equal(safetyCushion({ mode: 'percent', percent: 10, normal: 100001, roundTotalTo: 0 }), 10000);
+});
+
 test('safetyCushion: cushionFloorPercent and cushionMinPeriods are configurable', () => {
   const totals = [87088, 86011, 169413, 86831, 101655];
   // Fewer than minPeriods (5 < 8): use the 20% floor instead of the default 10%.
-  const withCustomFloor = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, floorPercent: 20, minPeriods: 8 });
+  const withCustomFloor = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, floorPercent: 20, minPeriods: 8, roundTotalTo: 0 });
   assert.equal(withCustomFloor, Math.round(0.20 * 106200));
   // With minPeriods lowered to 5, the 5 periods are "enough" and the robust spread is used instead of the floor.
-  const withLowerMinPeriods = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, minPeriods: 5 });
+  const withLowerMinPeriods = safetyCushion({ mode: 'auto', periodTotals: totals, normal: 106200, minPeriods: 5, roundTotalTo: 0 });
   assert.equal(withLowerMinPeriods, robustSpread(totals));
 });
 

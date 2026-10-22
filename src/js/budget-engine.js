@@ -59,6 +59,8 @@ function amountOf(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
+const BUDGET_TOTAL_ROUND_TO = 500;
+
 function roundNaira(value) {
   return Math.round(amountOf(value));
 }
@@ -601,16 +603,26 @@ export function robustSpread(values = []) {
   return roundNaira(median(deviations) * 1.4826);
 }
 
-export function safetyCushion({ mode = 'auto', percent = 0, periodTotals = [], normal = 0, floorPercent = 10, minPeriods = 6 } = {}) {
+// The cushion is rounded up so that normal spending + cushion (the "Total period budget")
+// lands on a multiple of `roundTotalTo` (default ₦500; 0 turns it off). The category rows stay
+// exact; the cushion row absorbs the rounding, so the rows still add up to the total.
+export function safetyCushion({ mode = 'auto', percent = 0, periodTotals = [], normal = 0, floorPercent = 10, minPeriods = 6, roundTotalTo = BUDGET_TOTAL_ROUND_TO } = {}) {
   const normalAmt = amountOf(normal);
+  let raw;
   if (mode === 'percent') {
     const pct = Math.max(0, Math.min(100, amountOf(percent)));
-    return roundNaira((normalAmt * pct) / 100);
+    raw = roundNaira((normalAmt * pct) / 100);
+  } else {
+    const totals = Array.isArray(periodTotals) ? periodTotals : [];
+    const spread = robustSpread(totals);
+    const floor = totals.length < minPeriods ? (amountOf(floorPercent) / 100) * normalAmt : 0;
+    raw = roundNaira(Math.max(spread, floor));
   }
-  const totals = Array.isArray(periodTotals) ? periodTotals : [];
-  const spread = robustSpread(totals);
-  const floor = totals.length < minPeriods ? (amountOf(floorPercent) / 100) * normalAmt : 0;
-  return roundNaira(Math.max(spread, floor));
+  const step = Math.round(amountOf(roundTotalTo));
+  if (step <= 0) return raw;
+  const total = roundNaira(normalAmt) + raw;
+  if (total <= 0) return raw;
+  return Math.ceil(total / step) * step - roundNaira(normalAmt);
 }
 
 export function freeForNewThings({
