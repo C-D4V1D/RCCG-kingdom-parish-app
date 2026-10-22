@@ -31,14 +31,14 @@ async function setup() {
 }
 const json = async r => r.json();
 
-test('saved plan: 102,979 with <6 periods -> cushion 10,298, budget 113,277; no-store', async () => {
+test('saved plan: 102,979 with <6 periods -> cushion 10,298 rounds up to 10,521, budget 113,500 (next 500); no-store', async () => {
   const { plans, get } = await setup();
   await plans({ '2026-10': { version: 2, status: 'draft', normalMonthly: 102979, periodTotals: [1, 2] } });
   const r = await get();
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('Cache-Control'), 'no-store');
   const d = await json(r);
-  assert.deepEqual(d, { monthKey: '2026-10', planSource: 'saved', budgetTotal: 113277, normalMonthly: 102979, cushion: 10298, spent: 0, spentWeek: null });
+  assert.deepEqual(d, { monthKey: '2026-10', planSource: 'saved', budgetTotal: 113500, normalMonthly: 102979, cushion: 10521, spent: 0, spentWeek: null });
 });
 
 test('spent: rejected out, pending in, remittance-like out, range and boundaries; spentWeek', async () => {
