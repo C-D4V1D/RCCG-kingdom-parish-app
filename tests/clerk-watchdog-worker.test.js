@@ -724,3 +724,10 @@ test('restart wake: off unless switched on in Automations (default); settings va
   assert.ok(validateConfig(withSup({ restart_wake_max: 50 })).length);
   assert.ok(validateConfig(withSup({ bot_hung_restart_minutes: -1 })).length);
 });
+
+test('default: Pastor gets "RRR generated" by email only, never Telegram', () => {
+  const r = DEFAULT_CONFIG.routing.rrr_generated;
+  assert.deepEqual(r.pastor, { telegram: false, email: true });
+  assert.deepEqual(validateConfig(DEFAULT_CONFIG), []);
+  for (const k of ['david', 'divine', 'fabian']) assert.equal(r[k].telegram && r[k].email, true);
+});
