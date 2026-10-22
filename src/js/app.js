@@ -4652,7 +4652,7 @@ async function renderDashboard(){
         sub: `${fmtDate(r.date||r.createdAt)} · ${r.recordedBy||'Admin'}${r.receiptNo?' · Receipt #'+r.receiptNo:''}`,
         amt:r.amount, icon:c.icon||'💸', color:'#A32D2D', bg:'rgba(163,45,45,0.12)'};
     }),
-    ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
+    ...recentRems.map(r=>({type:'remittance',date:r.paidDate||r.date||r.createdAt,
       title: `HQ remittance – ${r.incomeType||'payment'}`,
       sub: `${fmtDate(r.date||r.createdAt)} · Bank transfer · Signatories: ${r.signatories||'Pastor + Elder'}`,
       amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'})),
@@ -13254,7 +13254,7 @@ async function renderBank(){
         if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
         return sum;
       }, 0)
-    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
+    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.paidDate||r.date||r.createdAt)).reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
     - allCashTx.filter(t => t.type==='withdrawal' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
     - pettyHistory.filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
         && (h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0))
@@ -13308,7 +13308,7 @@ async function renderBank(){
         txAmt: -(e.paymentMethod==='split'?(e.bankAmount||0):(e.amount||0)),
         date:e.date||e.createdAt
       })),
-    ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.date||r.createdAt})),
+    ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.paidDate||r.date||r.createdAt})),
     ...bankIncomeSlices.map(r=>({...r, txType:'income', txLabel:`${incomeBankLabel(r)} (bank transfer)`, txAmt: (r.bankTransferAmount||0), txNote: incomeBankNote(r)})),
     ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
