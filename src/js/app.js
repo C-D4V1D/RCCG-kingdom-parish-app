@@ -10029,9 +10029,15 @@ async function showRemittancePaymentModal(part){
 
     <!-- Receipt upload -->
     <div class="form-group" id="rem_receipt_group" ${defaultMethod==='cash'?'style="display:none"':''}>
-      <label class="form-label">Bank Receipt / Teller Scan (optional)</label>
-      <input type="file" id="rem_receipt" class="form-input" accept="image/*,.pdf" style="padding:4px" />
-      <div class="form-hint">Attach a scan or photo of the bank teller/transfer confirmation for audit purposes.</div>
+      <label class="form-label">Bank Receipt / Teller Scan *</label>
+      <input type="file" id="rem_receipt" class="form-input" accept="image/*,.pdf" style="padding:4px" onchange="App.onRemReceiptPicked(this)" />
+      <div class="form-hint">Required. The payment cannot be recorded without it. The date and reference are read from the receipt for you to check.</div>
+      <div id="rem_receipt_status" class="form-hint" style="margin-top:4px"></div>
+      <div class="form-group" style="margin:8px 0 0">
+        <label class="form-label">Amount Remita billed (₦) <span style="font-weight:400;color:var(--text3)">(only if the receipt shows more than the bill)</span></label>
+        <input type="number" id="rem_bill_amount" class="form-input" placeholder="e.g. the total payable on the RRR" min="0" step="0.01" oninput="App.onRemReceiptChange()" />
+      </div>
+      <div id="rem_receipt_plan" class="form-hint" style="margin-top:4px"></div>
     </div>
 
     <!-- Authorized By — checklist of pastor + signatories -->
@@ -10050,7 +10056,75 @@ async function showRemittancePaymentModal(part){
       <button class="btn btn-primary" onclick="App.submitRemittance(this)">✅ Record as Paid</button>
     </div>`);
   // Trigger method change to sync visibility
+  _remReceipt = null;
   onRemMethodChange();
+}
+
+// ── Remittance receipt rules (David, 22 Oct 2026) ──────────────────────────────────────────
+// A bank/Remita payment is recorded only with a receipt. The receipt's debit may be above the Remita bill (the bank's own
+// charge); that extra goes in as a bank-charge expense. Portal rounding (the bill differs from our calculated due by under
+// ₦1) is settled by recording the payment at the bill, so no stray kobo is left.
+const r2 = n => Math.round((Number(n) || 0) * 100 + (n >= 0 ? 1e-7 : -1e-7)) / 100;
+/**
+ * due = what the app calculates; receiptAmount = the debit on the receipt (0 = unreadable); billAmount = what Remita billed (0 = not given).
+ * -> { status:'nodata'|'match'|'charge'|'short'|'needBill', bill, charge, shareAt, note }
+ *   shareAt = amount to record the payment at when it differs from due only by portal rounding (< ₦1), else 0.
+ */
+function remReceiptPlan({ due, receiptAmount, billAmount }){
+  due = r2(due); const R = r2(receiptAmount); const B = r2(billAmount);
+  const bill = B > 0 ? B : due;
+  const shareAt = (B > 0 && Math.abs(B - due) >= 0.005 && Math.abs(B - due) < 1) ? B : 0;
+  if(!(R > 0)) return { status:'nodata', bill, charge:0, shareAt, note:'' };
+  const diff = r2(R - bill);
+  if(Math.abs(diff) < 0.005) return { status:'match', bill, charge:0, shareAt, note:'The receipt matches the bill.' };
+  if(diff < 0) return { status:'short', bill, charge:0, shareAt, note:`The receipt (${fmt(R)}) is less than the bill (${fmt(bill)}).` };
+  // Over the bill. Without the bill figure, a difference with odd kobo cannot be told apart from portal rounding.
+  if(B <= 0 && Math.abs(diff - Math.round(diff)) > 0.005 && diff >= 1) return { status:'needBill', bill, charge:0, shareAt, note:`Enter the amount Remita billed so the bank charge can be worked out (receipt ${fmt(R)}, our due ${fmt(due)}).` };
+  if(B <= 0 && diff < 1) return { status:'match', bill, charge:0, shareAt, note:'Within ₦1 of our due (portal rounding).' };
+  return { status:'charge', bill, charge:diff, shareAt, note:`Bank charge ${fmt(diff)} (receipt ${fmt(R)} minus bill ${fmt(bill)}).` };
+}
+let _remReceipt = null;   // what was read from the picked receipt: { amount, date, reference, rrr, dataUrl, name }
+function remFileToDataUrl(file){
+  return new Promise((resolve, reject)=>{ const fr = new FileReader(); fr.onload = ()=>resolve(String(fr.result||'')); fr.onerror = ()=>reject(fr.error); fr.readAsDataURL(file); });
+}
+/** The receipt was chosen: read it (images only) and fill the date, reference and receipt amount. Nothing typed is overwritten silently. */
+async function onRemReceiptPicked(input){
+  const file = input?.files?.[0]; const st = document.getElementById('rem_receipt_status');
+  _remReceipt = null;
+  if(st) st.textContent = '';
+  if(!file) return;
+  let dataUrl = '';
+  try { dataUrl = await remFileToDataUrl(file); } catch(e){ /* fall through, manual entry */ }
+  _remReceipt = { amount:0, date:'', reference:'', rrr:'', dataUrl: file.type.startsWith('image/') ? dataUrl : '', name:file.name };
+  if(!file.type.startsWith('image/')){ if(st) st.textContent = 'Receipt attached. A PDF cannot be read automatically, so enter the figures yourself.'; return; }
+  if(st) st.textContent = 'Reading the receipt…';
+  try {
+    const res = await authFetch('/api/remittance-receipt-read', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ imageBase64: dataUrl.split(',')[1] || '', mimeType: file.type || 'image/jpeg' }) });
+    const d = await res.json().catch(()=>({}));
+    const amount = r2(d.amount), date = /^\d{4}-\d{2}-\d{2}$/.test(d.date||'') ? d.date : '', reference = String(d.reference||'').trim(), rrr = String(d.rrr||'').replace(/\D/g,'');
+    Object.assign(_remReceipt, { amount, date, reference, rrr });
+    const bits = [];
+    const dEl = document.getElementById('rem_date'), rEl = document.getElementById('rem_ref');
+    if(date && dEl && date <= new Date().toISOString().split('T')[0]){ dEl.value = date; bits.push('date ' + date); }
+    if(reference && rEl && !rEl.value.trim()){ rEl.value = reference; bits.push('reference'); }
+    if(amount > 0) bits.push('debit ' + fmt(amount));
+    if(rrr) bits.push('RRR ' + rrr);
+    if(st) st.textContent = bits.length ? 'Read from the receipt: ' + bits.join(', ') + '. Please check them.' : 'The receipt could not be read. Enter the figures yourself.';
+    onRemReceiptChange();
+  } catch(e){ if(st) st.textContent = 'The receipt could not be read. Enter the figures yourself.'; }
+}
+/** Live note under the receipt: the bank charge that will be recorded, or what is wrong. */
+function onRemReceiptChange(){
+  const note = document.getElementById('rem_receipt_plan'); if(!note) return;
+  if(!_remReceipt || !(_remReceipt.amount > 0)){ note.textContent = ''; return; }
+  const due = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+  const bill = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+  const part = document.getElementById('rem_part')?.value || '';
+  const dueRef = part === 'a' ? due : (parseFloat(document.getElementById('rem_amount')?.value) || due);
+  const plan = remReceiptPlan({ due: dueRef, receiptAmount:_remReceipt.amount, billAmount:bill });
+  note.textContent = plan.note;
+  note.style.color = (plan.status === 'short' || plan.status === 'needBill') ? 'var(--danger)' : 'var(--text2)';
 }
 
 function onRemMethodChange(){
@@ -10198,7 +10272,14 @@ async function submitRemittance(btn=null){
         showAlert('Please enter the adjusted parish share — or close the ✏️ Adjust box to use the calculated figure.','danger'); return;
       }
     }
-    const parishShare = remEffectiveParishShare(calculatedDue);
+    let parishShare = remEffectiveParishShare(calculatedDue);
+    // Portal rounding: when Remita billed within ₦1 of our calculated due, record the payment at the bill (no stray kobo).
+    const _billIn = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+    const _roundPlan = remReceiptPlan({ due: parishShare, receiptAmount: 0, billAmount: _billIn });
+    if(!_remShareAdjustOpen && _roundPlan.shareAt > 0){
+      shareAdjustNote = `Recorded at the Remita bill ${fmt(_roundPlan.shareAt)} (calculated: ${fmt(calculatedDue)}; portal rounding)`;
+      parishShare = _roundPlan.shareAt;
+    }
     const shareAdjusted = _remShareAdjustOpen && Math.abs(parishShare - calculatedDue) > 0.5;
     const adjustReason = (document.getElementById('rem_adjust_reason')?.value||'').trim();
     if(shareAdjusted && !adjustReason){ showAlert('Please give the reason for adjusting the parish share.','danger'); return; }
@@ -10241,6 +10322,15 @@ async function submitRemittance(btn=null){
   // The remittances table has no receipt image column; the filename serves as the audit reference.
   const receiptFile=document.getElementById('rem_receipt')?.files?.[0];
   const receiptFileName=receiptFile?.name||'';
+  // A bank / Remita payment is recorded only with its receipt (David, 22 Oct 2026).
+  if((method==='bank_transfer'||isSplit) && !receiptFile){ showAlert('Upload the bank receipt first. The payment cannot be recorded without it.','danger'); return; }
+  const _rc = (receiptFile && _remReceipt && _remReceipt.name===receiptFile.name) ? _remReceipt : null;
+  const _billTyped = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+  const _areaIn = part==='a' ? (parseFloat(document.getElementById('rem_area_total')?.value)||0) : 0;
+  const _dueForPlan = _areaIn>0 ? _areaIn : amount;
+  const receiptPlan = remReceiptPlan({ due:_dueForPlan, receiptAmount:_rc?.amount||0, billAmount:_billTyped });
+  if(receiptPlan.status==='short'){ showAlert(receiptPlan.note + ' Check the amounts before recording.','danger'); return; }
+  if(receiptPlan.status==='needBill'){ showAlert(receiptPlan.note,'danger'); return; }
 
   const fromDate=state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
@@ -10321,12 +10411,29 @@ async function submitRemittance(btn=null){
       otherParishesAmount,
       satelliteFundRef,
     });
+    // The bank's own charge shown on the receipt (receipt debit minus the Remita bill) goes in as a bank-charge expense.
+    let chargeNote = '';
+    if(receiptPlan.status==='charge' && receiptPlan.charge>0){
+      try {
+        await DB.addExpense({
+          date, category:'bank', subCategory:'Money transfer charges',
+          description:`Bank charge on Remita payment${reference?' ('+reference+')':''}`, amount:receiptPlan.charge,
+          paymentMethod:'bank_transfer', status:'approved', receiptNo:reference,
+          receiptImage:_rc?.dataUrl||null, receiptFileName:_rc?.name||receiptFileName||null,
+          recordedBy: state.user?.name, createdAt:new Date().toISOString()
+        });
+        DB.addAudit('bank_charge',`Bank charge on remittance payment: ${fmt(receiptPlan.charge)} (receipt ${fmt(_rc.amount)} minus bill ${fmt(receiptPlan.bill)})`,state.user?.name);
+        chargeNote = ` Bank charge of ${fmt(receiptPlan.charge)} recorded as an expense.`;
+      } catch(e){
+        chargeNote = ` The payment is recorded, but the bank charge of ${fmt(receiptPlan.charge)} could NOT be saved. Please add it under Bank Charges.`;
+      }
+    }
     DB.addAudit('remittance_submitted',
       `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${shareAdjustNote?' — '+shareAdjustNote:''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
       state.user?.name);
     DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
-    showAlert(`Remittance of ${fmt(amount)} recorded and marked as paid!${satelliteFundRef?` 🛰️ ${fmt(otherParishesAmount)} satellite share drawn from the pool.`:''}`,'success');
+    showAlert(`Remittance of ${fmt(amount)} recorded and marked as paid!${chargeNote}${satelliteFundRef?` 🛰️ ${fmt(otherParishesAmount)} satellite share drawn from the pool.`:''}`,'success');
     state.remFromDate=null; state.remToDate=null;
     renderRemittances();
   } catch(err) {
@@ -22332,7 +22439,7 @@ return {
   attendancePeriodReport, attConfirmSubmitFurther, attSubmitFurther, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,

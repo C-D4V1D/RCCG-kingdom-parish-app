@@ -2592,6 +2592,9 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'DELETE' &&  param) return await deleteRemittance(DB, param, body?.force === true);
     }
 
+    // Reads the date, debit amount, reference and RRR off a payment receipt photo, to pre-fill the remittance payment form.
+    if (route === 'remittance-receipt-read' && method === 'POST' && !param) return await ocrReceipt(env, body, DB);
+
     // ── /api/satellite-funds ────────────────────────────────────
     // Pass-through fund received from / remitted on behalf of satellite parishes.
     // Excluded from income/expense totals by design — see satellite_funds table.
@@ -11410,7 +11413,8 @@ async function ocrReceipt(env, data, DB) {
   "date": "YYYY-MM-DD or null — date on receipt",
   "amount": "number or null — total amount in major currency units (e.g. 12500.00 for ₦12,500)",
   "currency": "NGN|USD|GBP|EUR or null",
-  "reference": "string or null — receipt or invoice number",
+  "reference": "string or null — receipt, transaction or invoice number",
+  "rrr": "string or null — a 12-digit Remita RRR / beneficiary id if shown, digits only",
   "items_summary": "string or null — one-line description of goods/services purchased"
 }`;
       const resp = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -11440,6 +11444,7 @@ async function ocrReceipt(env, data, DB) {
             amount: parsed.amount ?? null,
             currency: parsed.currency ?? null,
             reference: parsed.reference ?? null,
+            rrr: parsed.rrr ?? null,
             itemsSummary: parsed.items_summary ?? null,
             method: 'openai_vision',
           });
