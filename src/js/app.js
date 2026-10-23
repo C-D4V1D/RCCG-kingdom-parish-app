@@ -20757,6 +20757,22 @@ const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
   enabled: true, check_times: ['10:00', '14:00', '18:00'], warn_days: 2, complete_message: true,
   items: { source_docs: true, app_record: true, csr: false },
 };
+// Daily "what is still open" reminder (mirrors workers/clerk-watchdog/config.js; off until switched on here).
+// Until parishes are chosen: exactly Kingdom, Sanctuary of Favour, Good Shepherd, God Is Able. New parishes are opt-in.
+const AUTOMATION_DAILY_REMINDER_PARISHES = ['602757','659840','597445','761516'];
+const AUTOMATION_DAILY_REMINDER_DEFAULTS = {
+  enabled: false, group: { enabled: true, time: '09:00' }, private: { enabled: true, time: '10:00' },
+  owners: { source_docs_finance: ['divine'], source_docs_admin: ['divine'], rrr_unpaid: ['fabian'], rrr_not_generated: ['divine'], attendance: ['divine'], app_record: ['divine'] },
+  wa_tags: {},
+};
+const AUTOMATION_DAILY_REMINDER_TASKS = [
+  { key:'rrr_not_generated', label:'RRR not generated yet' },
+  { key:'rrr_unpaid', label:'RRR not paid yet' },
+  { key:'attendance', label:'Attendance not filed' },
+  { key:'source_docs_finance', label:'Source documents, Finance' },
+  { key:'source_docs_admin', label:'Source documents, Admin' },
+  { key:'app_record', label:'Payment not recorded in the app' },
+];
 // Titles used in messages ("Called (Title)") and who pays the RRR, for people saved before these existed.
 const AUTOMATION_PEOPLE_DEFAULTS = {
   david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true, month_all_parishes: true },
@@ -21374,7 +21390,7 @@ function renderAutomationsRemittanceSection(config, health){
         <div class="at-save-bar">
           <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
           <span class="at-save-status" aria-live="polite"></span>
-          <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
+          <span class="at-save-hint">Changes save automatically about 2 seconds after you edit. Save changes saves right away. The box picks them up within 5 minutes.</span>
         </div>
       </div>
     </details>`;
@@ -21542,6 +21558,19 @@ function renderAutomationsSettings(config, isDefault, health){
   const mc = { ...AUTOMATION_MONTH_CLOSE_DEFAULTS, ...(a.month_close || {}), items: { ...AUTOMATION_MONTH_CLOSE_DEFAULTS.items, ...((a.month_close || {}).items || {}) } };
   const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
+  const dr = { ...AUTOMATION_DAILY_REMINDER_DEFAULTS, ...(a.daily_reminder || {}),
+    group: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.group, ...((a.daily_reminder || {}).group || {}) },
+    private: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.private, ...((a.daily_reminder || {}).private || {}) },
+    owners: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.owners, ...((a.daily_reminder || {}).owners || {}) },
+    wa_tags: { ...((a.daily_reminder || {}).wa_tags || {}) } };
+  const drParishes = [{ code: KINGDOM_PARISH_CODE, name: 'Kingdom Parish' }, ...parishes.filter(p=>automationsIsSatCode(p.code)).map(p=>({ code: String(p.code), name: p.name || p.code }))];
+  const drOwnerRows = AUTOMATION_DAILY_REMINDER_TASKS.map(t=>{
+    const cur = (dr.owners[t.key] || [])[0] || '';
+    const opts = ['<option value="">Nobody</option>'].concat(kingdomPeople.map(p=>`<option value="${esc(p.key)}" ${cur===p.key?'selected':''}>${esc(p.name || p.key)}</option>`)).join('');
+    return `<div class="form-group"><label class="form-label">${esc(t.label)}</label><select class="form-select at-field" data-path="automations.daily_reminder.owners.${t.key}" data-kind="onelist" aria-label="Owner of: ${esc(t.label)}">${opts}</select></div>`;
+  }).join('');
+  const drTagRows = kingdomPeople.map(p=>`<div class="form-group"><label class="form-label">${esc(p.name || p.key)}</label><input class="form-input at-field" inputmode="numeric" data-path="automations.daily_reminder.wa_tags.${esc(p.key)}" data-kind="digits" value="${esc(dr.wa_tags[p.key] || '')}" placeholder="e.g. 2348012345678"></div>`).join('');
+  const drParishRows = drParishes.map(p=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="automations.daily_reminder.parishes" data-kind="code" data-code="${esc(p.code)}" ${(Array.isArray(dr.parishes) ? dr.parishes.includes(p.code) : AUTOMATION_DAILY_REMINDER_PARISHES.includes(p.code))?'checked':''} > ${esc(p.name)}${p.code===KINGDOM_PARISH_CODE?' (group + private)':' (private only)'}</label>`).join('');
 
   const routingOf = (p)=>(mt)=>(config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key];
   const peopleRows = kingdomPeople.map((p, i)=>{
@@ -21575,7 +21604,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const saveBar = `<div class="at-save-bar">
       <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
       <span class="at-save-status" aria-live="polite"></span>
-      <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
+      <span class="at-save-hint">Changes save automatically about 2 seconds after you edit. Save changes saves right away. The box picks them up within 5 minutes.</span>
     </div>`;
   const dayChips = (path, selected)=>`<div class="at-day-chips">${AUTOMATION_DAYS.map(d=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="${path}" data-kind="day" data-day="${d.key}" ${((selected||[]).includes(d.key))?'checked':''}> ${d.label}</label>`).join('')}</div>`;
 
@@ -21648,6 +21677,29 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Attendance</summary>
       <div class="at-details-body">
         <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly attendance report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. The Monday reminder to ${esc(automationsHelpText('{tg:weekly_attendance_reminder}', config))} is under Sunday records reminders.</p>
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Daily open-tasks reminder</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin:0 0 10px">Every morning, for the month still being closed, this lists only what is still open (RRR not paid, attendance, source documents, payment not recorded). The group post quotes the latest checklist and tags the person responsible. Each person also gets a private Telegram message with only their own tasks. Nothing is sent when nothing is open. Times are the box's own clock (UK time).</p>
+        ${automationsBoolField('automations.daily_reminder.enabled', dr.enabled, 'Send the daily reminder', 'Off until you switch it on.')}
+        <div class="form-row" style="margin-top:10px">
+          ${automationsBoolField('automations.daily_reminder.group.enabled', dr.group.enabled, 'WhatsApp group post', 'Quotes the latest checklist and tags the owners. Not sent if a tag is missing.')}
+          ${automationsTimeField('automations.daily_reminder.group.time', dr.group.time, 'Group post after (time)')}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsBoolField('automations.daily_reminder.private.enabled', dr.private.enabled, 'Private Telegram message', 'One per person, only their own tasks.')}
+          ${automationsTimeField('automations.daily_reminder.private.time', dr.private.time, 'Private message after (time)')}
+        </div>
+        <div class="form-group" style="margin-top:10px"><label class="form-label">Parishes</label><div class="at-day-chips">${drParishRows}</div><div class="at-subtitle">The WhatsApp group post is for Kingdom Parish only. Other parishes get private Telegram messages to the task owners above.</div></div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Who is responsible for each task</div>
+        <div class="form-row">${drOwnerRows}</div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">WhatsApp number for the tag (digits, country code first)</div>
+        <div class="form-row">${drTagRows}</div>
+        <div class="at-subtitle">Without a number for someone who owns an open task, the group post is not sent and the box reports why.</div>
+        ${saveBar}
       </div>
     </details>
 
@@ -22273,6 +22325,17 @@ function collectAutomationsConfig(){
     else if(kind === 'num'){ obj[leaf] = el.value === '' ? 0 : Number(el.value); }
     else if(kind === 'numlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number).filter(n=>!isNaN(n)); }
     else if(kind === 'strlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>/^([01]?\d|2[0-3]):[0-5]\d$/.test(s)).map(s=>s.padStart(5,'0')); }
+    else if(kind === 'onelist'){ obj[leaf] = el.value ? [el.value] : []; }
+    else if(kind === 'digits'){ obj[leaf] = String(el.value||'').replace(/[^0-9]/g,''); }
+    else if(kind === 'code'){
+      if(!Array.isArray(obj[leaf])) obj[leaf] = [];
+      const code = el.dataset.code;
+      if(!el.disabled){
+        const has = obj[leaf].includes(code);
+        if(el.checked && !has) obj[leaf].push(code);
+        if(!el.checked && has) obj[leaf] = obj[leaf].filter(d=>d!==code);
+      }
+    }
     else if(kind === 'day'){
       if(!Array.isArray(obj[leaf])) obj[leaf] = [];
       const day = el.dataset.day;
