@@ -20834,7 +20834,7 @@ function automationsEffectiveConfig(config){
   return { ...config, routing: { ...config.routing, weekly_attendance_reminder: fixed } };
 }
 // What the box reads for a satellite parish's people (satinfo / satmonthend / satclose): only these message types.
-const AUTOMATION_PERSON_TICKS_NOTE = `<p class="at-note" style="margin:-4px 0 10px"><b>Admin (full status):</b> sees the admin-only Telegram bot commands (Refresh attendance, System) and is named as the admin in /month; the first admin with a Telegram chat ID also chooses the parish when uploading with the bot. <b>Generate RRR / Refresh buttons:</b> may get the action buttons in the check emails; the box never emails buttons to anyone else.</p>`;
+const AUTOMATION_PERSON_TICKS_NOTE = `<p class="at-note" style="margin:-4px 0 10px"><b>Admin (full status):</b> sees the admin-only Telegram bot commands (Refresh attendance, System) and is named as the admin in /month; when uploading with the bot, David chooses the parish; a person with parishes ticked above chooses among those (one ticked parish goes straight to preview); a person with no list saved uploads to their own parish (Kingdom Parish if none is set), and an emptied saved list switches their uploads off. <b>Generate RRR / Refresh buttons:</b> may get the action buttons in the check emails; the box never emails buttons to anyone else.</p>`;
 const AUTOMATION_SAT_USED_TYPES = ['remittance_check', 'rrr_generated', 'month_close', 'collection_reminder'];
 
 // Satellite parishes (every parish except Kingdom's own). What a parish saved before these settings existed acts like,
