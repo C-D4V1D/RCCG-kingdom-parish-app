@@ -21356,6 +21356,27 @@ function automationsParishCardHtml(p, i, ctx){
     </div>`;
 }
 
+// divine-parish-scope-20261025: "Can upload source docs for" checkboxes for a Kingdom person card.
+// Kingdom's own box always renders FIRST (stored config's name when present, constant otherwise), satellites after,
+// deduped by code - a Save can never silently drop Kingdom from a saved list. A saved code whose parish no longer has a
+// box still renders, ticked and labelled "Unknown parish", so it is preserved unless deliberately unticked (never
+// resurrected, never silently dropped). Applies only when "Can use the Telegram bot" (can_upload) is ticked.
+function automationsParishScopeBoxes(p, parishes){
+  const saved = (Array.isArray(p.parish_scope) ? p.parish_scope : []).map(String);
+  const list = (parishes || []).filter(pc=>pc && pc.code);
+  if(!list.some(pc=>String(pc.code) === KINGDOM_PARISH_CODE)) list.unshift({ code: KINGDOM_PARISH_CODE, name: 'Kingdom Parish' });
+  const deduped = list.filter((pc, idx, arr)=>arr.findIndex(x=>String(x.code) === String(pc.code)) === idx);
+  deduped.sort((a, b)=>(String(a.code) === KINGDOM_PARISH_CODE ? 0 : 1) - (String(b.code) === KINGDOM_PARISH_CODE ? 0 : 1));
+  const boxes = deduped.map(pc=>`<label class="at-inline-check"><input type="checkbox" class="at-p-pscp" value="${esc(String(pc.code))}" ${saved.includes(String(pc.code)) ? 'checked' : ''}> ${esc(pc.name || pc.code)}</label>`);
+  const unknown = saved.filter(sc=>sc && !deduped.some(pc=>String(pc.code) === sc));
+  boxes.push(...unknown.map(sc=>`<label class="at-inline-check"><input type="checkbox" class="at-p-pscp" value="${esc(sc)}" checked> Unknown parish (${esc(sc)})</label>`));
+  return `<div class="form-row" style="margin:0 0 10px">
+    <span class="form-label" style="margin-right:8px">Can upload source docs for:</span>
+    ${boxes.join('')}
+    <span class="at-note" style="display:block;margin-top:2px">Applies only when "Can use the Telegram bot" is ticked. No ticks and no saved list: previous single-parish behaviour. Unticking every parish of a saved list: uploads switched off.</span>
+  </div>`;
+}
+
 function renderAutomationsSettings(config, isDefault, health){
   config = automationsEffectiveConfig(config);
   const parishes = config.parishes || [];
@@ -21387,6 +21408,7 @@ function renderAutomationsSettings(config, isDefault, health){
         <label class="at-inline-check"><input type="checkbox" class="at-p-admin" ${p.full_status?'checked':''}> Admin (full status)</label>
         <label class="at-inline-check"><input type="checkbox" class="at-p-buttons" ${p.buttons?'checked':''}> Generate RRR / Refresh buttons</label>
       </div>
+      ${automationsParishScopeBoxes(p, parishes)}
       ${AUTOMATION_PERSON_TICKS_NOTE}
       ${automationsRoutingTableHtml(routingOf(p), !!p.telegram_chat_id, true, null, config)}
       <button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="App.deleteAutomationPerson(this)">Delete person</button>
@@ -21992,6 +22014,15 @@ function collectAutomationsConfig(){
       // Telegram /month: an "Other parishes" button (Kingdom Parish + every parish in Parishes). Parish people don't get it.
       month_all_parishes: mallBox ? mallBox.checked : !!automationsPersonField(existing || { key }, 'month_all_parishes'),
     };
+    // divine-parish-scope-20261025: "Can upload source docs for" checkboxes (Kingdom person cards). Ticked codes become
+    // person.parish_scope. Unticking every box of a previously saved list writes an explicit [] (uploads OFF - never a hidden
+    // Kingdom default). A person who never had a list and ticks nothing keeps no key at all (previous single-parish behaviour).
+    const pscopeBoxes = [...row.querySelectorAll('.at-p-pscp')];
+    if (pscopeBoxes.length) {
+      const psc = [...new Set(pscopeBoxes.filter(bx=>bx.checked).map(bx=>bx.value))];
+      if (psc.length) person.parish_scope = psc;
+      else if (existing && Object.prototype.hasOwnProperty.call(existing, 'parish_scope')) person.parish_scope = [];
+    }
     // Parish people: which parish, who approves, and the login / Telegram invite made on this page.
     if(parishCode) person.parish = parishCode;
     const approves = row.querySelector('.at-p-approves');
