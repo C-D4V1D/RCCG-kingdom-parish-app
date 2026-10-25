@@ -4652,7 +4652,7 @@ async function renderDashboard(){
         sub: `${fmtDate(r.date||r.createdAt)} · ${r.recordedBy||'Admin'}${r.receiptNo?' · Receipt #'+r.receiptNo:''}`,
         amt:r.amount, icon:c.icon||'💸', color:'#A32D2D', bg:'rgba(163,45,45,0.12)'};
     }),
-    ...recentRems.map(r=>({type:'remittance',date:r.date||r.createdAt,
+    ...recentRems.map(r=>({type:'remittance',date:r.paidDate||r.date||r.createdAt,
       title: `HQ remittance – ${r.incomeType||'payment'}`,
       sub: `${fmtDate(r.date||r.createdAt)} · Bank transfer · Signatories: ${r.signatories||'Pastor + Elder'}`,
       amt:r.amount, icon:'✓', color:'#534AB7', bg:'rgba(83,74,183,0.12)'})),
@@ -9039,6 +9039,10 @@ async function renderRemittances(){
   const mummyQuotaLines=quotaLines.filter(q=>isMummyQuotaLabel(q.label));
   const partALines=[...incomeLines,...provinceLines,...levyLines,...rccgQuotaLines];
   const partBLines=[...tgLines,...mummyQuotaLines];
+  // The portal's RRR total wins for Part A (it rounds each beneficiary to the kobo). Only a gap of ₦1 or less is
+  // absorbed, as one visible line; a bigger gap means the lines really differ and is left alone.
+  const _rrrAdj = rrrRoundingLine(partALines.reduce((s,l)=>s+l.amount,0), settings?.rrrTotals?.[toDate]);
+  if(_rrrAdj) partALines.push(_rrrAdj);
   const partATotal=partALines.reduce((s,l)=>s+l.amount,0);
   const partBTotal=partBLines.reduce((s,l)=>s+l.amount,0);
   const allLines=[...partALines,...partBLines];
@@ -9287,7 +9291,7 @@ async function renderRemittances(){
 
         <div class="card" style="margin-bottom:12px">
           <div class="card-header"><span class="card-title">Payment History</span></div>
-          ${allPaidRems.length?allPaidRems.slice(0,10).map(r=>{
+          ${allPaidRems.length?remHistoryPage(allPaidRems).rows.map(r=>{
             const isWrittenOff=r.status==='written_off';
             return `
             <div class="feed-item">
@@ -9300,6 +9304,7 @@ async function renderRemittances(){
               <div class="feed-right" style="color:${isWrittenOff?'var(--amber)':'var(--success)'}">${fmt(r.amount)}</div>
             </div>`;
           }).join(''):'<div class="empty-table">No remittance payments recorded yet.</div>'}
+          ${remHistoryPager(allPaidRems)}
         </div>
 
         <div class="card">
@@ -10029,9 +10034,15 @@ async function showRemittancePaymentModal(part){
 
     <!-- Receipt upload -->
     <div class="form-group" id="rem_receipt_group" ${defaultMethod==='cash'?'style="display:none"':''}>
-      <label class="form-label">Bank Receipt / Teller Scan (optional)</label>
-      <input type="file" id="rem_receipt" class="form-input" accept="image/*,.pdf" style="padding:4px" />
-      <div class="form-hint">Attach a scan or photo of the bank teller/transfer confirmation for audit purposes.</div>
+      <label class="form-label">Bank Receipt / Teller Scan *</label>
+      <input type="file" id="rem_receipt" class="form-input" accept="image/*,.pdf" style="padding:4px" onchange="App.onRemReceiptPicked(this)" />
+      <div class="form-hint">Required. The payment cannot be recorded without it. The date and reference are read from the receipt for you to check.</div>
+      <div id="rem_receipt_status" class="form-hint" style="margin-top:4px"></div>
+      <div class="form-group" style="margin:8px 0 0">
+        <label class="form-label">Amount Remita billed (₦) <span style="font-weight:400;color:var(--text3)">(only if the receipt shows more than the bill)</span></label>
+        <input type="number" id="rem_bill_amount" class="form-input" placeholder="e.g. the total payable on the RRR" min="0" step="0.01" oninput="App.onRemReceiptChange()" />
+      </div>
+      <div id="rem_receipt_plan" class="form-hint" style="margin-top:4px"></div>
     </div>
 
     <!-- Authorized By — checklist of pastor + signatories -->
@@ -10050,7 +10061,75 @@ async function showRemittancePaymentModal(part){
       <button class="btn btn-primary" onclick="App.submitRemittance(this)">✅ Record as Paid</button>
     </div>`);
   // Trigger method change to sync visibility
+  _remReceipt = null;
   onRemMethodChange();
+}
+
+// ── Remittance receipt rules (David, 22 Oct 2026) ──────────────────────────────────────────
+// A bank/Remita payment is recorded only with a receipt. The receipt's debit may be above the Remita bill (the bank's own
+// charge); that extra goes in as a bank-charge expense. Portal rounding (the bill differs from our calculated due by under
+// ₦1) is settled by recording the payment at the bill, so no stray kobo is left.
+const r2 = n => Math.round((Number(n) || 0) * 100 + (n >= 0 ? 1e-7 : -1e-7)) / 100;
+/**
+ * due = what the app calculates; receiptAmount = the debit on the receipt (0 = unreadable); billAmount = what Remita billed (0 = not given).
+ * -> { status:'nodata'|'match'|'charge'|'short'|'needBill', bill, charge, shareAt, note }
+ *   shareAt = amount to record the payment at when it differs from due only by portal rounding (< ₦1), else 0.
+ */
+function remReceiptPlan({ due, receiptAmount, billAmount }){
+  due = r2(due); const R = r2(receiptAmount); const B = r2(billAmount);
+  const bill = B > 0 ? B : due;
+  const shareAt = (B > 0 && Math.abs(B - due) >= 0.005 && Math.abs(B - due) < 1) ? B : 0;
+  if(!(R > 0)) return { status:'nodata', bill, charge:0, shareAt, note:'' };
+  const diff = r2(R - bill);
+  if(Math.abs(diff) < 0.005) return { status:'match', bill, charge:0, shareAt, note:'The receipt matches the bill.' };
+  if(diff < 0) return { status:'short', bill, charge:0, shareAt, note:`The receipt (${fmt(R)}) is less than the bill (${fmt(bill)}).` };
+  // Over the bill. Without the bill figure, a difference with odd kobo cannot be told apart from portal rounding.
+  if(B <= 0 && Math.abs(diff - Math.round(diff)) > 0.005 && diff >= 1) return { status:'needBill', bill, charge:0, shareAt, note:`Enter the amount Remita billed so the bank charge can be worked out (receipt ${fmt(R)}, our due ${fmt(due)}).` };
+  if(B <= 0 && diff < 1) return { status:'match', bill, charge:0, shareAt, note:'Within ₦1 of our due (portal rounding).' };
+  return { status:'charge', bill, charge:diff, shareAt, note:`Bank charge ${fmt(diff)} (receipt ${fmt(R)} minus bill ${fmt(bill)}).` };
+}
+let _remReceipt = null;   // what was read from the picked receipt: { amount, date, reference, rrr, dataUrl, name }
+function remFileToDataUrl(file){
+  return new Promise((resolve, reject)=>{ const fr = new FileReader(); fr.onload = ()=>resolve(String(fr.result||'')); fr.onerror = ()=>reject(fr.error); fr.readAsDataURL(file); });
+}
+/** The receipt was chosen: read it (images only) and fill the date, reference and receipt amount. Nothing typed is overwritten silently. */
+async function onRemReceiptPicked(input){
+  const file = input?.files?.[0]; const st = document.getElementById('rem_receipt_status');
+  _remReceipt = null;
+  if(st) st.textContent = '';
+  if(!file) return;
+  let dataUrl = '';
+  try { dataUrl = await remFileToDataUrl(file); } catch(e){ /* fall through, manual entry */ }
+  _remReceipt = { amount:0, date:'', reference:'', rrr:'', dataUrl: file.type.startsWith('image/') ? dataUrl : '', name:file.name };
+  if(!file.type.startsWith('image/')){ if(st) st.textContent = 'Receipt attached. A PDF cannot be read automatically, so enter the figures yourself.'; return; }
+  if(st) st.textContent = 'Reading the receipt…';
+  try {
+    const res = await authFetch('/api/remittance-receipt-read', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ imageBase64: dataUrl.split(',')[1] || '', mimeType: file.type || 'image/jpeg' }) });
+    const d = await res.json().catch(()=>({}));
+    const amount = r2(d.amount), date = /^\d{4}-\d{2}-\d{2}$/.test(d.date||'') ? d.date : '', reference = String(d.reference||'').trim(), rrr = String(d.rrr||'').replace(/\D/g,'');
+    Object.assign(_remReceipt, { amount, date, reference, rrr });
+    const bits = [];
+    const dEl = document.getElementById('rem_date'), rEl = document.getElementById('rem_ref');
+    if(date && dEl && date <= new Date().toISOString().split('T')[0]){ dEl.value = date; bits.push('date ' + date); }
+    if(reference && rEl && !rEl.value.trim()){ rEl.value = reference; bits.push('reference'); }
+    if(amount > 0) bits.push('debit ' + fmt(amount));
+    if(rrr) bits.push('RRR ' + rrr);
+    if(st) st.textContent = bits.length ? 'Read from the receipt: ' + bits.join(', ') + '. Please check them.' : 'The receipt could not be read. Enter the figures yourself.';
+    onRemReceiptChange();
+  } catch(e){ if(st) st.textContent = 'The receipt could not be read. Enter the figures yourself.'; }
+}
+/** Live note under the receipt: the bank charge that will be recorded, or what is wrong. */
+function onRemReceiptChange(){
+  const note = document.getElementById('rem_receipt_plan'); if(!note) return;
+  if(!_remReceipt || !(_remReceipt.amount > 0)){ note.textContent = ''; return; }
+  const due = parseFloat(document.getElementById('rem_total_due')?.value) || 0;
+  const bill = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+  const part = document.getElementById('rem_part')?.value || '';
+  const dueRef = part === 'a' ? due : (parseFloat(document.getElementById('rem_amount')?.value) || due);
+  const plan = remReceiptPlan({ due: dueRef, receiptAmount:_remReceipt.amount, billAmount:bill });
+  note.textContent = plan.note;
+  note.style.color = (plan.status === 'short' || plan.status === 'needBill') ? 'var(--danger)' : 'var(--text2)';
 }
 
 function onRemMethodChange(){
@@ -10198,7 +10277,14 @@ async function submitRemittance(btn=null){
         showAlert('Please enter the adjusted parish share — or close the ✏️ Adjust box to use the calculated figure.','danger'); return;
       }
     }
-    const parishShare = remEffectiveParishShare(calculatedDue);
+    let parishShare = remEffectiveParishShare(calculatedDue);
+    // Portal rounding: when Remita billed within ₦1 of our calculated due, record the payment at the bill (no stray kobo).
+    const _billIn = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+    const _roundPlan = remReceiptPlan({ due: parishShare, receiptAmount: 0, billAmount: _billIn });
+    if(!_remShareAdjustOpen && _roundPlan.shareAt > 0){
+      shareAdjustNote = `Recorded at the Remita bill ${fmt(_roundPlan.shareAt)} (calculated: ${fmt(calculatedDue)}; portal rounding)`;
+      parishShare = _roundPlan.shareAt;
+    }
     const shareAdjusted = _remShareAdjustOpen && Math.abs(parishShare - calculatedDue) > 0.5;
     const adjustReason = (document.getElementById('rem_adjust_reason')?.value||'').trim();
     if(shareAdjusted && !adjustReason){ showAlert('Please give the reason for adjusting the parish share.','danger'); return; }
@@ -10241,6 +10327,15 @@ async function submitRemittance(btn=null){
   // The remittances table has no receipt image column; the filename serves as the audit reference.
   const receiptFile=document.getElementById('rem_receipt')?.files?.[0];
   const receiptFileName=receiptFile?.name||'';
+  // A bank / Remita payment is recorded only with its receipt (David, 22 Oct 2026).
+  if((method==='bank_transfer'||isSplit) && !receiptFile){ showAlert('Upload the bank receipt first. The payment cannot be recorded without it.','danger'); return; }
+  const _rc = (receiptFile && _remReceipt && _remReceipt.name===receiptFile.name) ? _remReceipt : null;
+  const _billTyped = parseFloat(document.getElementById('rem_bill_amount')?.value) || 0;
+  const _areaIn = part==='a' ? (parseFloat(document.getElementById('rem_area_total')?.value)||0) : 0;
+  const _dueForPlan = _areaIn>0 ? _areaIn : amount;
+  const receiptPlan = remReceiptPlan({ due:_dueForPlan, receiptAmount:_rc?.amount||0, billAmount:_billTyped });
+  if(receiptPlan.status==='short'){ showAlert(receiptPlan.note + ' Check the amounts before recording.','danger'); return; }
+  if(receiptPlan.status==='needBill'){ showAlert(receiptPlan.note,'danger'); return; }
 
   const fromDate=state.remFromDate||ymdLocal(new Date(state.year,state.month,1));
   const toDate=state.remToDate||new Date().toISOString().split('T')[0];
@@ -10321,12 +10416,29 @@ async function submitRemittance(btn=null){
       otherParishesAmount,
       satelliteFundRef,
     });
+    // The bank's own charge shown on the receipt (receipt debit minus the Remita bill) goes in as a bank-charge expense.
+    let chargeNote = '';
+    if(receiptPlan.status==='charge' && receiptPlan.charge>0){
+      try {
+        await DB.addExpense({
+          date, category:'bank', subCategory:'Money transfer charges',
+          description:`Bank charge on Remita payment${reference?' ('+reference+')':''}`, amount:receiptPlan.charge,
+          paymentMethod:'bank_transfer', status:'approved', receiptNo:reference,
+          receiptImage:_rc?.dataUrl||null, receiptFileName:_rc?.name||receiptFileName||null,
+          recordedBy: state.user?.name, createdAt:new Date().toISOString()
+        });
+        DB.addAudit('bank_charge',`Bank charge on remittance payment: ${fmt(receiptPlan.charge)} (receipt ${fmt(_rc.amount)} minus bill ${fmt(receiptPlan.bill)})`,state.user?.name);
+        chargeNote = ` Bank charge of ${fmt(receiptPlan.charge)} recorded as an expense.`;
+      } catch(e){
+        chargeNote = ` The payment is recorded, but the bank charge of ${fmt(receiptPlan.charge)} could NOT be saved. Please add it under Bank Charges.`;
+      }
+    }
     DB.addAudit('remittance_submitted',
       `Remittance paid: ${fmt(amount)} (${methodLabel}) — Period: ${fromDate} to ${toDate}${reference?' — Ref: '+reference:''}${areaTotalPaid>0?' — Area total: '+fmt(areaTotalPaid)+' (other parishes: '+fmt(otherParishesAmount)+')':''}${shareAdjustNote?' — '+shareAdjustNote:''}${satelliteFundRef?' — satellite share auto-linked to the Satellite/Zone Pool':''}`,
       state.user?.name);
     DB.addNotification('Remittance Recorded',`RCCG remittance of ${fmt(amount)} paid (${methodLabel}) for period ${fmtDate(fromDate)} – ${fmtDate(toDate)}.`,'success');
     closeModal();
-    showAlert(`Remittance of ${fmt(amount)} recorded and marked as paid!${satelliteFundRef?` 🛰️ ${fmt(otherParishesAmount)} satellite share drawn from the pool.`:''}`,'success');
+    showAlert(`Remittance of ${fmt(amount)} recorded and marked as paid!${chargeNote}${satelliteFundRef?` 🛰️ ${fmt(otherParishesAmount)} satellite share drawn from the pool.`:''}`,'success');
     state.remFromDate=null; state.remToDate=null;
     renderRemittances();
   } catch(err) {
@@ -10354,6 +10466,34 @@ async function submitRemittance(btn=null){
     showAlert(`Failed to submit remittance: ${err.message||'Unknown error'}. Please try again.${rollbackNote}`,'danger');
   }
 }
+
+// Part A due follows the portal's RRR total. Returns an adjustment line, or null when there is nothing to absorb.
+function rrrRoundingLine(partASum, entry){
+  const total = Number(entry?.total);
+  if(!(total > 0)) return null;
+  const diff = Math.round((total - partASum) * 100) / 100;
+  if(Math.abs(diff) < 0.005 || Math.abs(diff) > 1) return null;
+  return { label:`Portal rounding (RRR ${entry.rrr || ''} total ${fmt(total)})`, amount:diff, section:'adjust', pct:null };
+}
+
+// Payment History: 10 a page, newest first, Previous / Next.
+const REM_HISTORY_PAGE_SIZE = 10;
+function remHistoryPage(all, page = state.remHistPage || 1, size = REM_HISTORY_PAGE_SIZE){
+  const pages = Math.max(1, Math.ceil((all?.length || 0) / size));
+  const p = Math.min(Math.max(1, Math.floor(Number(page)) || 1), pages);
+  return { page:p, pages, size, total:all?.length || 0, rows:(all || []).slice((p-1)*size, p*size) };
+}
+function remHistoryPager(all){
+  const h = remHistoryPage(all);
+  if(h.pages <= 1) return '';
+  const btn = (label, to, off) => `<button class="btn btn-sm" ${off?'disabled':''} style="min-width:92px;min-height:40px" onclick="App.setRemHistPage(${to})">${label}</button>`;
+  return `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 4px 4px;flex-wrap:wrap">
+    ${btn('‹ Previous', h.page-1, h.page<=1)}
+    <span style="font-size:12px;color:var(--text3)">Page ${h.page} of ${h.pages} · ${h.total} payments</span>
+    ${btn('Next ›', h.page+1, h.page>=h.pages)}
+  </div>`;
+}
+function setRemHistPage(n){ state.remHistPage = Math.max(1, Math.floor(Number(n)) || 1); renderRemittances(); }
 
 async function approveRemittance(id, btn=null){
   if(!can('signoff')){ showAlert('You do not have permission to approve remittances.','danger'); return; }
@@ -13147,7 +13287,7 @@ async function renderBank(){
         if(e.paymentMethod==='split') return sum+(e.bankAmount||0);
         return sum;
       }, 0)
-    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.date||r.createdAt)).reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
+    - allRemittances.filter(r => r.status==='paid' && _prePeriod(r.paidDate||r.date||r.createdAt)).reduce((s,r) => s+splitRemittancePaid(r).bank, 0)
     - allCashTx.filter(t => t.type==='withdrawal' && _prePeriod(t.date||t.createdAt)).reduce((s,t) => s+(t.amount||0), 0)
     - pettyHistory.filter(h => h.type==='refill' && (h.status==='approved'||h.status==='settled')
         && (h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0))
@@ -13201,7 +13341,7 @@ async function renderBank(){
         txAmt: -(e.paymentMethod==='split'?(e.bankAmount||0):(e.amount||0)),
         date:e.date||e.createdAt
       })),
-    ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.date||r.createdAt})),
+    ...allRemittances.filter(r=>r.status==='paid'&&splitRemittancePaid(r).bank>0).map(r=>({...r, txType:'remittance', txLabel:`Remittance: ${r.incomeType||'HQ'}`, txAmt: -splitRemittancePaid(r).bank, date:r.paidDate||r.date||r.createdAt})),
     ...bankIncomeSlices.map(r=>({...r, txType:'income', txLabel:`${incomeBankLabel(r)} (bank transfer)`, txAmt: (r.bankTransferAmount||0), txNote: incomeBankNote(r)})),
     ...pettyHistory.filter(h=>h.type==='refill'&&(h.status==='approved'||h.status==='settled')&&(h.paymentMethod==='bank_transfer'||(h.paymentMethod==='split'&&(h.bankAmount||0)>0)))
       .map(h=>({...h, txType:'petty-topup', txLabel:`Petty cash top-up (bank)`, txAmt:-(h.paymentMethod==='split'?(h.bankAmount||0):(h.amount||0))}))
@@ -17282,6 +17422,28 @@ function satBuildParishes(parishes, existing){
   return out;
 }
 
+/**
+ * Warning for the satellite quotas grid: a Kingdom quota that no active satellite parish has an amount for, and that
+ * nobody has looked at yet. `seen` = labels the grid was last saved with (settings.satQuotaSeen); saving the grid marks
+ * every current label as looked at, so a deliberate 0 stops warning. Returns [{label, parishes:[name]}].
+ */
+function satMissingQuotas(labels, parishes, existing, seen){
+  const known = new Set((Array.isArray(seen) ? seen : []).map(String));
+  const out = [];
+  for(const label of (labels || [])){
+    if(!label || known.has(label)) continue;
+    const missing = (parishes || []).filter(p=>p.active !== false && !((existing && existing[p.code]) || [])
+      .some(q=>q && q.label === label && Number(q.amount) > 0)).map(p=>p.name || p.code);
+    if(missing.length) out.push({ label, parishes: missing });
+  }
+  return out;
+}
+function satMissingWarnHtml(){
+  const g = state.satQuota;
+  const m = satMissingQuotas(g.labels, g.parishes, g.existing, g.seen);
+  if(!m.length) return '';
+  return `<div class="alert alert-warn" id="satQuotaWarn"><span class="alert-icon">⚠</span><span><b>Some Kingdom quotas have no amount for a satellite parish yet.</b> The portal may still charge them, and the app will then show a difference.<ul style="margin:6px 0 0 18px">${m.map(x=>`<li><b>${esc(x.label)}</b>: nothing entered for ${esc(x.parishes.join(', '))}</li>`).join('')}</ul><span style="display:block;margin-top:6px;font-size:12px">Fill in the amounts below and save. If 0 is right for a parish, just save, and this warning goes away.</span></span></div>`;
+}
 function satQuotaGridHtml(){
   const g = state.satQuota;
   if(!g.parishes.length){
@@ -17295,13 +17457,23 @@ function satQuotaGridHtml(){
     const prev = (g.existing[p.code] || []).find(q=>q && q.label === label);
     return `<td><input type="number" class="form-input sat-quota-in" data-code="${esc(p.code)}" data-i="${i}" min="0" step="any" inputmode="decimal" placeholder="0" value="${prev && Number(prev.amount) > 0 ? esc(String(prev.amount)) : ''}" aria-label="${esc(label)} for ${esc(p.name || p.code)} (₦)" /></td>`;
   }).join('')}</tr>`).join('');
-  return `<div class="table-wrap"><table class="sat-quota-table">
+  return `${satMissingWarnHtml()}<div class="table-wrap"><table class="sat-quota-table">
       <tr><th>Quota (₦)</th>${head}</tr>${rows}
     </table></div>
     <div class="sat-q-actions">
       <button type="button" class="btn" onclick="App.satQuotaCopyFirst()">Copy first column to all</button>
       <button type="button" class="btn btn-primary" onclick="App.saveSatQuotas(this)">Save satellite quotas</button>
-    </div>`;
+    </div>${satAlignLogHtml()}`;
+}
+/** Read-only list of what the "Fix alignment" button added to a parish's quotas (newest first), so nothing it changes is hidden. */
+function satAlignLogHtml(){
+  const log = (state.satQuota && Array.isArray(state.satQuota.log)) ? state.satQuota.log.filter(e=>e && e.id) : [];
+  if(!log.length) return '';
+  const name = code => ((state.satQuota.parishes || []).find(p=>p.code === code) || {}).name || code;
+  const rows = log.slice().reverse().map(e=>`<tr><td>${esc(String(e.at || '').slice(0,16).replace('T',' '))}</td><td>${esc(name(e.parish))}</td><td>${esc(e.month || '')}</td><td>${esc((e.added || []).map(x=>x.label + ' ₦' + x.amount).join(', '))}</td><td>${esc(e.by || '')}</td><td>${e.undone ? 'Undone' : 'Applied'}</td></tr>`).join('');
+  return `<h4 style="margin:18px 0 6px">Added by the Fix alignment button</h4>
+    <p style="font-size:12px;color:var(--text3);margin:0 0 6px">Each line was added to the parish's quotas to match the portal. To change one, edit the grid above and save.</p>
+    <div class="table-wrap"><table class="sat-quota-table"><tr><th>When</th><th>Parish</th><th>Month</th><th>Added</th><th>By</th><th>State</th></tr>${rows}</table></div>`;
 }
 async function initSatQuotaGrid(settings){
   if(!document.getElementById('satQuotaBody')) return;
@@ -17326,6 +17498,8 @@ async function initSatQuotaGrid(settings){
     parishes,
     labels: getQuotaList(settings).map(q=>String(q.label || '').trim()),
     existing: (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {},
+    log: (l=>Array.isArray(l)?l:[])(satParseJson(settings?.satAlignLog, [])),
+    seen: (l=>Array.isArray(l)?l:[])(satParseJson(settings?.satQuotaSeen, [])),
   };
   box.innerHTML = satQuotaGridHtml();
 }
@@ -17353,8 +17527,10 @@ async function saveSatQuotas(btn=null){
     const s = await DB.getSettings();
     const cur = satParseJson(s.satQuotas, {});
     const satQuotas = satBuildQuotas(cur, columns, g.labels);
-    await DB.saveSettings({ satQuotas });
-    g.existing = satQuotas;
+    const satQuotaSeen = g.labels.slice();
+    await DB.saveSettings({ satQuotas, satQuotaSeen });
+    g.existing = satQuotas; g.seen = satQuotaSeen;
+    const w = document.getElementById('satQuotaWarn'); if(w) w.remove();
     DB.addAudit('sat_quotas_updated', `Satellite monthly quotas updated (${g.parishes.map(p=>p.code).join(', ')})`, state.user?.name);
     showAlert('Satellite quotas saved. Each parish picks them up on its next visit.', 'success');
     restore();
@@ -20581,6 +20757,22 @@ const AUTOMATION_MONTH_CLOSE_DEFAULTS = {
   enabled: true, check_times: ['10:00', '14:00', '18:00'], warn_days: 2, complete_message: true,
   items: { source_docs: true, app_record: true, csr: false },
 };
+// Daily "what is still open" reminder (mirrors workers/clerk-watchdog/config.js; off until switched on here).
+// Until parishes are chosen: exactly Kingdom, Sanctuary of Favour, Good Shepherd, God Is Able. New parishes are opt-in.
+const AUTOMATION_DAILY_REMINDER_PARISHES = ['602757','659840','597445','761516'];
+const AUTOMATION_DAILY_REMINDER_DEFAULTS = {
+  enabled: false, group: { enabled: true, time: '09:00' }, private: { enabled: true, time: '10:00' },
+  owners: { source_docs_finance: ['divine'], source_docs_admin: ['divine'], rrr_unpaid: ['fabian'], rrr_not_generated: ['divine'], attendance: ['divine'], app_record: ['divine'] },
+  wa_tags: {},
+};
+const AUTOMATION_DAILY_REMINDER_TASKS = [
+  { key:'rrr_not_generated', label:'RRR not generated yet' },
+  { key:'rrr_unpaid', label:'RRR not paid yet' },
+  { key:'attendance', label:'Attendance not filed' },
+  { key:'source_docs_finance', label:'Source documents, Finance' },
+  { key:'source_docs_admin', label:'Source documents, Admin' },
+  { key:'app_record', label:'Payment not recorded in the app' },
+];
 // Titles used in messages ("Called (Title)") and who pays the RRR, for people saved before these existed.
 const AUTOMATION_PEOPLE_DEFAULTS = {
   david:  { title: 'Finance Officer', called: 'Bro. David', pays_rrr: true, month_all_parishes: true },
@@ -20802,12 +20994,12 @@ const AUTOMATION_WHATSAPP_EXISTING_SAMPLES = [
  ['statement-failed','Statement not sent','When the statement workflow reports a failure.',"❌ Monthly financial statement was not sent\n\n*Period 24 Aug to 20 Sep 2026*\n\nRCCG KP AI Clerk"],
  ['refresh','Refresh requested','When a user presses Refresh in the clerk workflow.',"🔄 {role:david} pressed Refresh. The check is being rebuilt."],
  ['saturday','Saturday spending note','Weekly at the configured Saturday time.',"📊 Kingdom Parish · Saturday\n\n*Week 3*\n\nSpent this week: ₦20,000\n\n₦50,000 (50%) of the ₦100,000 October budget spent so far.\n\nOctober remittance month ends in 2 Sundays.\n\nRCCG KP AI Clerk"],
- ['checklist','Remittance checklist / unpaid RRR reminder','On remittance day and while the RRR remains unpaid. Each check reflects actual completion evidence.',"📋 Kingdom Parish · October remittance\n\n*Today, Sun 18 Oct, is remittance day.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
- ['checklist-followup','Unpaid RRR - after remittance day','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*Cut-off was Sun 18 Oct. The portal closes Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is not paid yet.\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
- ['checklist-tomorrow','Unpaid RRR - portal closes tomorrow','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*The portal closes tomorrow, Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is still not paid. Tomorrow is the last day.\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
- ['checklist-today','Unpaid RRR - portal closes today','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*The portal closes today, Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is still not paid. Today is the last day.\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
- ['checklist-closed','Unpaid RRR - portal closed','One final normal morning reminder the day after the portal closes, if still unpaid. No later daily reminders.',"📋 Kingdom Parish · October remittance\n\n*The portal closed Sun 25 Oct. The RRR was not paid.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
- ['checklist-unknown','Unpaid RRR - close date unknown','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*Cut-off was Sun 18 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is not paid yet. The portal close date is not in yet.\n\nTotal Oct collection: ₦100,000\nTotal remitted: ₦60,000\nTotal retained: ₦40,000\n\nRCCG KP AI Clerk"],
+ ['checklist','Remittance checklist / unpaid RRR reminder','On remittance day and while the RRR remains unpaid. Each check reflects actual completion evidence.',"📋 Kingdom Parish · October remittance\n\n*Today, Sun 18 Oct, is remittance day.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
+ ['checklist-followup','Unpaid RRR - after remittance day','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*Cut-off was Sun 18 Oct. The portal closes Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is not paid yet.\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
+ ['checklist-tomorrow','Unpaid RRR - portal closes tomorrow','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*The portal closes tomorrow, Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is still not paid. Tomorrow is the last day.\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
+ ['checklist-today','Unpaid RRR - portal closes today','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*The portal closes today, Sun 25 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is still not paid. Today is the last day.\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
+ ['checklist-closed','Unpaid RRR - portal closed','One final normal morning reminder the day after the portal closes, if still unpaid. No later daily reminders.',"📋 Kingdom Parish · October remittance\n\n*The portal closed Sun 25 Oct. The RRR was not paid.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
+ ['checklist-unknown','Unpaid RRR - close date unknown','Normal morning reminder while the ended period remains unpaid. Portal close date is illustrative, not a current deadline.',"📋 Kingdom Parish · October remittance\n\n*Cut-off was Sun 18 Oct.*\n\n⏳ Sunday attendance recorded\n⏳ Sun collection recorded\n⏳ Portal attendance filled\n⏳ Portal remittance filled\n⏳ RRR generated\n⏳ Source doc uploaded\n⏳ RRR paid\n\nThe RRR is not paid yet. The portal close date is not in yet.\n\n💰 October collection: ₦100,000\n📤 Remitted to portal: ₦60,000\n🧾 Portal fee + VAT: ₦300\n🤝 TG and pastoral stipend (Part B): ₦10,000\n🧒 Children's Dept share: ₦5,000\n📥 Retained: ₦24,700\n\nRCCG KP AI Clerk"],
 ];
 function automationsWhatsappSectionHtml(saved, saveBar){
   const s = saved || {};
@@ -21198,7 +21390,7 @@ function renderAutomationsRemittanceSection(config, health){
         <div class="at-save-bar">
           <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
           <span class="at-save-status" aria-live="polite"></span>
-          <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
+          <span class="at-save-hint">Changes save automatically about 2 seconds after you edit. Save changes saves right away. The box picks them up within 5 minutes.</span>
         </div>
       </div>
     </details>`;
@@ -21387,6 +21579,19 @@ function renderAutomationsSettings(config, isDefault, health){
   const mc = { ...AUTOMATION_MONTH_CLOSE_DEFAULTS, ...(a.month_close || {}), items: { ...AUTOMATION_MONTH_CLOSE_DEFAULTS.items, ...((a.month_close || {}).items || {}) } };
   const cr = { ...AUTOMATION_COLLECTION_REMINDER_DEFAULTS, ...(a.collection_reminders || {}) };
   const sun = a.sunday_note || {}, health_ = a.health_note || {}, upl = a.upload_bot || {};
+  const dr = { ...AUTOMATION_DAILY_REMINDER_DEFAULTS, ...(a.daily_reminder || {}),
+    group: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.group, ...((a.daily_reminder || {}).group || {}) },
+    private: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.private, ...((a.daily_reminder || {}).private || {}) },
+    owners: { ...AUTOMATION_DAILY_REMINDER_DEFAULTS.owners, ...((a.daily_reminder || {}).owners || {}) },
+    wa_tags: { ...((a.daily_reminder || {}).wa_tags || {}) } };
+  const drParishes = [{ code: KINGDOM_PARISH_CODE, name: 'Kingdom Parish' }, ...parishes.filter(p=>automationsIsSatCode(p.code)).map(p=>({ code: String(p.code), name: p.name || p.code }))];
+  const drOwnerRows = AUTOMATION_DAILY_REMINDER_TASKS.map(t=>{
+    const cur = (dr.owners[t.key] || [])[0] || '';
+    const opts = ['<option value="">Nobody</option>'].concat(kingdomPeople.map(p=>`<option value="${esc(p.key)}" ${cur===p.key?'selected':''}>${esc(p.name || p.key)}</option>`)).join('');
+    return `<div class="form-group"><label class="form-label">${esc(t.label)}</label><select class="form-select at-field" data-path="automations.daily_reminder.owners.${t.key}" data-kind="onelist" aria-label="Owner of: ${esc(t.label)}">${opts}</select></div>`;
+  }).join('');
+  const drTagRows = kingdomPeople.map(p=>`<div class="form-group"><label class="form-label">${esc(p.name || p.key)}</label><input class="form-input at-field" inputmode="numeric" data-path="automations.daily_reminder.wa_tags.${esc(p.key)}" data-kind="digits" value="${esc(dr.wa_tags[p.key] || '')}" placeholder="e.g. 2348012345678"></div>`).join('');
+  const drParishRows = drParishes.map(p=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="automations.daily_reminder.parishes" data-kind="code" data-code="${esc(p.code)}" ${(Array.isArray(dr.parishes) ? dr.parishes.includes(p.code) : AUTOMATION_DAILY_REMINDER_PARISHES.includes(p.code))?'checked':''} > ${esc(p.name)}${p.code===KINGDOM_PARISH_CODE?' (group + private)':' (private only)'}</label>`).join('');
 
   const routingOf = (p)=>(mt)=>(config.routing?.[mt.key] || AUTOMATION_ROUTING_DEFAULTS[mt.key])?.[p.key];
   const peopleRows = kingdomPeople.map((p, i)=>{
@@ -21421,7 +21626,7 @@ function renderAutomationsSettings(config, isDefault, health){
   const saveBar = `<div class="at-save-bar">
       <button class="btn btn-primary" onclick="App.saveAutomationsConfig(this)">Save changes</button>
       <span class="at-save-status" aria-live="polite"></span>
-      <span class="at-save-hint">Changes save automatically and take up to 5 minutes to reach the box</span>
+      <span class="at-save-hint">Changes save automatically about 2 seconds after you edit. Save changes saves right away. The box picks them up within 5 minutes.</span>
     </div>`;
   const dayChips = (path, selected)=>`<div class="at-day-chips">${AUTOMATION_DAYS.map(d=>`<label class="at-day-chip"><input type="checkbox" class="at-field" data-path="${path}" data-kind="day" data-day="${d.key}" ${((selected||[]).includes(d.key))?'checked':''}> ${d.label}</label>`).join('')}</div>`;
 
@@ -21494,6 +21699,29 @@ function renderAutomationsSettings(config, isDefault, health){
       <summary>Attendance</summary>
       <div class="at-details-body">
         <p class="at-note" style="margin:0">Attendance is filed on the RCCG portal with the month-end run, straight after the remittance. The app only lets the last Sunday collection of the period be saved once every week's attendance, the Monthly attendance report and every earlier Sunday collection are in, so there is nothing to check in between. The result is in the check email and on the Attendance card above; <b>Refresh attendance</b> in the check email re-files it if the app changes. The Monday reminder to ${esc(automationsHelpText('{tg:weekly_attendance_reminder}', config))} is under Sunday records reminders.</p>
+      </div>
+    </details>
+
+    <details class="at-details">
+      <summary>Daily open-tasks reminder</summary>
+      <div class="at-details-body">
+        <p class="at-note" style="margin:0 0 10px">Every morning, for the month still being closed, this lists only what is still open (RRR not paid, attendance, source documents, payment not recorded). The group post quotes the latest checklist and tags the person responsible. Each person also gets a private Telegram message with only their own tasks. Nothing is sent when nothing is open. Times are the box's own clock (UK time).</p>
+        ${automationsBoolField('automations.daily_reminder.enabled', dr.enabled, 'Send the daily reminder', 'Off until you switch it on.')}
+        <div class="form-row" style="margin-top:10px">
+          ${automationsBoolField('automations.daily_reminder.group.enabled', dr.group.enabled, 'WhatsApp group post', 'Quotes the latest checklist and tags the owners. Not sent if a tag is missing.')}
+          ${automationsTimeField('automations.daily_reminder.group.time', dr.group.time, 'Group post after (time)')}
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          ${automationsBoolField('automations.daily_reminder.private.enabled', dr.private.enabled, 'Private Telegram message', 'One per person, only their own tasks.')}
+          ${automationsTimeField('automations.daily_reminder.private.time', dr.private.time, 'Private message after (time)')}
+        </div>
+        <div class="form-group" style="margin-top:10px"><label class="form-label">Parishes</label><div class="at-day-chips">${drParishRows}</div><div class="at-subtitle">The WhatsApp group post is for Kingdom Parish only. Other parishes get private Telegram messages to the task owners above.</div></div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">Who is responsible for each task</div>
+        <div class="form-row">${drOwnerRows}</div>
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 4px">WhatsApp number for the tag (digits, country code first)</div>
+        <div class="form-row">${drTagRows}</div>
+        <div class="at-subtitle">Without a number for someone who owns an open task, the group post is not sent and the box reports why.</div>
+        ${saveBar}
       </div>
     </details>
 
@@ -22128,6 +22356,17 @@ function collectAutomationsConfig(){
     else if(kind === 'num'){ obj[leaf] = el.value === '' ? 0 : Number(el.value); }
     else if(kind === 'numlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number).filter(n=>!isNaN(n)); }
     else if(kind === 'strlist'){ obj[leaf] = el.value.split(',').map(s=>s.trim()).filter(s=>/^([01]?\d|2[0-3]):[0-5]\d$/.test(s)).map(s=>s.padStart(5,'0')); }
+    else if(kind === 'onelist'){ obj[leaf] = el.value ? [el.value] : []; }
+    else if(kind === 'digits'){ obj[leaf] = String(el.value||'').replace(/[^0-9]/g,''); }
+    else if(kind === 'code'){
+      if(!Array.isArray(obj[leaf])) obj[leaf] = [];
+      const code = el.dataset.code;
+      if(!el.disabled){
+        const has = obj[leaf].includes(code);
+        if(el.checked && !has) obj[leaf].push(code);
+        if(!el.checked && has) obj[leaf] = obj[leaf].filter(d=>d!==code);
+      }
+    }
     else if(kind === 'day'){
       if(!Array.isArray(obj[leaf])) obj[leaf] = [];
       const day = el.dataset.day;
@@ -22327,7 +22566,7 @@ return {
   attendancePeriodReport, attConfirmSubmitFurther, attSubmitFurther, attPrint,
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
-  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, setRemHistPage, _remHistoryPage: remHistoryPage, _rrrRoundingLine: rrrRoundingLine, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
   showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,
   openReconcileModal, toggleWriteOffForm, onWriteOffReasonChange, submitWriteOff,
@@ -22351,7 +22590,7 @@ return {
   addAutomationParish, deleteAutomationParish, saveAutomationsConfig, sendTestAlert,
   atRefreshPicks, atPortalToggle, atClearPortalPw, atCopyInvite, atCopyPin, atCreateLogin, atResetPin, atRemoveLogin, atAddParishPerson, atParishesToggle, atReloadArea,
   satQuotaCopyFirst, saveSatQuotas,
-  _satBuildQuotas: satBuildQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
+  _satBuildQuotas: satBuildQuotas, _satMissingQuotas: satMissingQuotas, _satBuildParishes: satBuildParishes, _automationsSplitPeople: automationsSplitPeople,
   _automationsNewPersonKey: automationsNewPersonKey, _automationsRandomPin: automationsRandomPin, _automationsInviteCode: automationsInviteCode,
   _automationsSealPassword: automationsSealPassword, _automationsTelegramBot: automationsTelegramBot, _AUTOMATION_TELEGRAM_BOT_DEFAULTS: AUTOMATION_TELEGRAM_BOT_DEFAULTS, _renderAutomationsSettings: renderAutomationsSettings, _automationsEffectiveConfig: automationsEffectiveConfig, _automationsHelpText: automationsHelpText, _collectAutomationsConfig: (saved)=>{ state.automations = { ...(state.automations||{}), config: saved }; return collectAutomationsConfig(); }, _AUTOMATION_SAT_ROUTING_TYPES: AUTOMATION_SAT_ROUTING_TYPES, _AUTOMATION_MESSAGE_TYPES: AUTOMATION_MESSAGE_TYPES,
   _countSundaysInRange: countSundaysInRange,

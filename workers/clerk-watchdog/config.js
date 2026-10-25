@@ -54,10 +54,12 @@ export const DEFAULT_CONFIG = {
       divine: { telegram: true, email: true },
       pastor: { telegram: true, email: true },
     }),
+    // Pastor (Henry Ofunne): email only, Telegram stays off (David, 22 Oct 2026). Kept here so a reset keeps it.
     rrr_generated: route({
       david: { telegram: true, email: true },
       divine: { telegram: true, email: true },
       fabian: { telegram: true, email: true },
+      pastor: { telegram: false, email: true },
     }),
     parish_remittance_check: route({ david: { telegram: true, email: true } }),
     monthly_statement: route({
@@ -127,6 +129,16 @@ export const DEFAULT_CONFIG = {
       statement: { enabled: true },
       rrr_reminders: { enabled: true },
     },
+    // Daily "what is still open" reminder (box dailyreminder-20261023). Off until it is switched on in Automations.
+    // Times are the box's own clock. owners: task -> person keys. wa_tags: person key -> WhatsApp number for the tag.
+    daily_reminder: {
+      enabled: false,
+      group: { enabled: true, time: "09:00" },
+      private: { enabled: true, time: "10:00" },
+      owners: { source_docs_finance: ["divine"], source_docs_admin: ["divine"], rrr_unpaid: ["fabian"], rrr_not_generated: ["divine"],
+        attendance: ["divine"], app_record: ["divine"] },
+      wa_tags: {},
+    },
     // Telegram bot menu: who sees each command (everyone | kingdom | payers | admin | off). Help is always on.
     telegram_bot: {
       menu: { month: "everyone", upload: "everyone", paid: "payers", statement: "kingdom", balance: "kingdom",
@@ -155,6 +167,7 @@ export const DEFAULT_CONFIG = {
   },
 };
 
+export const DAILY_REMINDER_TASKS = ["source_docs_finance", "source_docs_admin", "rrr_not_generated", "rrr_unpaid", "attendance", "app_record"];
 export const NOT_REMITTED = "__not_remitted__";
 const LINE_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
@@ -427,6 +440,48 @@ export function validateConfig(cfg) {
           if (b === undefined) continue;
           if (!b || typeof b !== "object" || Array.isArray(b)) { errors.push(`automations.whatsapp.${k} must be an object`); continue; }
           if (b.enabled !== undefined && !isBool(b.enabled)) errors.push(`automations.whatsapp.${k}.enabled must be true or false`);
+        }
+      }
+    }
+
+    // Optional (configs saved before the daily reminder existed don't have it); every field inside is optional too.
+    const dr = a.daily_reminder;
+    if (dr !== undefined) {
+      if (!dr || typeof dr !== "object" || Array.isArray(dr)) errors.push("automations.daily_reminder must be an object");
+      else {
+        if (dr.enabled !== undefined && !isBool(dr.enabled)) errors.push("automations.daily_reminder.enabled must be true or false");
+        for (const k of ["group", "private"]) {
+          const b = dr[k];
+          if (b === undefined) continue;
+          if (!b || typeof b !== "object" || Array.isArray(b)) { errors.push(`automations.daily_reminder.${k} must be an object`); continue; }
+          if (b.enabled !== undefined && !isBool(b.enabled)) errors.push(`automations.daily_reminder.${k}.enabled must be true or false`);
+          if (b.time !== undefined && !isTime(b.time)) errors.push(`automations.daily_reminder.${k}.time must be HH:MM 24h`);
+        }
+        if (dr.parishes !== undefined && !(Array.isArray(dr.parishes) && dr.parishes.every((c) => typeof c === "string" && CODE_RE.test(c)))) {
+          errors.push("automations.daily_reminder.parishes must be a list of parish codes (digits)");
+        }
+        const peopleKeys = new Set(Array.isArray(cfg.people) ? cfg.people.map((p) => p && p.key) : []);
+        if (dr.owners !== undefined) {
+          if (!dr.owners || typeof dr.owners !== "object" || Array.isArray(dr.owners)) errors.push("automations.daily_reminder.owners must be an object");
+          else {
+            for (const [task, list] of Object.entries(dr.owners)) {
+              if (!DAILY_REMINDER_TASKS.includes(task)) { errors.push(`automations.daily_reminder.owners.${task} is not a known task`); continue; }
+              if (!Array.isArray(list) || !list.every((k) => typeof k === "string" && peopleKeys.has(k))) {
+                errors.push(`automations.daily_reminder.owners.${task} must be a list of people already in People`);
+              }
+            }
+          }
+        }
+        if (dr.wa_tags !== undefined) {
+          if (!dr.wa_tags || typeof dr.wa_tags !== "object" || Array.isArray(dr.wa_tags)) errors.push("automations.daily_reminder.wa_tags must be an object");
+          else {
+            for (const [k, v] of Object.entries(dr.wa_tags)) {
+              if (!peopleKeys.has(k)) errors.push(`automations.daily_reminder.wa_tags.${k} is not a person in People`);
+              else if (!(v === "" || (typeof v === "string" && /^\d{6,15}$/.test(v)))) {
+                errors.push(`automations.daily_reminder.wa_tags.${k} must be digits only (country code first, 6 to 15 digits) or empty`);
+              }
+            }
+          }
         }
       }
     }
