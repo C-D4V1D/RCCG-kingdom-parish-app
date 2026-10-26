@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import { onRequest, __loanTesting } from '../functions/api/[[route]].js';
 import { createSqliteD1 } from './sqlite-d1.mjs';
 import { FINANCE_AUTH_HEADER, financeToken } from './finance-auth-helper.mjs';
-async function setup(channel='cash', direction='lent') {
+async function setup(channel='cash', direction='lent', amount=10000) {
   const DB=createSqliteD1();
   const headers={admin:FINANCE_AUTH_HEADER};
   const call=async(path,who='admin',body,method=body?'POST':'GET')=>onRequest({request:new Request('https://x/api/'+path,{method,headers:{...headers[who],'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})}),env:{DB},waitUntil(){}});
   assert.equal((await call('init')).status,200);
-  for(const role of ['accountant','pastor','admin_officer','viewer']){
+  for(const role of ['accountant','pastor','admin_officer','viewer','usher']){
     const u=await(await call('users','admin',{name:'Example '+role,role,pin:'1234'})).json();
     headers[role]={Authorization:'Bearer '+await financeToken({uid:u.id,role})};
   }
-  const loan=await(await call('loans','admin_officer',{person:'Example borrower',amount:10000,date:'2026-01-01',channel,direction})).json();
+  const loan=await(await call('loans','admin_officer',{person:'Example borrower',amount,date:'2026-01-01',channel,direction})).json();
   if(loan.status==='pending') assert.equal((await call(`loans/${loan.id}/acknowledge`,'pastor',{})).status,200);
   const loanId=loan.id;
   const list=async(who='admin')=>(await(await call('loans',who)).json())[0];
@@ -130,4 +130,46 @@ test('correction rejection/cancellation preserve original writeoff; new correcti
   c=await make();assert.equal((await call(`loan-forgiveness-corrections/${c.id}/cancel`,'pastor',{reason:'No'})).status,403);
   assert.equal((await call(`loan-forgiveness-corrections/${c.id}/cancel`,'accountant',{reason:'Withdrawn'})).status,200);
   assert.equal((await list()).outstanding,5000);assert.equal((await list()).forgivenessCorrections.length,2);
+});
+test('decimal boundary: 100.10 less 0.20 accepts full 99.90 forgiveness, confirmation and exact correction',async()=>{
+  const {call,list,request,confirm,loanId}=await setup('bank','lent',100.10);
+  const rep=await(await call(`loans/${loanId}/repay`,'accountant',{amount:0.20,channel:'bank'})).json();
+  assert.equal((await call(`loan-repayments/${rep.id}/acknowledge`,'pastor',{})).status,200);
+  assert.equal((await list()).outstanding,99.90);
+  assert.equal((await request(99.91)).status,409);
+  const response=await request(99.90);assert.equal(response.status,200);const f=await response.json();
+  assert.equal((await confirm(f.id)).status,200);assert.equal((await list()).outstanding,0);assert.equal((await list()).forgiven,99.90);
+  const c=await(await call(`loan-forgiveness/${f.id}/correct`,'accountant',{reason:'Example decimal correction'})).json();
+  assert.equal((await call(`loan-forgiveness-corrections/${c.id}/confirm`,'pastor',{})).status,200);
+  assert.equal((await list()).outstanding,99.90);assert.equal((await list()).forgiven,0);
+  const second=await request(99.90);assert.equal(second.status,200);
+  assert.equal((await confirm((await second.json()).id)).status,200);
+});
+test('decimal aggregation: multiple fractional writeoffs and repayment reserve exact cents',async()=>{
+  const {call,request,confirm,list,loanId}=await setup('bank','borrowed',0.30);
+  for(const amount of [0.10,0.10]){const f=await(await request(amount)).json();assert.equal((await confirm(f.id)).status,200);}
+  assert.equal((await list()).outstanding,0.10);
+  assert.equal((await call(`loans/${loanId}/repay`,'accountant',{amount:0.11,channel:'bank'})).status,400);
+  const r=await(await call(`loans/${loanId}/repay`,'accountant',{amount:0.10,channel:'bank'})).json();
+  assert.equal((await call(`loan-repayments/${r.id}/acknowledge`,'pastor',{})).status,200);
+  assert.equal((await list()).outstanding,0);assert.equal((await list()).forgiven,0.20);assert.equal((await list()).repaid,0.10);
+});
+test('audit excludes all new private forgiveness/correction entries for viewer and usher; finance keeps history',async()=>{
+  const {call,request,confirm}=await setup();let f=await(await request(1000)).json();await confirm(f.id);
+  let c=await(await call(`loan-forgiveness/${f.id}/correct`,'accountant',{reason:'Private correction text'})).json();
+  await call(`loan-forgiveness-corrections/${c.id}/reject`,'pastor',{reason:'Private rejection'});
+  c=await(await call(`loan-forgiveness/${f.id}/correct`,'accountant',{reason:'Private correction text'})).json();
+  await call(`loan-forgiveness-corrections/${c.id}/confirm`,'pastor',{});
+  const make=async()=> (await(await request(1000)).json());
+  f=await make();await call(`loan-forgiveness/${f.id}/reject`,'pastor',{reason:'Private rejection'});
+  f=await make();await call(`loan-forgiveness/${f.id}/cancel`,'accountant',{reason:'Private cancellation'});
+  for(const who of ['viewer','usher']){
+    const rows=await(await call('audit',who)).json();
+    assert.ok(!rows.some(r=>r.type.startsWith('loan_forgiveness') || r.type==='loan_debt_forgiven'));
+    assert.ok(!JSON.stringify(rows).includes('Private correction text'));assert.ok(!JSON.stringify(rows).includes('Example approved loss'));
+  }
+  for(const who of ['admin','accountant','pastor','admin_officer']){
+    const rows=await(await call('audit',who)).json();assert.ok(rows.some(r=>r.type==='loan_debt_forgiven'));
+    assert.ok(rows.some(r=>r.type==='loan_forgiveness_correction_confirmed'));
+  }
 });

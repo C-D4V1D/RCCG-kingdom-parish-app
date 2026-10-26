@@ -378,3 +378,8 @@ test('linked correction restores receivable/liability on confirmation date with 
     assert.equal(direction==='lent'?s.owedToUsEnd:s.weOweEnd,30000);
   }
 });
+test('dashboard pending count includes forgiveness and correction approval work',()=>{
+  const l=loan({forgiveness:[{status:'pending'}],forgivenessCorrections:[{status:'pending'}]});
+  const info=App._loanDashboardInfo([l],{loansOwedToUs:30000,loansWeOwe:0},false);
+  assert.match(info.pendingNote,/2 more entries/);
+});

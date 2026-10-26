@@ -211,3 +211,7 @@ test('linked correction has separate request/review screens and preserves origin
   await App.reviewForgivenessCorrection('A-1','C1');assert.match(lastOverlay.innerHTML,/Confirm correction/);
   posts.length=0;await App.decideForgivenessCorrection('C1','confirm');assert.equal(posts[0].path,'loan-forgiveness-corrections/C1/confirm');
 });
+test('full forgiveness preload exposes a cent-rounded decimal amount',async()=>{
+  App._setTestUser({id:'u2',role:'accountant',name:'Example'});loans=sample();loans[2].outstanding=99.89999999999999;
+  await App.showForgiveLoan('A-1');assert.match(lastOverlay.innerHTML,/value="99.9"/);
+});

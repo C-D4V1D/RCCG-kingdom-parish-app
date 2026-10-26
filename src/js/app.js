@@ -3905,11 +3905,11 @@ async function calcChurchBalance(asOfDate, prefetched){
   const loanCashNet = sumLoanMoves(cashMoves, 'in') - sumLoanMoves(cashMoves, 'out');
   const loanForgivenF = loansAll.filter(loanLive).flatMap(l => (l.forgiveness || [])
     .filter(f => f.status === 'confirmed' && onOrBefore(f)).map(f => ({ ...f, direction:l.direction })));
-  const loanOpen = dir => Math.max(0,
+  const loanOpen = dir => Math.max(0,Math.round(100*(
       loansF.filter(l => l.direction === dir).reduce((s,l) => s + (l.amount||0), 0)
     - loanRepsF.filter(r => r.direction === dir).reduce((s,r) => s + (r.amount||0), 0)
     - loanForgivenF.filter(f => f.direction === dir).reduce((s,f) => s + (f.amount||0), 0)
-    + loansAll.filter(loanLive).filter(l => l.direction === dir).flatMap(l => l.forgivenessCorrections || []).filter(c => c.status === 'confirmed' && onOrBefore(c)).reduce((s,c) => s + (c.amount||0),0));
+    + loansAll.filter(loanLive).filter(l => l.direction === dir).flatMap(l => l.forgivenessCorrections || []).filter(c => c.status === 'confirmed' && onOrBefore(c)).reduce((s,c) => s + (c.amount||0),0)))/100);
   const loansOwedToUs = loanOpen('lent');
   const loansWeOwe = loanOpen('borrowed');
   const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut - paidRemsCash + loanCashNet;
@@ -9550,7 +9550,7 @@ async function showForgiveLoan(id){
   showModal(`<button class="modal-close" onclick="closeModal()">✕</button><div class="modal-title">Forgive debt</div>
     <p>${loanWho(l)} · ${fmt(l.outstanding)} outstanding</p>
     <p style="font-size:12px;color:var(--text3)">A different person must confirm. Until then, the debt stays unchanged. No money moves. This is not a repayment.</p>
-    <div class="form-group"><label>Amount to forgive (₦)</label><input class="form-input" id="forgiveAmount" type="number" min="0.01" step="0.01" max="${l.outstanding}" value="${l.outstanding}"></div>
+    <div class="form-group"><label>Amount to forgive (₦)</label><input class="form-input" id="forgiveAmount" type="number" min="0.01" step="0.01" max="${l.outstanding}" value="${Math.round(l.outstanding*100)/100}"></div>
     <div class="form-group"><label>${l.direction === 'borrowed' ? 'Reason and evidence that the lender released this debt' : 'Reason'}</label><textarea class="form-input" id="forgiveReason" maxlength="500"></textarea></div>
     <div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button><button class="btn btn-primary" onclick="App.submitForgiveness('${esc(id)}',this)">Request forgiveness</button></div>`);
 }
@@ -9770,7 +9770,7 @@ function loanDashboardInfo(loans, churchBal, isPast){
   const list = Array.isArray(loans) ? loans : [];
   const people = dir => new Set(list.filter(l => l.status === 'active' && l.direction === dir && (l.outstanding||0) > 0)
     .map(l => String(l.person||'').trim().toLowerCase())).size;
-  const pending = list.filter(l => l.status === 'pending').length + list.reduce((n,l) => n + (l.status === 'active' ? (l.repayments||[]).filter(r => r.status === 'pending').length : 0), 0);
+  const pending = list.filter(l => l.status === 'pending').length + list.reduce((n,l) => n + (l.status === 'active' ? (l.repayments||[]).filter(r => r.status === 'pending').length : 0) + (l.forgiveness||[]).filter(f => f.status === 'pending').length + (l.forgivenessCorrections||[]).filter(c => c.status === 'pending').length, 0);
   return {
     owedToUsCount: isPast || !(churchBal.loansOwedToUs > 0) ? 0 : people('lent'),
     weOweCount: isPast || !(churchBal.loansWeOwe > 0) ? 0 : people('borrowed'),

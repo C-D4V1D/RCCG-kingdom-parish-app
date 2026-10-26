@@ -2676,7 +2676,7 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
 
     // ── /api/audit ─────────────────────────────────────────────
     if (route === 'audit') {
-      if (method === 'GET'  && !param) return await getAudit(DB);
+      if (method === 'GET'  && !param) return await getAudit(DB, authz);
       if (method === 'POST' && !param) return await createAuditEntry(DB, body);
     }
 
@@ -5931,6 +5931,7 @@ async function deleteSatelliteFund(DB, id) {
 // cash-channel loans have no mirror and are counted on the accountant's cash line.
 const LOAN_ROLES = ['it_admin', 'accountant', 'admin_officer', 'pastor'];
 const LOAN_EPS = 0.005;
+const loanCents = v => Math.round(Number(v || 0) * 100);
 const forgivenessSchemaReady = new WeakSet();
 async function ensureForgivenessSchema(DB) {
   if (forgivenessSchemaReady.has(DB)) return;
@@ -6024,10 +6025,10 @@ function mapForgiveness(r) {
 }
 function mapLoan(row, repayments, forgiveness = [], corrections = []) {
   const mine = repayments.filter(r => r.loan_id === row.id).map(mapRepayment);
-  const repaid = mine.filter(r => r.status === 'confirmed').reduce((s, r) => s + (r.amount || 0), 0);
+  const repaid = mine.filter(r => r.status === 'confirmed').reduce((s,r) => s + loanCents(r.amount),0) / 100;
   const history = forgiveness.filter(f => f.loan_id === row.id).map(mapForgiveness);
   const correctionHistory = corrections.filter(c => c.loan_id === row.id).map(c => ({...mapForgiveness(c),forgivenessId:c.forgiveness_id}));
-  const forgiven = history.filter(f => f.status === 'confirmed').reduce((t,f) => t + f.amount, 0) - correctionHistory.filter(c => c.status === 'confirmed').reduce((t,c) => t + c.amount, 0);
+  const forgiven = (history.filter(f => f.status === 'confirmed').reduce((t,f) => t + loanCents(f.amount),0) - correctionHistory.filter(c => c.status === 'confirmed').reduce((t,c) => t + loanCents(c.amount),0)) / 100;
   return {
     id: row.id, person: row.person, direction: row.direction, amount: row.amount, date: row.date,
     dueDate: row.due_date || '', purpose: row.purpose || '', note: row.note || '', reference: row.reference || '',
@@ -6039,7 +6040,7 @@ function mapLoan(row, repayments, forgiveness = [], corrections = []) {
     confirmedBy: loanConfirmedBy(row),
     ...loanReceiptFields(row),
     createdAt: row.created_at, repayments: mine, repaid, forgiveness: history, forgivenessCorrections:correctionHistory, forgiven,
-    outstanding: row.status === 'active' ? Math.max(0, (row.amount || 0) - repaid - forgiven) : 0,
+    outstanding: row.status === 'active' ? Math.max(0,loanCents(row.amount) - loanCents(repaid) - loanCents(forgiven))/100 : 0,
   };
 }
 
@@ -6289,6 +6290,18 @@ async function confirmLoanRow(DB, loan, who, { auditType, auditText, bankLine = 
   return { ok: true, bankRef: m.bankRef };
 }
 
+// Recompute in a single SQL statement. No amount read before an await may decide settlement.
+async function refreshLoanSettlement(DB,id,now) {
+  const paid=`(SELECT COALESCE(SUM(CAST(ROUND(amount*100) AS INTEGER)),0) FROM loan_repayments WHERE loan_id=loans.id AND status='confirmed')`;
+  const forgiven=`(SELECT COALESCE(SUM(CAST(ROUND(amount*100) AS INTEGER)),0) FROM loan_forgiveness WHERE loan_id=loans.id AND status='confirmed')`;
+  const restored=`(SELECT COALESCE(SUM(CAST(ROUND(amount*100) AS INTEGER)),0) FROM loan_forgiveness_corrections WHERE loan_id=loans.id AND status='confirmed')`;
+  // Pure write-off completion stays active internally, preserving acknowledged cash history.
+  const settled=`${paid}>0 AND ${paid}+${forgiven}-${restored}>=CAST(ROUND(amount*100) AS INTEGER)`;
+  await DB.prepare(`UPDATE loans SET status=CASE WHEN ${settled} THEN 'settled' ELSE 'active' END,
+    settled_at=CASE WHEN ${settled} THEN ? ELSE '' END WHERE id=? AND status IN ('active','settled')`).bind(now,id).run();
+  return (await DB.prepare(`SELECT status FROM loans WHERE id=?`).bind(id).first())?.status === 'settled';
+}
+
 async function confirmRepaymentRow(DB, rep, loan, who, { auditType, auditText, bankLine = '' }) {
   await ensureForgivenessSchema(DB);
   const now = new Date().toISOString();
@@ -6298,10 +6311,16 @@ async function confirmRepaymentRow(DB, rep, loan, who, { auditType, auditText, b
   // Two repayments recorded side by side must not together exceed the loan: check against what is already confirmed.
   const { results: done } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
   const confirmedSoFar = (done || []).reduce((t, r) => t + (r.amount || 0), 0);
-  if (confirmedSoFar + (rep.amount || 0) > (loan.amount || 0) - forgiven + LOAN_EPS) {
+  if (loanCents(confirmedSoFar) + loanCents(rep.amount) > loanCents(loan.amount) - loanCents(forgiven)) {
     return { error: 'Confirming this would repay more than the loan. Reject it or correct the earlier repayment first.', status: 409 };
   }
-  const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=?, bank_line=? WHERE id=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.loan_id=loan_repayments.loan_id AND f.status='pending')`)
+  const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=?, bank_line=? WHERE id=? AND status='pending'
+    AND EXISTS (SELECT 1 FROM loans l WHERE l.id=loan_repayments.loan_id AND l.status='active'
+      AND CAST(ROUND(l.amount*100) AS INTEGER)
+       - COALESCE((SELECT SUM(CAST(ROUND(r.amount*100) AS INTEGER)) FROM loan_repayments r WHERE r.loan_id=l.id AND r.status='confirmed'),0)
+       - COALESCE((SELECT SUM(CAST(ROUND(f.amount*100) AS INTEGER)) FROM loan_forgiveness f WHERE f.loan_id=l.id AND f.status='confirmed'),0)
+       + COALESCE((SELECT SUM(CAST(ROUND(c.amount*100) AS INTEGER)) FROM loan_forgiveness_corrections c WHERE c.loan_id=l.id AND c.status='confirmed'),0) >= CAST(ROUND(loan_repayments.amount*100) AS INTEGER))
+    AND NOT EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.loan_id=loan_repayments.loan_id AND f.status='pending')`)
     .bind(who.id, who.name, now, bankLine, rep.id).run();
   if (!claim?.meta?.changes) return { error: 'This repayment was already handled.', status: 409 };
   if (rep.channel === 'bank' || rep.channel === 'petty') {
@@ -6316,10 +6335,7 @@ async function confirmRepaymentRow(DB, rep, loan, who, { auditType, auditText, b
       return { error: 'Could not record the ledger entry. Nothing was changed. Try again.', status: 500 };
     }
   }
-  const { results: reps } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
-  const repaid = (reps || []).reduce((s, r) => s + (r.amount || 0), 0);
-  const settled = repaid + forgiven >= (loan.amount || 0) - LOAN_EPS;
-  if (settled) await DB.prepare(`UPDATE loans SET status='settled', settled_at=? WHERE id=?`).bind(now, loan.id).run();
+  const settled = await refreshLoanSettlement(DB,loan.id,now);
   await writeAuditLog(DB, auditType, auditText(where, settled), who.name);
   return { ok: true, settled, bankRef: rep.__bankRef || '' };
 }
@@ -6417,7 +6433,7 @@ async function forgivenessCorrectionAction(DB,id,action,data,authz) {
     AND EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.id=forgiveness_id AND f.status='confirmed')`)
     .bind(status,actor.id,actor.name,now,action==='confirm'?now.slice(0,10):'',reason,id).run();
   if(!claim?.meta?.changes) return err('The correction was already handled or its source changed.',409);
-  if(action==='confirm') await DB.prepare(`UPDATE loans SET status='active',settled_at='' WHERE id=? AND status='settled'`).bind(c.loan_id).run();
+  if(action==='confirm') await refreshLoanSettlement(DB,c.loan_id,now);
   await writeAuditLog(DB,'loan_forgiveness_correction_'+status,`${actor.name} ${status} correction ${id} linked to forgiveness ${c.forgiveness_id}; ${c.amount} noncash debt restoration: ${c.reason}`,actor.name);
   return ok({id,status});
 }
@@ -6450,11 +6466,11 @@ async function forgivenessAction(DB, id, action, data, authz) {
     const claim = await DB.prepare(`UPDATE loan_forgiveness SET status='confirmed', confirmed_by_id=?, confirmed_by_name=?, confirmed_at=?, date=?
       WHERE id=? AND status='pending' AND requested_by_id<>?
       AND EXISTS (SELECT 1 FROM loans l WHERE l.id=loan_id AND l.status='active'
-        AND l.amount - COALESCE((SELECT SUM(r.amount) FROM loan_repayments r WHERE r.loan_id=l.id AND r.status='confirmed'),0)
-        - COALESCE((SELECT SUM(w.amount) FROM loan_forgiveness w WHERE w.loan_id=l.id AND w.status='confirmed'),0)
-        + COALESCE((SELECT SUM(c.amount) FROM loan_forgiveness_corrections c WHERE c.loan_id=l.id AND c.status='confirmed'),0) >= ?)
+        AND CAST(ROUND(l.amount*100) AS INTEGER) - COALESCE((SELECT SUM(CAST(ROUND(r.amount*100) AS INTEGER)) FROM loan_repayments r WHERE r.loan_id=l.id AND r.status='confirmed'),0)
+        - COALESCE((SELECT SUM(CAST(ROUND(w.amount*100) AS INTEGER)) FROM loan_forgiveness w WHERE w.loan_id=l.id AND w.status='confirmed'),0)
+        + COALESCE((SELECT SUM(CAST(ROUND(c.amount*100) AS INTEGER)) FROM loan_forgiveness_corrections c WHERE c.loan_id=l.id AND c.status='confirmed'),0) >= ?)
       AND NOT EXISTS (SELECT 1 FROM loan_repayments r WHERE r.loan_id=loan_forgiveness.loan_id AND r.status='pending')`)
-      .bind(actor.id, actor.name, now, now.slice(0,10), id, actor.id, f.amount).run();
+      .bind(actor.id, actor.name, now, now.slice(0,10), id, actor.id, loanCents(f.amount)).run();
     if (!claim?.meta?.changes) return err('The balance changed or this request was already handled. Reload Loans.', 409);
     await writeAuditLog(DB, 'loan_debt_forgiven', `${actor.name} confirmed noncash debt forgiveness of ${f.amount} on loan ${f.loan_id}, requested by ${f.requested_by_name}: ${f.reason}`, actor.name);
     return ok({ id, status:'confirmed' });
@@ -6492,12 +6508,12 @@ async function loanAction(DB, id, action, data, authz, env) {
     const fid = newId('LF-');
     const inserted = await DB.prepare(`INSERT INTO loan_forgiveness (id,loan_id,amount,status,reason,requested_by_id,requested_by_name,requested_at)
       SELECT ?,?,?,'pending',?,?,?,? FROM loans l WHERE l.id=? AND l.status='active'
-      AND l.amount - COALESCE((SELECT SUM(amount) FROM loan_repayments WHERE loan_id=l.id AND status='confirmed'),0)
-       - COALESCE((SELECT SUM(amount) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0)
-       + COALESCE((SELECT SUM(amount) FROM loan_forgiveness_corrections WHERE loan_id=l.id AND status='confirmed'),0) >= ?
+      AND CAST(ROUND(l.amount*100) AS INTEGER) - COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_repayments WHERE loan_id=l.id AND status='confirmed'),0)
+       - COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0)
+       + COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_forgiveness_corrections WHERE loan_id=l.id AND status='confirmed'),0) >= ?
       AND NOT EXISTS (SELECT 1 FROM loan_repayments WHERE loan_id=l.id AND status='pending')
       AND NOT EXISTS (SELECT 1 FROM loan_forgiveness WHERE loan_id=l.id AND status='pending')`)
-      .bind(fid,id,amount,reason,actor.id,actor.name,now,id,amount).run();
+      .bind(fid,id,amount,reason,actor.id,actor.name,now,id,loanCents(amount)).run();
     if (!inserted?.meta?.changes) return err('The amount exceeds the available debt, or another repayment/forgiveness is waiting. Reload Loans.',409);
     await writeAuditLog(DB,'loan_forgiveness_requested',`${actor.name} requested noncash forgiveness of ${amount} on loan ${id}: ${reason}`,actor.name);
     await createNotification(DB,{ title:'Debt forgiveness awaiting confirmation',body:`${actor.name} requested debt forgiveness. A different person must confirm.`,type:'info',roles:LOAN_ROLES });
@@ -6550,7 +6566,7 @@ async function loanAction(DB, id, action, data, authz, env) {
     if (!Number.isFinite(amount) || amount <= 0) return err('Enter an amount greater than zero.', 400);
     const { results: reps } = await DB.prepare(`SELECT amount, status FROM loan_repayments WHERE loan_id=?`).bind(id).all();
     const taken = (reps || []).filter(r => r.status === 'confirmed' || r.status === 'pending').reduce((s, r) => s + (r.amount || 0), 0);
-    if (amount > (loan.amount || 0) - taken - forgiven + LOAN_EPS) {
+    if (loanCents(amount) > loanCents(loan.amount) - loanCents(taken) - loanCents(forgiven)) {
       return err(`That is more than is still owed (₦${Math.max(0, (loan.amount || 0) - taken - forgiven).toLocaleString('en-NG')}, counting repayments waiting for acknowledgement).`, 400);
     }
     const photoData = data.photoData || '';
@@ -6562,11 +6578,11 @@ async function loanAction(DB, id, action, data, authz, env) {
       INSERT INTO loan_repayments (id, loan_id, amount, date, channel, reference, note, status, recorded_by_id, recorded_by_name)
       SELECT ?,?,?,?,?,?,?,'pending',?,? FROM loans l WHERE l.id=? AND l.status='active'
       AND NOT EXISTS (SELECT 1 FROM loan_forgiveness WHERE loan_id=l.id AND status='pending')
-      AND l.amount - COALESCE((SELECT SUM(amount) FROM loan_repayments WHERE loan_id=l.id AND status IN ('pending','confirmed')),0)
-       - COALESCE((SELECT SUM(amount) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0)
-       + COALESCE((SELECT SUM(amount) FROM loan_forgiveness_corrections WHERE loan_id=l.id AND status='confirmed'),0) >= ?
+      AND CAST(ROUND(l.amount*100) AS INTEGER) - COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_repayments WHERE loan_id=l.id AND status IN ('pending','confirmed')),0)
+       - COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0)
+       + COALESCE((SELECT SUM(CAST(ROUND(amount*100) AS INTEGER)) FROM loan_forgiveness_corrections WHERE loan_id=l.id AND status='confirmed'),0) >= ?
     `).bind(rid, id, amount, repDate, loanChannel(data.channel),
-      String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name,id,amount-LOAN_EPS).run();
+      String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name,id,loanCents(amount)).run();
     if (!inserted?.meta?.changes) return err('The debt changed or forgiveness is waiting. Reload Loans.',409);
     await writeAuditLog(DB, 'loan_repayment_recorded', `${actor.name} (${actor.role}) recorded a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${where}. Awaiting acknowledgement.`, actor.name);
     const receiptStatus = photoData ? await storeAndCheckLoanReceipt(DB, env, { ownerType: 'repayment', ownerId: rid, photoData, amount, date: repDate, actor }) : '';
@@ -6828,9 +6844,11 @@ async function updateCashTransaction(DB, id, data) {
 }
 
 // ── AUDIT LOG ─────────────────────────────────────────────────────
-async function getAudit(DB) {
+async function getAudit(DB, authz) {
   const { results } = await DB.prepare(`SELECT * FROM audit_log ORDER BY ts DESC LIMIT 500`).all();
-  return ok((results || []).map(row => ({
+  const seesLoanDetails=LOAN_ROLES.includes(authz?.finance?.role);
+  const visible=(results || []).filter(row => seesLoanDetails || !(String(row.type).startsWith('loan_forgiveness') || row.type === 'loan_debt_forgiven'));
+  return ok(visible.map(row => ({
     id:     row.id,
     type:   row.type,
     detail: row.detail,
