@@ -177,3 +177,25 @@ test('reversing needs a reason and goes to the reverse endpoints', async () => {
   await App.submitRejectLoan('repayment_reverse', 'R-ok', null);
   assert.deepEqual(posts.map(p => [p.path, p.body.reason]), [['loans/A-1/reverse', 'Entered twice'], ['loan-repayments/R-ok/reverse', 'Entered twice']]);
 });
+
+test('forgiveness separate entry preserves repayment and Reverse; request form and review require explicit human actions',async()=>{
+  await open('it_admin','u1');
+  assert.match(lastOverlay.innerHTML,/showForgiveLoan\('A-1'\)/);
+  assert.match(lastOverlay.innerHTML,/showLoanRepaymentForm\('A-1'\)/);
+  assert.match(lastOverlay.innerHTML,/showRejectLoan\('loan_reverse','A-1'\)/);
+  await App.showForgiveLoan('A-1');
+  assert.match(lastOverlay.innerHTML,/A different person must confirm/);
+  assert.match(lastOverlay.innerHTML,/Request forgiveness/);
+  els.forgiveAmount=Object.assign(makeElement(),{value:'1000'});
+  els.forgiveReason=Object.assign(makeElement(),{value:'Example loss'});
+  posts.length=0;await App.submitForgiveness('A-1');
+  assert.deepEqual(posts.map(p=>[p.path,p.body]),[['loans/A-1/forgive',{amount:1000,reason:'Example loss'}]]);
+  loans[2].forgiveness=[{id:'F1',amount:1000,status:'pending',requestedById:'u1',requestedByName:'Me',reason:'Example loss'}];
+  await App.showLoans();assert.match(lastOverlay.innerHTML,/A different person must confirm/);
+  assert.doesNotMatch(lastOverlay.innerHTML,/reviewForgiveness\('A-1','F1'\)/);
+  App._setTestUser({id:'u2',role:'pastor',name:'Example confirmer'});
+  await App.showLoans();assert.match(lastOverlay.innerHTML,/reviewForgiveness\('A-1','F1'\)/);
+  await App.reviewForgiveness('A-1','F1');assert.match(lastOverlay.innerHTML,/Confirm forgiveness/);
+  posts.length=0;await App.decideForgiveness('F1','confirm');
+  assert.equal(posts[0].path,'loan-forgiveness/F1/confirm');
+});

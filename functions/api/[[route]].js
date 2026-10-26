@@ -2612,6 +2612,9 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       if (method === 'POST' && !param) return await createLoan(DB, body, authz, env);
       if (method === 'POST' &&  param && parts[2]) return await loanAction(DB, param, parts[2], body, authz, env);
     }
+    if (route === 'loan-forgiveness' && method === 'POST' && param && parts[2]) {
+      return await forgivenessAction(DB, param, parts[2], body, authz);
+    }
     if (route === 'loan-receipt' && method === 'GET' && !param) return await getLoanReceipt(DB, url, authz);
     if (route === 'loan-repayments' && method === 'POST' && param && parts[2]) {
       return await loanRepaymentAction(DB, param, parts[2], body, authz);
@@ -4194,6 +4197,12 @@ async function handleInit(DB) {
       recorded_by_id TEXT DEFAULT '', recorded_by_name TEXT DEFAULT '',
       acknowledged_by_id TEXT DEFAULT '', acknowledged_by_name TEXT DEFAULT '', acknowledged_at TEXT DEFAULT '',
       rejected_reason TEXT DEFAULT '', bank_ref TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
+    `CREATE TABLE IF NOT EXISTS loan_forgiveness (
+      id TEXT PRIMARY KEY, loan_id TEXT NOT NULL, amount REAL NOT NULL CHECK(amount > 0),
+      status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL, requested_by_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL, requested_at TEXT NOT NULL, confirmed_by_id TEXT DEFAULT '',
+      confirmed_by_name TEXT DEFAULT '', confirmed_at TEXT DEFAULT '', date TEXT DEFAULT '', decision_reason TEXT DEFAULT '')`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS loan_forgiveness_one_pending ON loan_forgiveness(loan_id) WHERE status='pending'`,
     `ALTER TABLE loans ADD COLUMN petty_ref TEXT DEFAULT ''`,
     `ALTER TABLE loan_repayments ADD COLUMN petty_ref TEXT DEFAULT ''`,
     `ALTER TABLE notifications ADD COLUMN roles TEXT DEFAULT ''`,
@@ -5913,6 +5922,22 @@ async function deleteSatelliteFund(DB, id) {
 // cash-channel loans have no mirror and are counted on the accountant's cash line.
 const LOAN_ROLES = ['it_admin', 'accountant', 'admin_officer', 'pastor'];
 const LOAN_EPS = 0.005;
+const forgivenessSchemaReady = new WeakSet();
+async function ensureForgivenessSchema(DB) {
+  if (forgivenessSchemaReady.has(DB)) return;
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS loan_forgiveness (
+      id TEXT PRIMARY KEY, loan_id TEXT NOT NULL, amount REAL NOT NULL CHECK(amount > 0),
+      status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL, requested_by_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL, requested_at TEXT NOT NULL, confirmed_by_id TEXT DEFAULT '',
+      confirmed_by_name TEXT DEFAULT '', confirmed_at TEXT DEFAULT '', date TEXT DEFAULT '', decision_reason TEXT DEFAULT '')`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS loan_forgiveness_one_pending ON loan_forgiveness(loan_id) WHERE status='pending'`,
+  ];
+  for (const sql of statements) await DB.prepare(sql).run();
+  forgivenessSchemaReady.add(DB);
+}
+
+
 
 async function loanActor(DB, authz) {
   const u = authz?.finance;
@@ -5940,7 +5965,8 @@ function loanSanitize(loans) {
     id: l.id, person: alias(l.person), direction: l.direction, amount: l.amount, date: l.date, dueDate: '', purpose: '', note: '',
     reference: '', channel: l.channel, status: l.status, recordedById: '', recordedByName: '', recordedByRole: '',
     acknowledgedByName: '', acknowledgedAt: '', rejectedReason: '', bankRef: '', settledAt: l.settledAt, createdAt: l.createdAt,
-    repaid: l.repaid, outstanding: l.outstanding,
+    repaid: l.repaid, outstanding: l.outstanding, forgiven: l.forgiven,
+    forgiveness: (l.forgiveness || []).map(f => ({ amount:f.amount, status:f.status, date:f.date })),
     repayments: (l.repayments || []).map(r => ({ id: r.id, loanId: r.loanId, amount: r.amount, date: r.date, channel: r.channel, status: r.status,
       reference: '', note: '', recordedById: '', recordedByName: '', acknowledgedByName: '', acknowledgedAt: '', rejectedReason: '', bankRef: '', createdAt: r.createdAt })),
   }));
@@ -5974,9 +6000,17 @@ function loanReceiptFields(r) {
   return f;
 }
 
-function mapLoan(row, repayments) {
+function mapForgiveness(r) {
+  return { id:r.id, loanId:r.loan_id, amount:r.amount, status:r.status, reason:r.reason,
+    requestedById:r.requested_by_id, requestedByName:r.requested_by_name, requestedAt:r.requested_at,
+    confirmedById:r.confirmed_by_id, confirmedByName:r.confirmed_by_name, confirmedAt:r.confirmed_at,
+    date:r.date, decisionReason:r.decision_reason };
+}
+function mapLoan(row, repayments, forgiveness = []) {
   const mine = repayments.filter(r => r.loan_id === row.id).map(mapRepayment);
   const repaid = mine.filter(r => r.status === 'confirmed').reduce((s, r) => s + (r.amount || 0), 0);
+  const history = forgiveness.filter(f => f.loan_id === row.id).map(mapForgiveness);
+  const forgiven = history.filter(f => f.status === 'confirmed').reduce((t,f) => t + f.amount, 0);
   return {
     id: row.id, person: row.person, direction: row.direction, amount: row.amount, date: row.date,
     dueDate: row.due_date || '', purpose: row.purpose || '', note: row.note || '', reference: row.reference || '',
@@ -5987,22 +6021,24 @@ function mapLoan(row, repayments) {
     bankLine: row.bank_line || '',
     confirmedBy: loanConfirmedBy(row),
     ...loanReceiptFields(row),
-    createdAt: row.created_at, repayments: mine, repaid,
-    outstanding: row.status === 'active' ? Math.max(0, (row.amount || 0) - repaid) : 0,
+    createdAt: row.created_at, repayments: mine, repaid, forgiveness: history, forgiven,
+    outstanding: row.status === 'active' ? Math.max(0, (row.amount || 0) - repaid - forgiven) : 0,
   };
 }
 
 async function getLoans(DB, authz) {
-  const [{ results: loans }, { results: reps }] = await Promise.all([
+  await ensureForgivenessSchema(DB);
+  const [{ results: loans }, { results: reps }, { results: forgiveness }] = await Promise.all([
     DB.prepare(`SELECT * FROM loans ORDER BY date DESC, created_at DESC`).all(),
     DB.prepare(`SELECT * FROM loan_repayments ORDER BY date ASC, created_at ASC`).all(),
+    DB.prepare(`SELECT * FROM loan_forgiveness ORDER BY requested_at ASC`).all(),
   ]);
   // AI notes of flagged receipts only (never photo_data) so an acknowledger sees why it was flagged.
   const { results: notes } = await DB.prepare(`SELECT owner_type, owner_id, ai_notes FROM loan_receipts WHERE ai_status='flagged' ORDER BY id ASC`).all();
   const noteOf = new Map((notes || []).map(n => [`${n.owner_type}:${n.owner_id}`, n.ai_notes]));
   for (const l of loans || []) l.receipt_note = noteOf.get(`loan:${l.id}`) || '';
   for (const r of reps || []) r.receipt_note = noteOf.get(`repayment:${r.id}`) || '';
-  const mapped = (loans || []).map(l => mapLoan(l, reps || []));
+  const mapped = (loans || []).map(l => mapLoan(l, reps || [], forgiveness || []));
   const seesDetails = !!authz?.finance && LOAN_ROLES.includes(authz.finance.role);
   return ok(seesDetails ? mapped : loanSanitize(mapped));
 }
@@ -6236,15 +6272,18 @@ async function confirmLoanRow(DB, loan, who, { auditType, auditText, bankLine = 
 }
 
 async function confirmRepaymentRow(DB, rep, loan, who, { auditType, auditText, bankLine = '' }) {
+  await ensureForgivenessSchema(DB);
   const now = new Date().toISOString();
   const where = loan.direction === 'lent' ? `to ${loan.person}` : `from ${loan.person}`;
+  if (loan.status !== 'active') return { error:'This loan is no longer active.',status:409 };
+  const { total: forgiven } = await DB.prepare(`SELECT COALESCE(SUM(amount),0) total FROM loan_forgiveness WHERE loan_id=? AND status='confirmed'`).bind(loan.id).first();
   // Two repayments recorded side by side must not together exceed the loan: check against what is already confirmed.
   const { results: done } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
   const confirmedSoFar = (done || []).reduce((t, r) => t + (r.amount || 0), 0);
-  if (confirmedSoFar + (rep.amount || 0) > (loan.amount || 0) + LOAN_EPS) {
+  if (confirmedSoFar + (rep.amount || 0) > (loan.amount || 0) - forgiven + LOAN_EPS) {
     return { error: 'Confirming this would repay more than the loan. Reject it or correct the earlier repayment first.', status: 409 };
   }
-  const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=?, bank_line=? WHERE id=? AND status='pending'`)
+  const claim = await DB.prepare(`UPDATE loan_repayments SET status='confirmed', acknowledged_by_id=?, acknowledged_by_name=?, acknowledged_at=?, bank_line=? WHERE id=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.loan_id=loan_repayments.loan_id AND f.status='pending')`)
     .bind(who.id, who.name, now, bankLine, rep.id).run();
   if (!claim?.meta?.changes) return { error: 'This repayment was already handled.', status: 409 };
   if (rep.channel === 'bank' || rep.channel === 'petty') {
@@ -6261,7 +6300,7 @@ async function confirmRepaymentRow(DB, rep, loan, who, { auditType, auditText, b
   }
   const { results: reps } = await DB.prepare(`SELECT amount FROM loan_repayments WHERE loan_id=? AND status='confirmed'`).bind(loan.id).all();
   const repaid = (reps || []).reduce((s, r) => s + (r.amount || 0), 0);
-  const settled = repaid >= (loan.amount || 0) - LOAN_EPS;
+  const settled = repaid + forgiven >= (loan.amount || 0) - LOAN_EPS;
   if (settled) await DB.prepare(`UPDATE loans SET status='settled', settled_at=? WHERE id=?`).bind(now, loan.id).run();
   await writeAuditLog(DB, auditType, auditText(where, settled), who.name);
   return { ok: true, settled, bankRef: rep.__bankRef || '' };
@@ -6342,13 +6381,71 @@ async function autoConfirmBankLoans(DB) {
 }
 export const __loanTesting = { autoConfirmBankLoans };
 
+// Noncash write-offs are separate from repayments and expenses. Never call bank/receipt/holder confirmation.
+async function forgivenessAction(DB, id, action, data, authz) {
+  await ensureForgivenessSchema(DB);
+  const actor = await loanActor(DB, authz);
+  if (actor instanceof Response) return actor;
+  const f = await DB.prepare(`SELECT * FROM loan_forgiveness WHERE id=?`).bind(id).first();
+  if (!f) return err('Forgiveness request not found.', 404);
+  if (f.status !== 'pending') return err('This request was already handled.', 409);
+  const now = new Date().toISOString();
+  if (action === 'confirm') {
+    if (f.requested_by_id === actor.id) return err('A different person must confirm forgiveness. You requested it.', 403);
+    const claim = await DB.prepare(`UPDATE loan_forgiveness SET status='confirmed', confirmed_by_id=?, confirmed_by_name=?, confirmed_at=?, date=?
+      WHERE id=? AND status='pending' AND requested_by_id<>?
+      AND EXISTS (SELECT 1 FROM loans l WHERE l.id=loan_id AND l.status='active'
+        AND l.amount - COALESCE((SELECT SUM(r.amount) FROM loan_repayments r WHERE r.loan_id=l.id AND r.status='confirmed'),0)
+        - COALESCE((SELECT SUM(w.amount) FROM loan_forgiveness w WHERE w.loan_id=l.id AND w.status='confirmed'),0) >= ?)
+      AND NOT EXISTS (SELECT 1 FROM loan_repayments r WHERE r.loan_id=loan_forgiveness.loan_id AND r.status='pending')`)
+      .bind(actor.id, actor.name, now, now.slice(0,10), id, actor.id, f.amount).run();
+    if (!claim?.meta?.changes) return err('The balance changed or this request was already handled. Reload Loans.', 409);
+    await writeAuditLog(DB, 'loan_debt_forgiven', `${actor.name} confirmed noncash debt forgiveness of ${f.amount} on loan ${f.loan_id}, requested by ${f.requested_by_name}: ${f.reason}`, actor.name);
+    return ok({ id, status:'confirmed' });
+  }
+  if (action === 'reject' || action === 'cancel') {
+    if (action === 'cancel' && f.requested_by_id !== actor.id) return err('Only the requester can cancel this request.', 403);
+    if (action === 'reject' && f.requested_by_id === actor.id) return err('Cancel your own request instead.', 403);
+    const reason = String(data.reason || '').trim().slice(0,500);
+    if (!reason) return err('Give a reason.',400);
+    const status = action === 'cancel' ? 'cancelled' : 'rejected';
+    const claim = await DB.prepare(`UPDATE loan_forgiveness SET status=?, confirmed_by_id=?, confirmed_by_name=?, confirmed_at=?, decision_reason=? WHERE id=? AND status='pending'`)
+      .bind(status,actor.id,actor.name,now,reason,id).run();
+    if (!claim?.meta?.changes) return err('This request was already handled.',409);
+    await writeAuditLog(DB, 'loan_forgiveness_'+status, `${actor.name} ${status} forgiveness request ${id}: ${reason}`,actor.name);
+    return ok({ id, status });
+  }
+  return err('Unknown forgiveness action.',404);
+}
+
 async function loanAction(DB, id, action, data, authz, env) {
+  await ensureForgivenessSchema(DB);
   const actor = await loanActor(DB, authz);
   if (actor instanceof Response) return actor;
   const loan = await DB.prepare(`SELECT * FROM loans WHERE id=?`).bind(id).first();
   if (!loan) return err('Loan not found', 404);
   const now = new Date().toISOString();
   const where = loan.direction === 'lent' ? `to ${loan.person}` : `from ${loan.person}`;
+
+  if (action === 'forgive') {
+    if (loan.status !== 'active') return err('Only active debt can be forgiven.',409);
+    const amount = Number(data.amount);
+    const reason = String(data.reason || '').trim().slice(0,500);
+    if (!Number.isFinite(amount) || amount <= 0 || Math.round(amount*100)/100 !== amount) return err('Enter a positive amount with at most two decimal places.',400);
+    if (!reason) return err('Give a reason for forgiveness.',400);
+    const fid = newId('LF-');
+    const inserted = await DB.prepare(`INSERT INTO loan_forgiveness (id,loan_id,amount,status,reason,requested_by_id,requested_by_name,requested_at)
+      SELECT ?,?,?,'pending',?,?,?,? FROM loans l WHERE l.id=? AND l.status='active'
+      AND l.amount - COALESCE((SELECT SUM(amount) FROM loan_repayments WHERE loan_id=l.id AND status='confirmed'),0)
+       - COALESCE((SELECT SUM(amount) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0) >= ?
+      AND NOT EXISTS (SELECT 1 FROM loan_repayments WHERE loan_id=l.id AND status='pending')
+      AND NOT EXISTS (SELECT 1 FROM loan_forgiveness WHERE loan_id=l.id AND status='pending')`)
+      .bind(fid,id,amount,reason,actor.id,actor.name,now,id,amount).run();
+    if (!inserted?.meta?.changes) return err('The amount exceeds the available debt, or another repayment/forgiveness is waiting. Reload Loans.',409);
+    await writeAuditLog(DB,'loan_forgiveness_requested',`${actor.name} requested noncash forgiveness of ${amount} on loan ${id}: ${reason}`,actor.name);
+    await createNotification(DB,{ title:'Debt forgiveness awaiting confirmation',body:`${actor.name} requested debt forgiveness. A different person must confirm.`,type:'info',roles:LOAN_ROLES });
+    return ok({ id:fid,status:'pending' });
+  }
 
   if (action === 'acknowledge') {
     if (loan.status !== 'pending') return err('This loan is not waiting for acknowledgement.', 409);
@@ -6375,9 +6472,11 @@ async function loanAction(DB, id, action, data, authz, env) {
     if (loan.status !== 'active' && loan.status !== 'settled') return err('Only an acknowledged loan can be reversed.', 409);
     const reason = String(data.reason || '').trim().slice(0, 300);
     if (!reason) return err('Give a reason.', 400);
+    const wf = await DB.prepare(`SELECT id FROM loan_forgiveness WHERE loan_id=? AND status IN ('pending','confirmed')`).bind(id).first();
+    if (wf) return err('This loan has pending or confirmed forgiveness and cannot be reversed.',409);
     const { results: reps } = await DB.prepare(`SELECT status FROM loan_repayments WHERE loan_id=?`).bind(id).all();
     if ((reps || []).some(r => r.status === 'confirmed')) return err('This loan has confirmed repayments. Reverse those first.', 409);
-    const claim = await DB.prepare(`UPDATE loans SET status='reversed', rejected_reason=? WHERE id=? AND status IN ('active','settled')`).bind(reason, id).run();
+    const claim = await DB.prepare(`UPDATE loans SET status='reversed', rejected_reason=? WHERE id=? AND status IN ('active','settled') AND NOT EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.loan_id=loans.id AND f.status IN ('pending','confirmed'))`).bind(reason, id).run();
     if (!claim?.meta?.changes) return err('This loan was already handled.', 409);
     await DB.prepare(`UPDATE loan_repayments SET status='rejected', rejected_reason='Loan reversed' WHERE loan_id=? AND status='pending'`).bind(id).run();
     await loanUnmirror(DB, loan);
@@ -6387,23 +6486,30 @@ async function loanAction(DB, id, action, data, authz, env) {
 
   if (action === 'repay') {
     if (loan.status !== 'active') return err('Repayments can only be added to an active loan.', 409);
+    const wf = await DB.prepare(`SELECT id FROM loan_forgiveness WHERE loan_id=? AND status='pending'`).bind(id).first();
+    if (wf) return err('Resolve the pending forgiveness request first.',409);
+    const { total: forgiven } = await DB.prepare(`SELECT COALESCE(SUM(amount),0) total FROM loan_forgiveness WHERE loan_id=? AND status='confirmed'`).bind(id).first();
     const amount = Number(data.amount);
     if (!Number.isFinite(amount) || amount <= 0) return err('Enter an amount greater than zero.', 400);
     const { results: reps } = await DB.prepare(`SELECT amount, status FROM loan_repayments WHERE loan_id=?`).bind(id).all();
     const taken = (reps || []).filter(r => r.status === 'confirmed' || r.status === 'pending').reduce((s, r) => s + (r.amount || 0), 0);
-    if (amount > (loan.amount || 0) - taken + LOAN_EPS) {
-      return err(`That is more than is still owed (₦${Math.max(0, (loan.amount || 0) - taken).toLocaleString('en-NG')}, counting repayments waiting for acknowledgement).`, 400);
+    if (amount > (loan.amount || 0) - taken - forgiven + LOAN_EPS) {
+      return err(`That is more than is still owed (₦${Math.max(0, (loan.amount || 0) - taken - forgiven).toLocaleString('en-NG')}, counting repayments waiting for acknowledgement).`, 400);
     }
     const photoData = data.photoData || '';
     const badPhoto = loanPhotoProblem(photoData);
     if (badPhoto) return badPhoto;
     const rid = newId('LR-');
     const repDate = loanDateOrToday(data.date);
-    await DB.prepare(`
+    const inserted = await DB.prepare(`
       INSERT INTO loan_repayments (id, loan_id, amount, date, channel, reference, note, status, recorded_by_id, recorded_by_name)
-      VALUES (?,?,?,?,?,?,?, 'pending', ?,?)
+      SELECT ?,?,?,?,?,?,?,'pending',?,? FROM loans l WHERE l.id=? AND l.status='active'
+      AND NOT EXISTS (SELECT 1 FROM loan_forgiveness WHERE loan_id=l.id AND status='pending')
+      AND l.amount - COALESCE((SELECT SUM(amount) FROM loan_repayments WHERE loan_id=l.id AND status IN ('pending','confirmed')),0)
+       - COALESCE((SELECT SUM(amount) FROM loan_forgiveness WHERE loan_id=l.id AND status='confirmed'),0) >= ?
     `).bind(rid, id, amount, repDate, loanChannel(data.channel),
-      String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name).run();
+      String(data.reference || '').slice(0, 100), String(data.note || '').slice(0, 500), actor.id, actor.name,id,amount-LOAN_EPS).run();
+    if (!inserted?.meta?.changes) return err('The debt changed or forgiveness is waiting. Reload Loans.',409);
     await writeAuditLog(DB, 'loan_repayment_recorded', `${actor.name} (${actor.role}) recorded a repayment of ₦${amount.toLocaleString('en-NG')} on the loan ${where}. Awaiting acknowledgement.`, actor.name);
     const receiptStatus = photoData ? await storeAndCheckLoanReceipt(DB, env, { ownerType: 'repayment', ownerId: rid, photoData, amount, date: repDate, actor }) : '';
     const extra = photoData ? { receiptStatus } : {};
@@ -6434,6 +6540,7 @@ async function loanAction(DB, id, action, data, authz, env) {
 }
 
 async function loanRepaymentAction(DB, id, action, data, authz) {
+  await ensureForgivenessSchema(DB);
   const actor = await loanActor(DB, authz);
   if (actor instanceof Response) return actor;
   const rep = await DB.prepare(`SELECT * FROM loan_repayments WHERE id=?`).bind(id).first();
@@ -6444,10 +6551,12 @@ async function loanRepaymentAction(DB, id, action, data, authz) {
   const where = loan.direction === 'lent' ? `to ${loan.person}` : `from ${loan.person}`;
   if (action === 'reverse') {
     if (actor.role !== 'it_admin') return err('Only the IT administrator can reverse a repayment.', 403);
+    const wf = await DB.prepare(`SELECT id FROM loan_forgiveness WHERE loan_id=? AND status IN ('pending','confirmed')`).bind(loan.id).first();
+    if (wf) return err('Repayments on a loan with forgiveness cannot be reversed.',409);
     if (rep.status !== 'confirmed') return err('Only a confirmed repayment can be reversed.', 409);
     const reason = String(data.reason || '').trim().slice(0, 300);
     if (!reason) return err('Give a reason.', 400);
-    const claim = await DB.prepare(`UPDATE loan_repayments SET status='reversed', rejected_reason=? WHERE id=? AND status='confirmed'`).bind(reason, id).run();
+    const claim = await DB.prepare(`UPDATE loan_repayments SET status='reversed', rejected_reason=? WHERE id=? AND status='confirmed' AND NOT EXISTS (SELECT 1 FROM loan_forgiveness f WHERE f.loan_id=loan_repayments.loan_id AND f.status IN ('pending','confirmed'))`).bind(reason, id).run();
     if (!claim?.meta?.changes) return err('This repayment was already handled.', 409);
     await loanUnmirror(DB, rep);
     if (loan.status === 'settled') await DB.prepare(`UPDATE loans SET status='active', settled_at='' WHERE id=?`).bind(loan.id).run();

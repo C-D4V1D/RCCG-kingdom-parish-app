@@ -338,3 +338,31 @@ test('all the cash lent out leaves exactly zero, and a tiny float leftover is sh
     loans: [loan({ amount: 50000 })] });
   assert.ok(Math.abs(real.cashWithAccountant - 0.4) < 1e-9);
 });
+
+test('noncash forgiveness: cash stays spent, receivable and available funds fall once, historical snapshots preserved',async()=>{
+  const l=loan({forgiven:20000,forgiveness:[{status:'confirmed',amount:20000,date:'2026-10-20'}]});
+  const before=await App._calcChurchBalance('2026-10-19',{income,loans:[l],expenses:[],remittances:[],cashTx:[],pettyHistory:[],satelliteFunds:[],remRates:{}});
+  const after=await App._calcChurchBalance('2026-10-20',{income,loans:[l],expenses:[],remittances:[],cashTx:[],pettyHistory:[],satelliteFunds:[],remRates:{}});
+  assert.equal(before.cashWithAccountant,70000);assert.equal(after.cashWithAccountant,70000);
+  assert.equal(before.loansOwedToUs,30000);assert.equal(after.loansOwedToUs,10000);
+  assert.equal(before.total,100000);assert.equal(after.total,80000);
+  assert.deepEqual(App._loanCashMovements([l]),App._loanCashMovements([loan()]));
+});
+test('pending rejected and cancelled forgiveness never change balances',async()=>{
+  for(const status of ['pending','rejected','cancelled']){
+    const b=await balance({income,loans:[loan({forgiveness:[{status,amount:30000,date:'2026-10-20'}]})]});
+    assert.equal(b.total,100000);assert.equal(b.loansOwedToUs,30000);assert.equal(b.cashWithAccountant,70000);
+  }
+});
+test('statement noncash writeoffs have their own line, not repayment; historic period does not see future writeoff',()=>{
+  const l=loan({forgiveness:[{status:'confirmed',amount:30000,date:'2026-10-20',reason:'PRIVATE',requestedByName:'PRIVATE'}]});
+  const s=App._summarizeLoans([l],'2026-10-01','2026-10-31');
+  assert.equal(s.forgivenPeriod,30000);assert.equal(s.repaidToUsPeriod,0);assert.equal(s.owedToUsEnd,0);
+  assert.ok(!JSON.stringify(s).includes('PRIVATE'));
+  assert.equal(App._summarizeLoans([l],'2026-10-01','2026-10-19').owedToUsEnd,30000);
+});
+test('forgiven borrowed liability raises net fund value, never fabricates cash or income',async()=>{
+  const l=loan({direction:'borrowed',forgiveness:[{status:'confirmed',amount:10000,date:'2026-10-20'}]});
+  const b=await balance({income,loans:[l]});
+  assert.equal(b.cashWithAccountant,130000);assert.equal(b.loansWeOwe,20000);assert.equal(b.total,110000);
+});
