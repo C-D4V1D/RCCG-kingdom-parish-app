@@ -915,6 +915,7 @@ const DB = {
   getSatelliteFunds()           { return apiFetch('satellite-funds'); },
   addLoan(d)                    { DB._loansCache = null; return apiFetch('loans','POST',d); },
   loanAction(id, action, d)     { DB._loansCache = null; return apiFetch(`loans/${id}/${action}`,'POST',d||{}); },
+  forgivenessCorrectionAction(id, action, d) { DB._loansCache = null; return apiFetch(`loan-forgiveness-corrections/${id}/${action}`,'POST',d||{}); },
   forgivenessAction(id, action, d) { DB._loansCache = null; return apiFetch(`loan-forgiveness/${id}/${action}`,'POST',d||{}); },
   loanRepaymentAction(id, action, d) { DB._loansCache = null; return apiFetch(`loan-repayments/${id}/${action}`,'POST',d||{}); },
   // Loans are read by every church-balance calculation, so share one request for a few seconds.
@@ -3907,7 +3908,8 @@ async function calcChurchBalance(asOfDate, prefetched){
   const loanOpen = dir => Math.max(0,
       loansF.filter(l => l.direction === dir).reduce((s,l) => s + (l.amount||0), 0)
     - loanRepsF.filter(r => r.direction === dir).reduce((s,r) => s + (r.amount||0), 0)
-    - loanForgivenF.filter(f => f.direction === dir).reduce((s,f) => s + (f.amount||0), 0));
+    - loanForgivenF.filter(f => f.direction === dir).reduce((s,f) => s + (f.amount||0), 0)
+    + loansAll.filter(loanLive).filter(l => l.direction === dir).flatMap(l => l.forgivenessCorrections || []).filter(c => c.status === 'confirmed' && onOrBefore(c)).reduce((s,c) => s + (c.amount||0),0));
   const loansOwedToUs = loanOpen('lent');
   const loansWeOwe = loanOpen('borrowed');
   const cashWithAccountantRaw = cashFromCollections - cashDepositedFromAccountant + bankToAccountant - cashExpenses - pettyCashTopups + satelliteCashIn - satelliteCashAccountantOut - paidRemsCash + loanCashNet;
@@ -9474,7 +9476,9 @@ function loanCard(l, canDo, me){
     <div>${esc(f.reason || '')}</div><div style="color:var(--text3)">Requested by ${esc(f.requestedByName || '')}${f.confirmedByName ? ' · Handled by ' + esc(f.confirmedByName) : ''}${f.date ? ' · ' + esc(fmtDateShort(f.date)) : ''}</div>
     ${f.decisionReason ? `<div>${esc(f.decisionReason)}</div>` : ''}
     ${f.status === 'pending' && canDo ? (f.requestedById === me ? `<div>You requested this. A different person must confirm.</div><button class="btn btn-sm" onclick="App.decideForgiveness('${esc(f.id)}','cancel')">Cancel request</button>` : `<div style="margin:6px 0">No cash will move. This is not a repayment.</div><button class="btn btn-primary btn-sm" onclick="App.reviewForgiveness('${esc(l.id)}','${esc(f.id)}')">Review forgiveness</button>`) : ''}
+    ${f.status === 'confirmed' && canDo ? ((l.forgivenessCorrections || []).some(c => c.forgivenessId === f.id && c.status === 'confirmed') ? '<div>Corrected by linked noncash restoration below.</div>' : !(l.forgivenessCorrections || []).some(c => c.forgivenessId === f.id && c.status === 'pending') ? `<button class="btn btn-sm" onclick="App.showForgivenessCorrection('${esc(l.id)}','${esc(f.id)}')">Correct forgiveness</button>` : '') : ''}
     </div>`).join('');
+  const corrections=(l.forgivenessCorrections || []).map(c => `<div style="border-top:1px dashed var(--border);padding:8px 0;font-size:12px"><strong>Forgiveness correction · ${fmt(c.amount)} · ${esc(c.status)}</strong><div>${esc(c.reason)}</div><div>Requested by ${esc(c.requestedByName)}${c.confirmedByName ? ' · Handled by '+esc(c.confirmedByName) : ''}${c.date ? ' · '+esc(fmtDateShort(c.date)) : ''}</div>${c.decisionReason ? `<div>${esc(c.decisionReason)}</div>` : ''}${c.status === 'pending' && canDo ? c.requestedById === me ? `<div>A different person must confirm.</div><button class="btn btn-sm" onclick="App.decideForgivenessCorrection('${esc(c.id)}','cancel')">Cancel correction</button>` : `<button class="btn btn-sm" onclick="App.reviewForgivenessCorrection('${esc(l.id)}','${esc(c.id)}')">Review correction</button>` : ''}</div>`).join('');
   const reps = (l.repayments || []).map(r => loanRepaymentLine(r, canDo, me)).join('');
   return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
@@ -9485,7 +9489,7 @@ function loanCard(l, canDo, me){
     ${l.status === 'pending' && l.channel === 'bank' ? LOAN_BANK_WAIT : ''}
     ${loanReceiptNote({ ...l, kind: 'loan' })}
     ${actions ? `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${actions}</div>` : ''}
-    ${writeoffs}${reps}
+    ${writeoffs}${corrections}${reps}
   </div>`;
 }
 
@@ -9497,7 +9501,7 @@ async function showLoans(){
   const canDo = canAction('loan_manage');
   const section = (title, list) => list.length
     ? `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text3);margin:14px 0 2px">${title}</div>${list.map(l => loanCard(l, canDo, me)).join('')}` : '';
-  const waiting = loans.filter(l => l.status === 'pending' || (l.repayments || []).some(r => r.status === 'pending') || (l.forgiveness || []).some(f => f.status === 'pending'));
+  const waiting = loans.filter(l => l.status === 'pending' || (l.repayments || []).some(r => r.status === 'pending') || (l.forgiveness || []).some(f => f.status === 'pending') || (l.forgivenessCorrections || []).some(c => c.status === 'pending'));
   const active  = loans.filter(l => l.status === 'active' && !(l.forgiven > 0 && l.outstanding <= 0) && !waiting.includes(l));
   const done    = loans.filter(l => (l.status === 'active' && l.forgiven > 0 && l.outstanding <= 0 && !waiting.includes(l)) || l.status === 'settled' || l.status === 'rejected' || l.status === 'reversed').slice(0, 15);
   closeModal();
@@ -9511,6 +9515,31 @@ async function showLoans(){
     ${section('Finished', done)}
     ${loans.length ? '' : '<div style="padding:24px 0;text-align:center;color:var(--text3);font-size:13px">No loans recorded yet.</div>'}
     <div class="modal-footer"><button class="btn" onclick="closeModal()">Close</button></div>`);
+}
+
+async function showForgivenessCorrection(loanId,id){
+  if(!canAction('loan_manage')) return;
+  const l=(await DB.getLoans(true)).find(l => l.id === loanId),f=l?.forgiveness?.find(f => f.id === id && f.status === 'confirmed');
+  if(!f) return;
+  closeModal();showModal(`<div class="modal-title">Correct debt forgiveness</div><p>${loanWho(l)}</p><p>Restore ${fmt(f.amount)} of ${l.direction === 'lent' ? 'money owed to the church' : 'church debt'}. The original forgiveness stays in history.</p><p style="font-size:12px;color:var(--text3)">No cash moves. A different person must confirm before the debt is restored.</p><div class="form-group"><label>Correction reason</label><textarea class="form-input" id="correctionReason" maxlength="500"></textarea></div><div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button><button class="btn btn-primary" onclick="App.submitForgivenessCorrection('${esc(id)}',this)">Request correction</button></div>`);
+}
+async function submitForgivenessCorrection(id,btn){
+  const reason=(document.getElementById('correctionReason')?.value || '').trim();
+  if(!reason){showAlert('Give a correction reason.','danger');return;}
+  if(btn) btn.disabled=true;
+  try{await DB.forgivenessAction(id,'correct',{reason});await showLoans();}catch(e){showAlert(e.message,'danger');if(btn) btn.disabled=false;}
+}
+async function reviewForgivenessCorrection(loanId,id){
+  if(!canAction('loan_manage')) return;
+  const l=(await DB.getLoans(true)).find(l => l.id === loanId),c=l?.forgivenessCorrections?.find(c => c.id === id && c.status === 'pending');
+  if(!c || c.requestedById === String(state.user?.id || '')) return;
+  closeModal();showModal(`<div class="modal-title">Confirm forgiveness correction</div><p>${loanWho(l)}</p><p><strong>Restore ${fmt(c.amount)} ${l.direction === 'lent' ? 'receivable' : 'liability'}</strong></p><p>Requested by ${esc(c.requestedByName)}<br>Reason: ${esc(c.reason)}</p><p style="font-size:12px;color:var(--text3)">The original forgiveness stays in history. Debt is restored today without a cash movement. This is not a repayment.</p><div class="form-group"><label>Reason if rejecting</label><textarea class="form-input" id="correctionDecision" maxlength="500"></textarea></div><div class="modal-footer"><button class="btn" onclick="App.showLoans()">Back</button><button class="btn" onclick="App.decideForgivenessCorrection('${esc(id)}','reject',this)">Reject</button><button class="btn btn-primary" onclick="App.decideForgivenessCorrection('${esc(id)}','confirm',this)">Confirm correction</button></div>`);
+}
+async function decideForgivenessCorrection(id,action,btn){
+  const reason=action === 'cancel' ? 'Cancelled by requester' : (document.getElementById('correctionDecision')?.value || '').trim();
+  if(action === 'reject' && !reason){showAlert('Give a reason.','danger');return;}
+  if(btn) btn.disabled=true;
+  try{await DB.forgivenessCorrectionAction(id,action,{reason});await showLoans();}catch(e){showAlert(e.message,'danger');if(btn) btn.disabled=false;}
 }
 
 async function showForgiveLoan(id){
@@ -11484,19 +11513,22 @@ function summarizeLoans(loans, fromDate, toDate){
   const upTo = r => { const d = dateOf(r); return !d || d <= toDate; };
   const live = (loans||[]).filter(l => l && (l.status === 'active' || l.status === 'settled'));
   const reps = live.flatMap(l => (l.repayments||[]).filter(r => r.status === 'confirmed').map(r => ({ ...r, direction: l.direction })));
+  const restorations=live.flatMap(l => (l.forgivenessCorrections || []).filter(c => c.status === 'confirmed').map(c => ({...c,direction:l.direction})));
   const writeoffs = live.flatMap(l => (l.forgiveness||[]).filter(f => f.status === 'confirmed').map(f => ({...f,direction:l.direction})));
   const sum = (list, f) => list.filter(f).reduce((t,r) => t + (r.amount||0), 0);
-  const open = dir => Math.max(0, sum(live, l => l.direction === dir && upTo(l)) - sum(reps, r => r.direction === dir && upTo(r)) - sum(writeoffs, f => f.direction === dir && upTo(f)));
+  const open = dir => Math.max(0, sum(live, l => l.direction === dir && upTo(l)) - sum(reps, r => r.direction === dir && upTo(r)) - sum(writeoffs, f => f.direction === dir && upTo(f)) + sum(restorations,c => c.direction === dir && upTo(c)));
   return {
     lentPeriod: sum(live, l => l.direction === 'lent' && inRange(l)),
     borrowedPeriod: sum(live, l => l.direction === 'borrowed' && inRange(l)),
     repaidToUsPeriod: sum(reps, r => r.direction === 'lent' && inRange(r)),
     repaidByUsPeriod: sum(reps, r => r.direction === 'borrowed' && inRange(r)),
+    restoredPeriod:sum(restorations,c => c.direction === 'lent' && inRange(c)),
+    borrowedRestoredPeriod:sum(restorations,c => c.direction === 'borrowed' && inRange(c)),
     forgivenPeriod: sum(writeoffs, f => f.direction === 'lent' && inRange(f)),
     borrowedForgivenPeriod: sum(writeoffs, f => f.direction === 'borrowed' && inRange(f)),
     owedToUsEnd: open('lent'),
     weOweEnd: open('borrowed'),
-    anyActivity: writeoffs.some(f => inRange(f)) || live.some(l => inRange(l)) || reps.some(r => inRange(r)) || open('lent') > 0.5 || open('borrowed') > 0.5
+    anyActivity: restorations.some(c => inRange(c)) || writeoffs.some(f => inRange(f)) || live.some(l => inRange(l)) || reps.some(r => inRange(r)) || open('lent') > 0.5 || open('borrowed') > 0.5
   };
 }
 
@@ -11730,6 +11762,7 @@ async function buildMonthlyStatementData(fromDate, toDate){
     satelliteFundsIn:satFundsSummary.inPeriod, satelliteFundsOut:satFundsSummary.outPeriod, satelliteFundsHeld:satFundsSummary.heldAsOf,
     satelliteFundsTransferOut:satFundsSummary.transferOutPeriod, satelliteFundsGift:satFundsSummary.giftPeriod,
     satelliteFundsReimbursement:satFundsSummary.reimbursementPeriod, satelliteFundsCorrection:satFundsSummary.correctionPeriod,
+    loansRestoredPeriod:loansSummary.restoredPeriod, loansBorrowedRestoredPeriod:loansSummary.borrowedRestoredPeriod,
     loansForgivenPeriod:loansSummary.forgivenPeriod, loansBorrowedForgivenPeriod:loansSummary.borrowedForgivenPeriod,
     loansLentPeriod:loansSummary.lentPeriod, loansBorrowedPeriod:loansSummary.borrowedPeriod, loansRepaidToUsPeriod:loansSummary.repaidToUsPeriod,
     loansRepaidByUsPeriod:loansSummary.repaidByUsPeriod, loansOwedToUsEnd:loansSummary.owedToUsEnd, loansWeOweEnd:loansSummary.weOweEnd,
@@ -16848,7 +16881,7 @@ async function generateMonthlyReport(){
     ${loansSummaryMR.anyActivity?`
     <div class="note-box" style="background:#f3e9df;border-color:#e0cbb4;color:#5a3a1c">
       <strong>Loans (money lent out or borrowed)</strong> — Still owed to the church ${fmt(loansSummaryMR.owedToUsEnd)} / Still owed by the church ${fmt(loansSummaryMR.weOweEnd)}
-      <div style="font-size:11px;margin-top:4px;color:#555">This period: lent out ${fmt(loansSummaryMR.lentPeriod)}, repaid to the church ${fmt(loansSummaryMR.repaidToUsPeriod)}, borrowed ${fmt(loansSummaryMR.borrowedPeriod)}, repaid by the church ${fmt(loansSummaryMR.repaidByUsPeriod)}. Debt forgiven (noncash): ${fmt(loansSummaryMR.forgivenPeriod)}; borrowed debt released (noncash): ${fmt(loansSummaryMR.borrowedForgivenPeriod)}. Write-offs reduce money owed without moving cash. Loan principal and repayments are not income or expenses.</div>
+      <div style="font-size:11px;margin-top:4px;color:#555">This period: lent out ${fmt(loansSummaryMR.lentPeriod)}, repaid to the church ${fmt(loansSummaryMR.repaidToUsPeriod)}, borrowed ${fmt(loansSummaryMR.borrowedPeriod)}, repaid by the church ${fmt(loansSummaryMR.repaidByUsPeriod)}. Debt forgiven (noncash): ${fmt(loansSummaryMR.forgivenPeriod)}; borrowed debt released (noncash): ${fmt(loansSummaryMR.borrowedForgivenPeriod)}. Corrections restored (noncash): ${fmt(loansSummaryMR.restoredPeriod)} receivables / ${fmt(loansSummaryMR.borrowedRestoredPeriod)} liabilities. Write-offs and corrections change money owed without moving cash. Loan principal and repayments are not income or expenses.</div>
     </div>`:''}
 
     ${reportSignatureHTML(pastorName, undefined, accountantName)}`;
@@ -22625,6 +22658,7 @@ return {
   onMonthChange, setIncomeTab, setBudgetMonth, toggleLineExpenses, toggleBudgetBreakdown, openBudgetBreakdown, generateBudget, rebuildBudgetPlan, acceptBudgetPlan, reopenBudgetPlan, editBudgetPlan, saveBudgetPlan, cancelBudgetEdit, budgetEditRecalc, budgetEditRemoveLine, budgetEditAddLine, checkBudgetAfford, toggleBudgetKnownBillsEditor, budgetKnownBillAdd, budgetKnownBillRemove, budgetKnownBillsUseSuggestion, saveBudgetKnownBills, showIncomeForm, updateIncomeTotal, updateIncomeCashBreakdown, addBankTransferRow, updateBankTransferTotal, retryDepositVerification, manuallyApproveDeposit, correctDepositAmount, submitDepositCorrection, deleteDepositRecord, submitIncome,
   showOtherIncomeForm, submitOtherIncome,
   viewIncome, showCashPoolModal, confirmDeleteIncome, submitDeleteIncome, _previewDepPhoto, correctIncomeDeposit, reconcileCashWithAccountant, submitReconcileCash, confirmDeposit, submitCashDeposit, confirmBulkDeposit, submitBulkDeposit, showRemittancePaymentModal, setRemHistPage, _remHistoryPage: remHistoryPage, _rrrRoundingLine: rrrRoundingLine, submitRemittance, showRemCutoffModal, saveRemCutoffDates, toggleRemCutoff, onRemDatesChange, onRemMethodChange, onRemReceiptPicked, onRemReceiptChange, _remReceiptPlan: remReceiptPlan, onRemSplitChange, onAreaTotalChange, toggleRemShareAdjust, gotoSatellitePool, printRemittanceReport, shareRemittanceReport, approveRemittance, deleteRemittance,
+  showForgivenessCorrection, submitForgivenessCorrection, reviewForgivenessCorrection, decideForgivenessCorrection,
   showForgiveLoan, submitForgiveness, reviewForgiveness, decideForgiveness,
   showLoans, showLoanForm, submitLoan, acknowledgeLoan, acknowledgeLoanRepayment, showRejectLoan, submitRejectLoan, showLoanRepaymentForm, submitLoanRepayment, viewLoanReceipt,
   showSatelliteFundForm, submitSatelliteFund, deleteSatelliteFundEntry, showSatelliteTransferForm, submitSatelliteTransfer, showSatelliteFundsInForm, submitSatelliteFundsIn, toggleSatEntryMenu, editSatelliteFundEntry, isRemittanceLinkedPayout,

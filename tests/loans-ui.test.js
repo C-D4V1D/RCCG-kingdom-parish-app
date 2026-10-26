@@ -199,3 +199,15 @@ test('forgiveness separate entry preserves repayment and Reverse; request form a
   posts.length=0;await App.decideForgiveness('F1','confirm');
   assert.equal(posts[0].path,'loan-forgiveness/F1/confirm');
 });
+test('linked correction has separate request/review screens and preserves original forgiveness history',async()=>{
+  App._setTestUser({id:'u2',role:'it_admin',name:'Example reviewer'});loans=sample();
+  loans[2].forgiveness=[{id:'F1',amount:1000,status:'confirmed',requestedById:'u1',requestedByName:'Example requester',reason:'Example writeoff'}];
+  await App.showLoans();assert.match(lastOverlay.innerHTML,/Correct forgiveness/);
+  await App.showForgivenessCorrection('A-1','F1');assert.match(lastOverlay.innerHTML,/The original forgiveness stays in history/);
+  els.correctionReason=Object.assign(makeElement(),{value:'Example error'});posts.length=0;
+  await App.submitForgivenessCorrection('F1');assert.equal(posts[0].path,'loan-forgiveness/F1/correct');
+  loans[2].forgivenessCorrections=[{id:'C1',forgivenessId:'F1',status:'pending',amount:1000,requestedById:'u1',requestedByName:'Example requester',reason:'Example error'}];
+  await App.showLoans();assert.match(lastOverlay.innerHTML,/Review correction/);
+  await App.reviewForgivenessCorrection('A-1','C1');assert.match(lastOverlay.innerHTML,/Confirm correction/);
+  posts.length=0;await App.decideForgivenessCorrection('C1','confirm');assert.equal(posts[0].path,'loan-forgiveness-corrections/C1/confirm');
+});

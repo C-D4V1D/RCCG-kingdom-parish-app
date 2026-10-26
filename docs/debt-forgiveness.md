@@ -15,8 +15,12 @@ cash movement. Reports show the amounts separately as noncash write-offs.
 Repayments and forgiveness cannot be pending together. Loan or repayment
 reversal is blocked once a forgiveness request is pending or confirmed, to
 avoid undoing settled accounting history. Reject or cancel pending forgiveness
-before correcting the loan. Confirmed forgiveness has no delete/reverse action
-in this version. Existing Reverse remains available for unaffected loans.
+before correcting the loan. Confirmed forgiveness is never deleted or edited. A linked correction request
+restores its exact amount only after a different human confirms. Corrections have
+their own reasons, actors and dates; pending/rejected/cancelled corrections change
+nothing. Each forgiveness can have only one pending or confirmed correction.
+Existing Reverse becomes usable again after all write-offs on that loan are
+corrected and no forgiveness request remains pending.
 
 Fully forgiven loans keep the underlying acknowledged loan status so original
 cash movements remain in every historical cash calculation. The Loans screen

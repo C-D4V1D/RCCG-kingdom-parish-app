@@ -383,10 +383,10 @@ function renderReport(resp){
 
   // Loans (money lent out or borrowed) — memo only: they move money between cash on hand and money owed, so they are
   // never part of Income, Expenses or Net Position. No names are shared. Older shared statements omit these fields.
-  if(D.loansOwedToUsEnd !== undefined && ((D.loansForgivenPeriod||0)+(D.loansBorrowedForgivenPeriod||0)+(D.loansLentPeriod||0)+(D.loansBorrowedPeriod||0)+(D.loansRepaidToUsPeriod||0)+(D.loansRepaidByUsPeriod||0)+(D.loansOwedToUsEnd||0)+(D.loansWeOweEnd||0))>0){
+  if(D.loansOwedToUsEnd !== undefined && ((D.loansRestoredPeriod||0)+(D.loansBorrowedRestoredPeriod||0)+(D.loansForgivenPeriod||0)+(D.loansBorrowedForgivenPeriod||0)+(D.loansLentPeriod||0)+(D.loansBorrowedPeriod||0)+(D.loansRepaidToUsPeriod||0)+(D.loansRepaidByUsPeriod||0)+(D.loansOwedToUsEnd||0)+(D.loansWeOweEnd||0))>0){
     html += `<div style="margin:14px 0;padding:10px 12px;border:1px solid #e0cbb4;background:#f3e9df;border-radius:8px;font-size:12px;color:#5a3a1c">
       <strong>Loans (money lent out or borrowed)</strong> — Still owed to the church ${N(D.loansOwedToUsEnd||0)} / Still owed by the church ${N(D.loansWeOweEnd||0)}
-      <div style="font-size:11px;margin-top:4px;color:#555">This period: lent out ${N(D.loansLentPeriod||0)}, repaid to the church ${N(D.loansRepaidToUsPeriod||0)}, borrowed ${N(D.loansBorrowedPeriod||0)}, repaid by the church ${N(D.loansRepaidByUsPeriod||0)}. Debt forgiven (noncash): ${N(D.loansForgivenPeriod||0)}; borrowed debt released (noncash): ${N(D.loansBorrowedForgivenPeriod||0)}. Write-offs reduce money owed without moving cash. Principal and repayments are not income or expenses.</div>
+      <div style="font-size:11px;margin-top:4px;color:#555">This period: lent out ${N(D.loansLentPeriod||0)}, repaid to the church ${N(D.loansRepaidToUsPeriod||0)}, borrowed ${N(D.loansBorrowedPeriod||0)}, repaid by the church ${N(D.loansRepaidByUsPeriod||0)}. Debt forgiven (noncash): ${N(D.loansForgivenPeriod||0)}; borrowed debt released (noncash): ${N(D.loansBorrowedForgivenPeriod||0)}. Corrections restored (noncash): ${N(D.loansRestoredPeriod||0)} receivables / ${N(D.loansBorrowedRestoredPeriod||0)} liabilities. Write-offs and corrections change money owed without moving cash. Principal and repayments are not income or expenses.</div>
     </div>`;
   }
 

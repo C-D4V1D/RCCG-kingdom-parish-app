@@ -366,3 +366,15 @@ test('forgiven borrowed liability raises net fund value, never fabricates cash o
   const b=await balance({income,loans:[l]});
   assert.equal(b.cashWithAccountant,130000);assert.equal(b.loansWeOwe,20000);assert.equal(b.total,110000);
 });
+test('linked correction restores receivable/liability on confirmation date with no cash changes and independent report disclosure',async()=>{
+  for(const direction of ['lent','borrowed']){
+    const l=loan({direction,forgiveness:[{status:'confirmed',amount:10000,date:'2026-10-10'}],forgivenessCorrections:[{status:'confirmed',amount:10000,date:'2026-10-20'}]});
+    const calc=day=>App._calcChurchBalance(day,{income,loans:[l],expenses:[],remittances:[],cashTx:[],pettyHistory:[],satelliteFunds:[],remRates:{}});
+    const before=await calc('2026-10-19'),after=await calc('2026-10-20');
+    assert.equal(before.cashWithAccountant,after.cashWithAccountant);assert.equal(after.total,100000);
+    assert.equal(before.total,direction==='lent'?90000:110000);
+    const s=App._summarizeLoans([l],'2026-10-01','2026-10-31');
+    assert.equal(direction==='lent'?s.restoredPeriod:s.borrowedRestoredPeriod,10000);
+    assert.equal(direction==='lent'?s.owedToUsEnd:s.weOweEnd,30000);
+  }
+});

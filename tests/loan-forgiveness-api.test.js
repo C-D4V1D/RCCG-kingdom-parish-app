@@ -103,3 +103,31 @@ test('existing signed-in session heals absent forgiveness schema on read and req
   assert.equal(r.status,200);assert.ok(Array.isArray(await r.json()));
   assert.equal((await request(1000)).status,200);
 });
+for(const direction of ['lent','borrowed']) test(`linked correction ${direction}: two humans, fixed amount, immutable source, restored balance without cash, Reverse usable again`,async()=>{
+  const {DB,call,request,confirm,list,loanId}=await setup('bank',direction);
+  const f=await(await request(6000)).json();await confirm(f.id);
+  const counts=async()=> (await DB.prepare('SELECT COUNT(*) n FROM cash_transactions').first()).n;
+  const before=await counts();
+  const correct=async(who='accountant',body={reason:'Original write-off entered in error',amount:1})=>call(`loan-forgiveness/${f.id}/correct`,who,body);
+  assert.equal((await correct('viewer')).status,403);assert.equal((await correct('accountant',{})).status,400);
+  const r=await correct();assert.equal(r.status,200);const c=await r.json();
+  assert.equal((await correct()).status,409);assert.equal((await list()).outstanding,4000);
+  const decide=who=>call(`loan-forgiveness-corrections/${c.id}/confirm`,who,{});
+  assert.equal((await decide('accountant')).status,403);assert.equal((await decide('viewer')).status,403);
+  assert.equal((await call(`loans/${loanId}/reverse`,'admin',{reason:'Example'})).status,409);
+  assert.equal((await decide('pastor')).status,200);assert.equal((await decide('pastor')).status,409);
+  const l=await list();assert.equal(l.forgiven,0);assert.equal(l.outstanding,10000);
+  assert.equal(l.forgiveness[0].status,'confirmed');assert.equal(l.forgivenessCorrections[0].amount,6000);
+  assert.equal(l.forgivenessCorrections[0].forgivenessId,f.id);assert.equal(await counts(),before);
+  assert.equal((await correct()).status,409);
+  const pub=await list('viewer');assert.equal(pub.forgivenessCorrections[0].requestedByName,undefined);
+  assert.equal((await call(`loans/${loanId}/reverse`,'admin',{reason:'Example correction completed'})).status,200);
+});
+test('correction rejection/cancellation preserve original writeoff; new correction possible',async()=>{
+  const {call,request,confirm,list}=await setup();const f=await(await request(5000)).json();await confirm(f.id);
+  const make=async()=> (await(await call(`loan-forgiveness/${f.id}/correct`,'accountant',{reason:'Example error'})).json());
+  let c=await make();assert.equal((await call(`loan-forgiveness-corrections/${c.id}/reject`,'pastor',{reason:'Not agreed'})).status,200);
+  c=await make();assert.equal((await call(`loan-forgiveness-corrections/${c.id}/cancel`,'pastor',{reason:'No'})).status,403);
+  assert.equal((await call(`loan-forgiveness-corrections/${c.id}/cancel`,'accountant',{reason:'Withdrawn'})).status,200);
+  assert.equal((await list()).outstanding,5000);assert.equal((await list()).forgivenessCorrections.length,2);
+});
