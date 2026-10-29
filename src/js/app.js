@@ -3933,8 +3933,11 @@ async function calcChurchBalance(asOfDate, prefetched){
   return {
     cashWithAccountant: (Math.abs(cashWithAccountantRaw) < 0.005 ? 0 : Math.max(0, cashWithAccountantRaw)),
     // cashDeficit > 0 means cash outflows (approved + pending) exceed recorded cash inflows —
-    // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here
-    cashDeficit: Math.max(0, -cashWithAccountantRaw),
+    // accountant has disbursed more cash than received; pending expenses awaiting approval contribute here.
+    // Same sub-half-kobo clamp as cashWithAccountant above: percentage splits (e.g. the
+    // children-offering teacher share) leave paise-level float residue, and without the clamp a
+    // raw of -0.0049 renders on the Dashboard as a red "Owes −₦0" for a zero balance.
+    cashDeficit: (Math.abs(cashWithAccountantRaw) < 0.005 ? 0 : Math.max(0, -cashWithAccountantRaw)),
     bankBalance,
     pettyFloat,
     heldForSatellites,
