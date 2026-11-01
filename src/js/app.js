@@ -2190,7 +2190,7 @@ function buildCashPoolDetailLines(cashTx, expenses, satelliteFunds, remittances,
   return { expenseLines, remitLines, payoutLines, depositLines, loanInLines, loanOutLines };
 }
 
-function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates){
+function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, allIncome, openingCache){
   const { from, to } = getSundayCashCycleRange(record?.date || record?.createdAt);
   const cashFromCollection = getSundayCashWithAccountant(record, remRates);
   const satelliteCashIn = (satelliteFunds||[]).filter(s=>s.direction==='in' && s.channel==='cash' && isDateKeyInRange(getCashLedgerDateKey(s), from, to)).reduce((s,r)=>s+(r.amount||0),0);
@@ -2212,7 +2212,19 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
   const loanCashOut = sumLoanMoves(cycleLoanMoves, 'out');
   const nonDepositOut = cashExpenses + pettyCashTopups + remittancesCash + poolPayoutsCash + loanCashOut;
   const earlierCashUsed = Math.max(0, nonDepositOut - (cashFromCollection + satelliteCashIn + loanCashIn));
-  const netCashToDeposit = Math.max(0, cashFromCollection + satelliteCashIn + loanCashIn - nonDepositOut);
+  // Any overall cash-pool shortfall before this week (e.g. loans given out earlier) is made up first by this week's cash.
+  let openingBalance = 0;
+  if(Array.isArray(allIncome) && from){
+    if(openingCache && openingCache.has(from)) openingBalance = openingCache.get(from);
+    else {
+      openingBalance = computeCashPoolBreakdown(allIncome, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, getPreviousDateKey(from)).balance;
+      if(openingCache) openingCache.set(from, openingBalance);
+    }
+  }
+  const deficit = openingBalance < 0 ? -openingBalance : 0;
+  const weekNet = Math.max(0, cashFromCollection + satelliteCashIn + loanCashIn - nonDepositOut);
+  const earlierShortfallCovered = Math.min(deficit, weekNet);
+  const netCashToDeposit = weekNet - earlierShortfallCovered;
   const stillWithAccountant = Math.max(0, netCashToDeposit - cashDeposited);
   return {
     fromDate: from,
@@ -2226,6 +2238,7 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
     loanCashIn,
     loanCashOut,
     earlierCashUsed,
+    earlierShortfallCovered,
     cashDeposited,
     netCashToDeposit,
     stillWithAccountant,
@@ -2233,11 +2246,13 @@ function computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satellit
   };
 }
 
-function buildSundayCashCycleMap(records, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates){
+function buildSundayCashCycleMap(records, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, allIncome){
   const map = new Map();
+  const openingCache = new Map();
+  allIncome = allIncome || records;
   for(const record of (records||[])){
     if(record?.source && record.source!=='sunday_collection') continue;
-    map.set(record.id, computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates));
+    map.set(record.id, computeSundayCashCycle(record, cashTx, expenses, pettyHistory, satelliteFunds, remittances, remRates, allIncome, openingCache));
   }
   return map;
 }
@@ -2292,6 +2307,7 @@ function renderSundayCashCycleSectionHTML(cycle, lines){
     ${cycle.poolPayoutsCash>0.5?renderExpandableCashRow('🛰️','Pool payments (cash)', cycle.poolPayoutsCash, L.payoutLines, '-'):''}
     ${cycle.loanCashOut>0.5?renderExpandableCashRow('🤝','Loan money paid out in cash', cycle.loanCashOut, null, '-'):''}
     ${cycle.pettyCashTopups>0.5?renderExpandableCashRow('🏧','Petty cash top-ups (from cash)', cycle.pettyCashTopups, L.pettyLines, '-'):''}
+    ${cycle.earlierShortfallCovered>0.5?`<div title="Before this week, more cash was given out than the accountant held (for example loans). This Sunday's cash made up that gap first.">${renderExpandableCashRow('↩','Covers earlier cash already given out (e.g. loans)', cycle.earlierShortfallCovered, null, '-')}<div style="font-size:11px;color:var(--text3);line-height:1.4;padding:0 0 4px 22px">Before this week, more cash was given out than the accountant held (for example loans). This Sunday's cash made up that gap first.</div></div>`:''}
     <div class="status-row" style="border-top:1px solid var(--border);padding-top:6px"><div class="status-row-label" style="font-weight:600">= Net cash to deposit from this Sunday</div><div class="status-row-amt" style="font-weight:700;color:${cycle.netCashToDeposit>0.5?'var(--amber)':'var(--primary-text)'}">${fmt(cycle.netCashToDeposit)}</div></div>
     ${cycle.cashDeposited>0.5?renderExpandableCashRow('✅','Deposited to bank', cycle.cashDeposited, L.depositLines, '-'):''}
     <div class="status-row" style="border-top:2px solid var(--border);padding-top:8px"><div class="status-row-label" style="font-weight:700">= Still with accountant (this Sunday)</div><div class="status-row-amt" style="font-weight:800;font-size:16px;color:${cycle.stillWithAccountant>0.5?'var(--amber)':'var(--primary-text)'}">${fmt(cycle.stillWithAccountant)}</div></div>
@@ -5939,7 +5955,7 @@ async function renderIncome(){
   const otherRecs  = records.filter(r=>r.source && r.source!=='sunday_collection');
   const tab = state.incomeTab||'list';
   const expCoveringMap = buildExpenseCoveringMap(allIncomeRecs, _cashTx, remRates, allExpensesRI, allPettyRI, allRemsRI, allSatFundsRI);
-  const sundayCashCycleMap = buildSundayCashCycleMap(allIncomeRecs, _cashTx, allExpensesRI, allPettyRI, allSatFundsRI, allRemsRI, remRates);
+  const sundayCashCycleMap = buildSundayCashCycleMap(allIncomeRecs, _cashTx, allExpensesRI, allPettyRI, allSatFundsRI, allRemsRI, remRates, allIncomeRecs);
   // Pending count for this month's income records (informational only).
   // Uses the FIFO-reconciled map so a record only counts as pending when its
   // share of the global cashWithAccountant pool is still positive.
@@ -7950,7 +7966,7 @@ async function viewIncome(id){
   const childrenTeacherHeld = isSunday ? getChildrenTeacherHeldCash(r, remRates) : 0;
   const cashHeld = getIncomeCashWithAccountant(r, remRates);
   const [allCashVI, allExpensesVI, allPettyVI, settingsVI, allRemsVI, allSatFundsVI] = await Promise.all([DB.getCashTransactions(), DB.getExpenses(), DB.getPetty(), DB.getSettings(), DB.getRemittances(), DB.getSatelliteFunds()]);
-  const sundayCycle = isSunday ? computeSundayCashCycle(r, allCashVI, allExpensesVI, allPettyVI, allSatFundsVI, allRemsVI, remRates) : null;
+  const sundayCycle = isSunday ? computeSundayCashCycle(r, allCashVI, allExpensesVI, allPettyVI, allSatFundsVI, allRemsVI, remRates, allIncVI) : null;
   const sundayCycleLines = isSunday ? buildSundayCashCycleDetailLines(r, allCashVI, allExpensesVI, allPettyVI, allSatFundsVI, allRemsVI) : null;
   // Deposits explicitly tagged to THIS record — shown (with AI-verification actions) in
   // the footer so the user can audit/act on each physical deposit slip they linked here.
@@ -8316,7 +8332,7 @@ async function confirmDeposit(id){
   const totalCashWithAccountant = balance.cashWithAccountant;
   const isSunday = !r.source || r.source==='sunday_collection';
   const expMapCD = buildExpenseCoveringMap(allIncCD, allCashCD, remRates, allExpensesCD, allPettyCD, allRemsCD, allSatFundsCD);
-  const sundayCycle = isSunday ? computeSundayCashCycle(r, allCashCD, allExpensesCD, allPettyCD, allSatFundsCD, allRemsCD, remRates) : null;
+  const sundayCycle = isSunday ? computeSundayCashCycle(r, allCashCD, allExpensesCD, allPettyCD, allSatFundsCD, allRemsCD, remRates, allIncCD) : null;
   const alreadyDeposited = sundayCycle
     ? sundayCycle.cashDeposited
     : allCashCD.filter(t=>t.type==='cash_deposit'&&t.incomeRef===r.id).reduce((s,t)=>s+(t.amount||0),0);
@@ -22785,6 +22801,7 @@ return {
   _loanCashMovements: loanCashMovements,
   _buildCashPoolDetailLines: buildCashPoolDetailLines,
   _renderCashPoolSectionHTML: renderCashPoolSectionHTML,
+  _renderSundayCashCycleSectionHTML: renderSundayCashCycleSectionHTML,
   _setLoansLatest: a => { DB._loansLatest = a; },
   _renderDashBudgetBreakdown: renderDashBudgetBreakdown,
   _calcRemittancesFromRecords: calcRemittancesFromRecords,
