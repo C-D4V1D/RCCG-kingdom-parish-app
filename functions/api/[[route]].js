@@ -366,7 +366,8 @@ function financeRoleDenied(user, route, param, method) {
     // portal again — deliberately open to every role that can see the Dashboard/Bank
     // page, viewer included (see the Real Balance feature note).
     const allowed = (route === 'change-pin') || (route === 'audit' && method === 'POST' && !param)
-      || (route === 'bank-portal-balance' && param === 'refresh');
+      || (route === 'bank-portal-balance' && param === 'refresh')
+        || (route === 'push');   // a read-only person can still turn phone alerts on for themselves
     if (!allowed) return finAuthErr('forbidden', 403, 'Your role (viewer) is read-only.');
   }
   if (route === 'remit-file-now' && !REMIT_FILE_ROLES.includes(user.role)) {
@@ -2167,9 +2168,18 @@ async function routeSatelliteRequest(context, { url, method, parts, authz }) {
   return routeApiRequest(satContext, { DB: SDB, url, method, path: sub.join('/'), parts: sub, route, param, authz });
 }
 
+// ── PHONE NOTIFICATIONS (Web Push) ───────────────────────────────
+// Keys are created automatically on first use and kept in the push_config table (excluded from backups).
+// createNotification() sends inside its own request (waiting at most PUSH_WAIT_MS), so no request-shared context is
+// needed; it never breaks a request. _pushOrigin is only this site's address (the same for every request).
+import { getVapidKeys, saveSubscription, removeSubscription, pushNotification } from '../_lib/webpush.js';
+let _pushOrigin = '';
+const PUSH_WAIT_MS = 3000;
+
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
+  try { _pushOrigin = new URL(request.url).origin; } catch { /* keep the previous value */ }
 
   // Handle CORS preflight
   if (request.method === 'OPTIONS') {
@@ -2707,6 +2717,21 @@ async function routeApiRequest(context, { DB, url, method, path, parts, route, p
       const auth = await requireKpscRole(DB, request, KPSC_ADMIN_ROLES);
       if (auth instanceof Response) return auth;
       return await sendRemitWebhookTest(env, auth, requestOrigin(request));
+    }
+
+    // ── /api/push — phone alerts: GET key, POST subscribe, POST unsubscribe ──
+    if (route === 'push') {
+      const pushUser = authz.finance;
+      if (!pushUser) return err('Sign in to turn on phone alerts.', 401);
+      if (method === 'GET' && param === 'key') return ok({ publicKey: (await getVapidKeys(DB)).publicKey });
+      if (method === 'POST' && param === 'subscribe') {
+        const saved = await saveSubscription(DB, pushUser, body?.subscription);
+        return saved.ok ? ok({ ok: true }) : err(saved.error, 400);
+      }
+      if (method === 'POST' && param === 'unsubscribe') {
+        await removeSubscription(DB, pushUser, body?.endpoint);
+        return ok({ ok: true });
+      }
     }
 
     // ── /api/notifications ─────────────────────────────────────
@@ -13660,6 +13685,15 @@ async function createNotification(DB, data) {
   const roles = Array.isArray(data.roles) && data.roles.length ? `,${data.roles.join(',')},` : '';
   await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts,roles) VALUES (?,?,?,?,?,?)`)
     .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString(), roles).run();
+  // Also buzz the phones that turned on alerts. Sent while this request is still alive (so delivery can't be cut
+  // off), capped at PUSH_WAIT_MS, and fail-soft: pushNotification never throws.
+  try {
+    const subject = _pushOrigin || 'https://rccg-kingdom-parish-app.pages.dev';
+    let timer;
+    const cap = new Promise(resolve => { timer = setTimeout(resolve, PUSH_WAIT_MS); });
+    await Promise.race([pushNotification(DB, { title: data.title, body: data.body, roles, subject }), cap]);
+    clearTimeout(timer);
+  } catch (e) { console.warn('[push] not sent:', e?.message || e); }
   return ok({ id });
 }
 

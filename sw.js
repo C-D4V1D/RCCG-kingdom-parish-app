@@ -1,5 +1,5 @@
-// build:02889be112
-const CACHE = 'kpadmin-v39';
+// build:15592cf7dc
+const CACHE = 'kpadmin-v40';
 const SHELL = [
   '/',
   '/index.html',
@@ -127,4 +127,30 @@ self.addEventListener('fetch', e => {
         .catch(() => new Response('', { status: 503, statusText: 'Offline' }));
     })
   );
+});
+
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data.json(); } catch (e) { data = {}; }
+  event.waitUntil(self.registration.showNotification(data.title || 'Kingdom Parish', {
+    body: data.body || 'You have a new notification.',
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-96.png',
+    tag: 'kp-notification',
+    renotify: true,
+    data: { url: data.url || '/' }
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) {
+      if ('focus' in c) {
+        return c.focus().then(f => (f && 'navigate' in f && url !== '/' ? f.navigate(url) : f));
+      }
+    }
+    return clients.openWindow(url);
+  }));
 });
