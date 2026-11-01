@@ -2170,14 +2170,16 @@ async function routeSatelliteRequest(context, { url, method, parts, authz }) {
 
 // ── PHONE NOTIFICATIONS (Web Push) ───────────────────────────────
 // Keys are created automatically on first use and kept in the push_config table (excluded from backups).
-// createNotification() reads _pushCtx to send in the background after the response; it never blocks or breaks a request.
+// createNotification() sends inside its own request (waiting at most PUSH_WAIT_MS), so no request-shared context is
+// needed; it never breaks a request. _pushOrigin is only this site's address (the same for every request).
 import { getVapidKeys, saveSubscription, removeSubscription, pushNotification } from '../_lib/webpush.js';
-let _pushCtx = null;
+let _pushOrigin = '';
+const PUSH_WAIT_MS = 3000;
 
 // ── ROUTER ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
-  _pushCtx = context;
+  try { _pushOrigin = new URL(request.url).origin; } catch { /* keep the previous value */ }
 
   // Handle CORS preflight
   if (request.method === 'OPTIONS') {
@@ -13683,11 +13685,14 @@ async function createNotification(DB, data) {
   const roles = Array.isArray(data.roles) && data.roles.length ? `,${data.roles.join(',')},` : '';
   await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts,roles) VALUES (?,?,?,?,?,?)`)
     .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString(), roles).run();
-  // Also buzz the phones that turned on alerts. Background, fail-soft: never delays or breaks the caller.
+  // Also buzz the phones that turned on alerts. Sent while this request is still alive (so delivery can't be cut
+  // off), capped at PUSH_WAIT_MS, and fail-soft: pushNotification never throws.
   try {
-    const subject = _pushCtx?.request ? new URL(_pushCtx.request.url).origin : 'https://rccg-kingdom-parish-app.pages.dev';
-    const sending = pushNotification(DB, { title: data.title, body: data.body, roles, subject });
-    if (typeof _pushCtx?.waitUntil === 'function') _pushCtx.waitUntil(sending);
+    const subject = _pushOrigin || 'https://rccg-kingdom-parish-app.pages.dev';
+    let timer;
+    const cap = new Promise(resolve => { timer = setTimeout(resolve, PUSH_WAIT_MS); });
+    await Promise.race([pushNotification(DB, { title: data.title, body: data.body, roles, subject }), cap]);
+    clearTimeout(timer);
   } catch (e) { console.warn('[push] not sent:', e?.message || e); }
   return ok({ id });
 }
