@@ -16,7 +16,7 @@
 // a Cloudflare API token with D1 Edit permission, saved as the Pages secret CF_D1_API_TOKEN.
 
 export const BACKUP_FORMAT = 'rccg-full-backup';
-export const BACKUP_SKIP_TABLES = new Set(['_cf_KV', 'app_secrets', 'auth_throttle', 'kpsc_sessions', 'sqlite_sequence', 'd1_migrations']);
+export const BACKUP_SKIP_TABLES = new Set(['_cf_KV', 'app_secrets', 'auth_throttle', 'kpsc_sessions', 'sqlite_sequence', 'd1_migrations', 'push_config', 'push_subscriptions']); // push_config holds a private signing key: never in backups
 export const BACKUP_MERGE_ONLY_TABLES = new Set(['users', 'kpsc_accounts']);
 // PIN hashes never leave the database in any export. A login missing from the database therefore can't be
 // re-created from a backup (its PIN column is required, so INSERT OR IGNORE skips it): the IT admin re-adds it.

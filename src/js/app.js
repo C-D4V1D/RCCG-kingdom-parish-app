@@ -2905,12 +2905,61 @@ async function toggleNotifications(){
   const showing=panel.style.display==='block';
   panel.style.display=showing?'none':'block';
   if(!showing){
+    renderPushRow().catch(()=>{});
     const notifs=await DB.getNotifications();
     const list=document.getElementById('notifList');
     if(!notifs.length){ list.innerHTML='<div class="notif-empty">No notifications</div>'; }
     else{ list.innerHTML=notifs.slice(0,15).map(n=>`<div class="notif-item" style="opacity:${n.read?0.6:1}"><div class="notif-item-title">${esc(n.title)}</div><div class="notif-item-body">${esc(n.body)}</div><div class="notif-item-time">${fmtDate(n.ts)} ${fmtTime(n.ts)}</div></div>`).join('') }
     await DB.markAllRead();
     await updateNotifBadge();
+  }
+}
+
+// Phone alerts (Web Push)
+function pushSupported(){ return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+function urlB64ToUint8Array(b64url){
+  const pad='='.repeat((4-b64url.length%4)%4);
+  const raw=atob((b64url+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from(raw,c=>c.charCodeAt(0));
+}
+async function renderPushRow(msg){
+  const el=document.getElementById('pushRow');
+  if(!el) return;
+  if(!pushSupported()){ el.innerHTML='Phone alerts need a newer browser. On iPhone, add the app to the Home Screen first.'; return; }
+  const reg=await navigator.serviceWorker.ready;
+  const sub=await reg.pushManager.getSubscription();
+  const note=msg?`<div>${esc(msg)}</div>`:'';
+  if(Notification.permission==='denied'){ el.innerHTML=note+"Phone alerts are blocked. Allow notifications for this app in your phone's site settings."; return; }
+  if(sub && Notification.permission==='granted'){
+    apiFetch('push/subscribe','POST',{subscription:sub.toJSON()}).catch(()=>{});
+    el.innerHTML=`${note}Phone alerts are ON <button class="btn btn-sm" style="margin-left:8px" onclick="App.disablePushAlerts()">Turn off</button>`;
+    return;
+  }
+  el.innerHTML=`${note}<button class="btn btn-sm" onclick="App.enablePushAlerts()">Turn on phone alerts</button>`;
+}
+async function enablePushAlerts(){
+  try{
+    if(await Notification.requestPermission()!=='granted'){ await renderPushRow(); return; }
+    const {publicKey}=await apiFetch('push/key');
+    const reg=await navigator.serviceWorker.ready;
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64ToUint8Array(publicKey)});
+    await apiFetch('push/subscribe','POST',{subscription:sub.toJSON()});
+    await renderPushRow();
+  }catch(e){
+    try{ await renderPushRow('Could not turn on phone alerts. Please try again.'); }catch(_){}
+  }
+}
+async function disablePushAlerts(){
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    const sub=await reg.pushManager.getSubscription();
+    if(sub){
+      try{ await apiFetch('push/unsubscribe','POST',{endpoint:sub.endpoint}); }catch(_){}
+      await sub.unsubscribe();
+    }
+    await renderPushRow();
+  }catch(e){
+    try{ await renderPushRow('Could not turn off phone alerts. Please try again.'); }catch(_){}
   }
 }
 
@@ -22653,7 +22702,7 @@ async function atDoSave(btn, auto){
 // ──────────────────────────────────────────
 return {
   satOpen, satBack, satShift, satFormInput, satSave, satUserMenu, retrySatBoot,
-  onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications,
+  onRoleChange, login, logout, showChangePinModal, submitChangePin, navigate, toggleSidebar, toggleNotifications, enablePushAlerts, disablePushAlerts,
   attShiftPeriod, attOpenWeek, attAddService, attRemoveService, attStep, attConfirmSubmit, attSubmit, attEditWeek,
   attUnlockPrompt, attUnlock, attBackToCollection, refreshIncomeAttendance, incGoToAttendance, incDiscardDraft,
   attToggleFurther, attKeepFurther,
