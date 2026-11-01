@@ -2924,18 +2924,23 @@ function urlB64ToUint8Array(b64url){
 }
 async function renderPushRow(msg){
   const el=document.getElementById('pushRow');
-  if(!el) return;
-  if(!pushSupported()){ el.innerHTML='Phone alerts need a newer browser. On iPhone, add the app to the Home Screen first.'; return; }
+  const bn=document.getElementById('pushBanner');
+  if(!el && !bn) return;
+  const set=(row,banner)=>{ if(el) el.innerHTML=row; if(bn) bn.innerHTML=banner; };
+  if(!pushSupported()){ set('Phone alerts need a newer browser. On iPhone, add the app to the Home Screen first.',
+    '<div class="push-banner"><strong>Phone alerts:</strong> on iPhone, add this app to your Home Screen and open it from there, then come back here to turn on alerts. Other phones: update your browser.</div>'); return; }
   const reg=await navigator.serviceWorker.ready;
   const sub=await reg.pushManager.getSubscription();
   const note=msg?`<div>${esc(msg)}</div>`:'';
-  if(Notification.permission==='denied'){ el.innerHTML=note+"Phone alerts are blocked. Allow notifications for this app in your phone's site settings."; return; }
+  if(Notification.permission==='denied'){ set(note+"Phone alerts are blocked. Allow notifications for this app in your phone's site settings.",
+    `<div class="push-banner">${note}Phone alerts are blocked. Allow notifications for this app in your phone's site settings, then reload.</div>`); return; }
   if(sub && Notification.permission==='granted'){
     apiFetch('push/subscribe','POST',{subscription:sub.toJSON()}).catch(()=>{});
-    el.innerHTML=`${note}Phone alerts are ON <button class="btn btn-sm" style="margin-left:8px" onclick="App.disablePushAlerts()">Turn off</button>`;
+    set(`${note}Phone alerts are ON <button class="btn btn-sm" style="margin-left:8px" onclick="App.disablePushAlerts()">Turn off</button>`, msg?`<div class="push-banner">${note}</div>`:'');
     return;
   }
-  el.innerHTML=`${note}<button class="btn btn-sm" onclick="App.enablePushAlerts()">Turn on phone alerts</button>`;
+  set(`${note}<button class="btn btn-sm" onclick="App.enablePushAlerts()">Turn on phone alerts</button>`,
+    `<div class="push-banner">${note}<div style="font-weight:700;font-size:15px">📲 Get alerts on your phone</div><div style="margin:4px 0 10px;font-size:13px;color:var(--text2)">Know straight away when money is recorded, a loan needs your OK, or a remittance is due.</div><button class="btn btn-primary" style="width:100%;padding:12px;font-size:15px" onclick="App.enablePushAlerts()">Turn on phone alerts</button></div>`);
 }
 async function enablePushAlerts(){
   try{
@@ -5155,6 +5160,8 @@ async function renderDashboard(){
       </div>
     </div>
 
+    ${isSatellite() ? '' : '<div id="pushBanner"></div>'}
+
     <!-- Period selector — full-width block so the two cards span the device edge-to-edge -->
     <section style="margin:0 0 18px">
       <div style="font-size:10.5px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.7px;margin-bottom:8px;text-align:center">Select Period Type</div>
@@ -5789,6 +5796,7 @@ async function renderDashboard(){
         </div>
       </div>
     </div>`;
+  if(!isSatellite()) renderPushRow().catch(()=>{});
 }
 
 async function calcRemittancesFromRecords(records, preRates){
@@ -13291,7 +13299,6 @@ async function submitBankWithdrawal(btn=null){
         status:'approved'
       });
       DB.addAudit('expense_recorded',`Direct expense from bank withdrawal: ${fmt(amount)} — "${fullDesc||txDescription}" (${expCat})`,state.user?.name);
-      DB.addNotification('Direct Expense Logged',`${fmt(amount)} withdrawn and logged as "${catLabel}" expense.`,'info');
       closeModal();
       showAlert(`${fmt(amount)} withdrawn and logged as "${catLabel}" expense. Ref: ${reference||'—'}.`,'success');
 

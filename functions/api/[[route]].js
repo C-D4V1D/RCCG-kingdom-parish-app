@@ -5401,7 +5401,8 @@ async function getExpenseReceipt(DB, id) {
   return ok({ receiptImage: row.receipt_image || '', receiptFileName: row.receipt_file_name || '' });
 }
 
-async function createExpense(DB, data) {
+// opts.silent = no notification (restore/import). opts.noPush = in-app notification only, no phone buzz (bulk imports).
+async function createExpense(DB, data, opts = {}) {
   const id = data.id || newId('EXP-');
   const insertStmt = DB.prepare(`
     INSERT INTO expenses
@@ -5438,6 +5439,20 @@ async function createExpense(DB, data) {
     await DB.batch([insertStmt, deductStmt]);
   } else {
     await insertStmt.run();
+  }
+  // Every expense that is recorded shows in the bell and (unless noPush) buzzes phones. Never fails the save.
+  if (!opts.silent) {
+    try {
+      const amt = Math.round((Number(data.amount) || 0) * 100) / 100;
+      const what = [data.category, data.subCategory].filter(Boolean).join(' / ');
+      const note = String(data.description || '').trim().slice(0, 80);
+      await createNotification(DB, {
+        title: 'Expense Recorded',
+        body: `₦${amt.toLocaleString('en-US', { maximumFractionDigits: 2 })}${what ? ` — ${what}` : ''}${note ? ` (${note})` : ''}`,
+        type: 'info',
+        push: opts.noPush ? false : undefined,
+      });
+    } catch (e) { console.warn('[notify] expense notification skipped:', e?.message || e); }
   }
   return ok({ ...data, id, pettyDeducted: pettyDeduction > 0 });
 }
@@ -10840,7 +10855,7 @@ async function handleBankReconStatement(DB, env, authz, body) {
           description: narration || chargeSubCategory, amount, paymentMethod: 'bank_transfer',
           status: 'approved', bankAmount: amount, cashAmount: 0, pettyAmount: 0,
           recordedBy: BANK_RECON_AUTO_CHARGE_RECORDER, receiptNo: String(item.reference || ''),
-        });
+        }, { noPush: true });   // a statement can add many charges: they show in the bell but don't buzz phones each
       }
       chargeCount++; autoCount++;
       usedRefs.set(bankReconRefKey({ sourceTable: 'expenses', sourceId: expenseId }), 'this upload');
@@ -13685,9 +13700,9 @@ async function createNotification(DB, data) {
   const roles = Array.isArray(data.roles) && data.roles.length ? `,${data.roles.join(',')},` : '';
   await DB.prepare(`INSERT INTO notifications (id,title,body,type,ts,roles) VALUES (?,?,?,?,?,?)`)
     .bind(id, data.title || '', data.body || '', data.type || 'info', new Date().toISOString(), roles).run();
-  // Also buzz the phones that turned on alerts. Sent while this request is still alive (so delivery can't be cut
-  // off), capped at PUSH_WAIT_MS, and fail-soft: pushNotification never throws.
-  try {
+  // Also buzz the phones that turned on alerts (skipped when data.push === false). Sent while this request is still
+  // alive (so delivery can't be cut off), capped at PUSH_WAIT_MS, and fail-soft: pushNotification never throws.
+  if (data.push !== false) try {
     const subject = _pushOrigin || 'https://rccg-kingdom-parish-app.pages.dev';
     let timer;
     const cap = new Promise(resolve => { timer = setTimeout(resolve, PUSH_WAIT_MS); });
@@ -13741,7 +13756,7 @@ async function adminImport(DB, data) {
     for (const r of data.income) { try { await createIncome(DB, r); } catch(e) { errs.push(`income:${r.id}`); } }
   }
   if (Array.isArray(data.expenses)) {
-    for (const r of data.expenses) { try { await createExpense(DB, r); } catch(e) { errs.push(`expense:${r.id}`); } }
+    for (const r of data.expenses) { try { await createExpense(DB, r, { silent: true }); } catch(e) { errs.push(`expense:${r.id}`); } }
   }
   if (Array.isArray(data.remittances)) {
     for (const r of data.remittances) { try { await createRemittance(DB, r); } catch(e) { errs.push(`rem:${r.id}`); } }
