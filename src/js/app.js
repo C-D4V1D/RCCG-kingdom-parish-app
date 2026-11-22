@@ -20537,16 +20537,28 @@ async function satLoadPeriod(){
   for(const s of sundays){
     if(!s.rec) continue;
     s.collected = Number(s.rec.totalCollection||0);
-    s.remit = satRemitTotal(await calcRemittances(s.rec, rr));
+    const rem = await calcRemittances(s.rec, rr);
+    s.remit = satRemitTotal(rem);
+    // Local (Part B) share: Thanksgiving splits paid directly to the Area/Zonal
+    // Pastor, Parish Pastor and Ministers — never sent through the RCCG portal.
+    // Same Part A/B boundary as the Remittances page (incomeLines vs tgLines there),
+    // so the TG Seed stays portal-side and these three shares stay local.
+    s.remitLocal = (rem.totalArea||0) + (rem.totalPastor||0) + (rem.totalMinisters||0);
     s.keep = s.collected - s.remit;
   }
   const quotaLines = getQuotaLinesForPeriod(getQuotaList(settings), range.from, range.to);
   const quotas = sumQuotaLines(quotaLines);
+  // Mummy-labelled quotas are Part B (paid locally); every other quota line goes
+  // through the portal — mirrors the Part A/B quota split on the Remittances page.
+  const localQuotas = sumQuotaLines(quotaLines.filter(q=>isMummyQuotaLabel(q.label)));
   const remitSoFar = sundays.reduce((a,s)=>a+(s.remit||0), 0);
   const keepSoFar = sundays.reduce((a,s)=>a+(s.keep||0), 0);
+  const remitLocal = sundays.reduce((a,s)=>a+(s.remitLocal||0), 0) + localQuotas;
+  const remitPortal = remitSoFar + quotas - remitLocal;
   const hasCutoff = (()=>{ const c = getRemCutoffDates(settings, st.year); return !!c && Number(c.year)===st.year && Number.isInteger(c.dates[st.month]); })();
   st.loaded = { settings, range, sundays, attMap, further, factors, labels:satLineLabels(settings), hasCutoff,
-    summary:{ remitSoFar, quotas, toRemit: remitSoFar+quotas, kept: keepSoFar-quotas } };
+    summary:{ remitSoFar, quotas, toRemit: remitSoFar+quotas, kept: keepSoFar-quotas,
+      remitPortal: Math.round(remitPortal*100)/100, remitLocal: Math.round(remitLocal*100)/100 } };
 }
 async function renderSundayRecords(){
   await satLoadPeriod();
@@ -20585,7 +20597,9 @@ function satListHtml(){
     <div class="card sat-summary">
       <div class="status-row"><div class="status-row-label">Collections to remit so far</div><div class="status-row-amt">${fmt(sm.remitSoFar)}</div></div>
       <div class="status-row"><div class="status-row-label">Monthly quotas (share so far)</div><div class="status-row-amt">${fmt(sm.quotas)}</div></div>
-      <div class="status-row"><div class="status-row-label fw-bold">To remit so far</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(sm.toRemit)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">To remit through the portal<div class="status-row-sub">Pay through RCCG portal</div></div><div class="status-row-amt">${fmt(sm.remitPortal)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">To pay locally<div class="status-row-sub">Area/Zonal Pastor, Parish Pastor &amp; Ministers</div></div><div class="status-row-amt">${fmt(sm.remitLocal)}</div></div>
+      <div class="status-row"><div class="status-row-label fw-bold">Total portal + local</div><div class="status-row-amt" style="color:var(--primary-text)">${fmt(sm.toRemit)}</div></div>
       <div class="status-row"><div class="status-row-label fw-bold">Kept in the parish so far</div><div class="status-row-amt">${fmt(sm.kept)}</div></div>
     </div>
   </div>`;

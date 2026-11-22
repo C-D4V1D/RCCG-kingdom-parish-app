@@ -115,3 +115,12 @@ test('remit total uses the same lines as the Remittances page', async () => {
   // 58% national + 20% province rebate on the 42% local share (84) + 1.25% insurance (12.5)
   assert.equal(Math.round(App._satRemitTotal(rem) * 100) / 100, 676.5);
 });
+
+test('Sunday summary portal/local split follows the Remittances Part A/B boundary', async () => {
+  kingdomUser();
+  mockFetch(() => ({}));   // settings without rates -> defaults (TG 75/5/10/9 + 1% seed)
+  const rem = await App._calcRemittances({ thanksgiving: 2600 });
+  const local = (rem.totalArea||0) + (rem.totalPastor||0) + (rem.totalMinisters||0);
+  assert.equal(Math.round(local*100)/100, 624);                            // 130 + 260 + 234 stay local
+  assert.equal(Math.round((App._satRemitTotal(rem) - local)*100)/100, 1976); // 1950 national + 26 seed go through the portal
+});
