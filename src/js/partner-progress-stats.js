@@ -1,7 +1,7 @@
 /**
  * Pure aggregations behind the Partner Progress infographics:
  *   • Pledge Distribution — how many partners sit at each pledge amount.
- *   • Payment Health      — how many are up to date vs 1 / 2 / 3+ months behind.
+ *   • Payment Health      — how many are up to date vs 1 / 2 / 3 / 4 / 5+ months behind.
  *
  * No DOM access, no globals — safe to import in Node.js for unit tests. This
  * file is the canonical source; `src/js/kpsc.js` inlines the same logic because
@@ -153,7 +153,9 @@ export const ARREARS_BUCKETS = [
   { key: 'up-to-date', label: 'Up to date',      min: 0, max: 0 },
   { key: 'behind-1',   label: '1 month behind',  min: 1, max: 1 },
   { key: 'behind-2',   label: '2 months behind', min: 2, max: 2 },
-  { key: 'behind-3plus', label: '3+ months behind', min: 3, max: Infinity },
+  { key: 'behind-3', label: '3 months behind', min: 3, max: 3 },
+  { key: 'behind-4', label: '4 months behind', min: 4, max: 4 },
+  { key: 'behind-5plus', label: '5+ months behind', min: 5, max: Infinity },
 ];
 
 /** The band a given number of outstanding months falls into. */
@@ -164,7 +166,7 @@ export function arrearsBucketKey(monthsBehind) {
 }
 
 /**
- * Roll individual arrears up into the four bands.
+ * Roll individual arrears up into the six bands.
  *
  * @param {Array<{monthsBehind:number, outstanding:number}>} entries
  * @returns {{ total:number, totalOutstanding:number, upToDate:number,

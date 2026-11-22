@@ -177,8 +177,8 @@ test('arrearsBucketKey: bands are contiguous with no gaps', () => {
   assert.equal(arrearsBucketKey(0), 'up-to-date');
   assert.equal(arrearsBucketKey(1), 'behind-1');
   assert.equal(arrearsBucketKey(2), 'behind-2');
-  assert.equal(arrearsBucketKey(3), 'behind-3plus');
-  assert.equal(arrearsBucketKey(11), 'behind-3plus');
+  assert.equal(arrearsBucketKey(3), 'behind-3');
+  assert.equal(arrearsBucketKey(11), 'behind-5plus');
   assert.equal(arrearsBucketKey(-1), 'up-to-date');
 });
 
@@ -199,12 +199,14 @@ test('buildArrearsBuckets: counts, percentages and money per band', () => {
     ['up-to-date', 3, 50, 0],
     ['behind-1', 1, 17, 1000],
     ['behind-2', 1, 17, 4000],
-    ['behind-3plus', 1, 16, 9000],
+    ['behind-3', 0, 0, 0],
+    ['behind-4', 0, 0, 0],
+    ['behind-5plus', 1, 16, 9000],
   ]);
   assert.equal(summary.buckets.reduce((sum, b) => sum + b.pct, 0), 100);
 });
 
-test('buildArrearsBuckets: always returns all four bands, even at zero', () => {
+test('buildArrearsBuckets: always returns all six bands, even at zero', () => {
   const summary = buildArrearsBuckets([]);
   assert.equal(summary.total, 0);
   assert.equal(summary.upToDatePct, 0);

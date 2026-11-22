@@ -8026,7 +8026,9 @@ const ARREARS_BUCKETS = [
   { key: 'up-to-date',   label: 'Up to date',       short: 'Up to date', min: 0, max: 0,        cls: 'k-health-ok'   },
   { key: 'behind-1',     label: '1 month behind',   short: '1 month',    min: 1, max: 1,        cls: 'k-health-warn' },
   { key: 'behind-2',     label: '2 months behind',  short: '2 months',   min: 2, max: 2,        cls: 'k-health-bad'  },
-  { key: 'behind-3plus', label: '3+ months behind', short: '3+ months',  min: 3, max: Infinity, cls: 'k-health-crit' },
+  { key: 'behind-3',     label: '3 months behind',  short: '3 months',   min: 3, max: 3,        cls: 'k-health-late' },
+  { key: 'behind-4',     label: '4 months behind',  short: '4 months',   min: 4, max: 4,        cls: 'k-health-overdue' },
+  { key: 'behind-5plus', label: '5+ months behind', short: '5+ months',  min: 5, max: Infinity, cls: 'k-health-crit' },
 ];
 const ARREARS_FILTER_KEYS = ARREARS_BUCKETS.map(b => b.key);
 
@@ -8037,7 +8039,7 @@ function arrearsBucketKey(monthsBehind) {
   return bucket ? bucket.key : 'up-to-date';
 }
 
-/** Roll individual arrears up into the four bands. */
+/** Roll individual arrears up into the six bands. */
 function buildArrearsBuckets(entries) {
   const list = entries || [];
   const total = list.length;
@@ -12381,7 +12383,7 @@ function renderPledgeTiersSection(tiers, month) {
 
 /**
  * 📈 Payment Health — one stacked bar plus a tappable band per arrears level.
- * Tapping a band filters the partner list below, so "3 people are 3+ months
+ * Tapping a band filters the partner list below, so "3 people are 5+ months
  * behind" turns straight into "here they are" rather than a dead statistic.
  */
 function renderPaymentHealthSection(health, month, year, scopeEndMonth, unmeasurable = 0) {

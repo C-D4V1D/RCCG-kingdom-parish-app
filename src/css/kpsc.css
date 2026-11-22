@@ -936,6 +936,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(-
 .k-health-ok  {background:var(--green);}
 .k-health-warn{background:#eab308;}
 .k-health-bad {background:#f97316;}
+.k-health-late{background:#d8673e;}
+.k-health-overdue{background:#c34c35;}
 .k-health-crit{background:var(--red);}
 .k-health-rows{display:flex;flex-direction:column;gap:2px;}
 .k-health-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
