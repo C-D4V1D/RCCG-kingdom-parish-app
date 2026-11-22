@@ -171,7 +171,7 @@ export function arrearsBucketKey(monthsBehind) {
  * @param {Array<{monthsBehind:number, outstanding:number}>} entries
  * @returns {{ total:number, totalOutstanding:number, upToDate:number,
  *            upToDatePct:number,
- *            buckets: Array<{key:string,label:string,count:number,pct:number,outstanding:number}> }}
+ *            buckets: Array<{key:string,label:string,count:number,pct:number,displayPct:number,outstanding:number}> }}
  */
 export function buildArrearsBuckets(entries) {
   const list = entries || [];
@@ -190,6 +190,7 @@ export function buildArrearsBuckets(entries) {
     label: b.label,
     count: tally.get(b.key).count,
     pct: pcts[i],
+    displayPct: total > 0 ? Math.round((tally.get(b.key).count * 100) / total) : 0,
     outstanding: tally.get(b.key).outstanding,
   }));
 
@@ -197,7 +198,8 @@ export function buildArrearsBuckets(entries) {
     total,
     totalOutstanding: buckets.reduce((sum, b) => sum + b.outstanding, 0),
     upToDate: buckets[0].count,
-    upToDatePct: buckets[0].pct,
+    // The headline is a standalone ratio, not an apportioned bar share.
+    upToDatePct: total > 0 ? Math.round((buckets[0].count * 100) / total) : 0,
     buckets,
   };
 }

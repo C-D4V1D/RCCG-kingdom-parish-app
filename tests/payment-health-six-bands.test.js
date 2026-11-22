@@ -24,7 +24,7 @@ test('canonical and actual inlined source agree on buckets, money and percentage
  assert.deepEqual(plain(ctx.api.ARREARS_BUCKETS).map(({key,label,min,max})=>({key,label,min,max})),plain(ARREARS_BUCKETS));
  const expected=buildArrearsBuckets(entries), actual=plain(ctx.api.buildArrearsBuckets(entries));
  for(const k of ['total','totalOutstanding','upToDate','upToDatePct'])assert.equal(actual[k],expected[k]);
- assert.deepEqual(actual.buckets.map(({key,label,count,pct,outstanding})=>({key,label,count,pct,outstanding})),expected.buckets);
+ assert.deepEqual(actual.buckets.map(({key,label,count,pct,displayPct,outstanding})=>({key,label,count,pct,displayPct,outstanding})),expected.buckets);
  assert.equal(expected.buckets.reduce((n,b)=>n+b.pct,0),100);
  assert.equal(expected.totalOutstanding,entries.reduce((n,e)=>n+e.outstanding,0));
 });
@@ -54,4 +54,43 @@ test('each real UI band filter returns its own members and toggles back to all',
  assert.deepEqual(plain(ctx.api._filterProgressPartners(partners,11,2026,2026,11)).map(p=>p.id),partners.filter(p=>arrearsBucketKey(p.n)===bucket.key).map(p=>p.id));
  ctx.api.setProgressArrearsFilter(bucket.key);assert.equal(ctx.S.progressFilter,'all');
  }
+});
+
+test('standalone 9/49 headline rounds to 18 while apportioned six-band shares total 100',()=>{
+ const counts=[9,14,7,8,6,5];
+ const entries=counts.flatMap((count,monthsBehind)=>Array(count).fill({monthsBehind,outstanding:0}));
+ for(const calc of [buildArrearsBuckets,ctx.api.buildArrearsBuckets]){
+  const h=calc(entries);
+  assert.equal(h.upToDate,9);assert.equal(h.total,49);assert.equal(h.upToDatePct,18);
+  assert.equal(h.buckets[0].pct,19);
+  assert.deepEqual(plain(h.buckets.map(b=>b.pct)),[19,29,14,16,12,10]);
+  assert.equal(h.buckets.reduce((sum,b)=>sum+b.pct,0),100);
+ }
+ const html=ctx.api.renderPaymentHealthSection(ctx.api.buildArrearsBuckets(entries),11,2026,11);
+ assert.match(html,/<div class="k-health-pct">18%<\/div>/);
+ assert.match(html,/9 of 49/);
+});
+test('standalone headline safely reports zero for no partners and 100 for all current',()=>{
+ for(const calc of [buildArrearsBuckets,ctx.api.buildArrearsBuckets]){
+  assert.equal(calc([]).upToDatePct,0);
+  assert.equal(calc([{monthsBehind:0,outstanding:0}]).upToDatePct,100);
+ }
+});
+
+test('all displayed percentages and tooltips use ordinary rounding while widths fill 100',()=>{
+ const counts=[9,14,7,8,6,5];
+ const entries=counts.flatMap((count,monthsBehind)=>Array(count).fill({monthsBehind,outstanding:0}));
+ for(const calc of [buildArrearsBuckets,ctx.api.buildArrearsBuckets]){
+  const h=calc(entries);
+  assert.deepEqual(plain(h.buckets.map(b=>b.displayPct)),[18,29,14,16,12,10]);
+  assert.equal(h.buckets[0].displayPct,h.upToDatePct);
+  assert.equal(h.buckets.reduce((sum,b)=>sum+b.pct,0),100);
+  assert.ok(calc([]).buckets.every(b=>b.displayPct===0));
+ }
+ const html=ctx.api.renderPaymentHealthSection(ctx.api.buildArrearsBuckets(entries),11,2026,11);
+ assert.match(html,/title="Up to date: 9 partners \(18%\)"/);
+ assert.match(html,/<strong>9<\/strong> · 18%/);
+ assert.match(html,/style="width:19%"/);
+ assert.ok(!html.includes('(19%)'));
+ assert.match(html,/aria-label="18% of partners up to date"/);
 });

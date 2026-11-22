@@ -8052,13 +8052,16 @@ function buildArrearsBuckets(entries) {
   const pcts = wholePercentages(ARREARS_BUCKETS.map(b => tally.get(b.key).count), total);
   const buckets = ARREARS_BUCKETS.map((b, i) => ({
     key: b.key, label: b.label, short: b.short, cls: b.cls,
-    count: tally.get(b.key).count, pct: pcts[i], outstanding: tally.get(b.key).outstanding,
+    count: tally.get(b.key).count, pct: pcts[i],
+    displayPct: total > 0 ? Math.round((tally.get(b.key).count * 100) / total) : 0,
+    outstanding: tally.get(b.key).outstanding,
   }));
   return {
     total,
     totalOutstanding: buckets.reduce((sum, b) => sum + b.outstanding, 0),
     upToDate: buckets[0].count,
-    upToDatePct: buckets[0].pct,
+    // The headline is a standalone ratio, not an apportioned bar share.
+    upToDatePct: total > 0 ? Math.round((buckets[0].count * 100) / total) : 0,
     buckets,
   };
 }
@@ -12402,7 +12405,7 @@ function renderPaymentHealthSection(health, month, year, scopeEndMonth, unmeasur
 
   const stack = health.buckets.filter(b => b.count > 0).map(b => `
     <span class="k-health-seg ${b.cls}" style="width:${b.pct}%"
-      title="${esc(b.label)}: ${b.count} partner${b.count !== 1 ? 's' : ''} (${b.pct}%)"></span>`).join('');
+      title="${esc(b.label)}: ${b.count} partner${b.count !== 1 ? 's' : ''} (${b.displayPct}%)"></span>`).join('');
 
   const rows = health.buckets.map(b => `
     <button type="button" class="k-health-row${(S.progressFilter || 'all') === b.key ? ' active' : ''}"
@@ -12411,7 +12414,7 @@ function renderPaymentHealthSection(health, month, year, scopeEndMonth, unmeasur
       <span class="k-health-dot ${b.cls}"></span>
       <span class="k-health-name">${esc(b.label)}</span>
       <span class="k-health-figs">
-        <strong>${b.count}</strong> · ${b.pct}%
+        <strong>${b.count}</strong> · ${b.displayPct}%
         ${b.outstanding > 0 ? `<span class="k-health-owed">${fmtNaira(b.outstanding)} owed</span>` : ''}
       </span>
     </button>`).join('');
