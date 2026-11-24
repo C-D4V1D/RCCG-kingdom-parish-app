@@ -481,3 +481,50 @@ test('clerkcfg (cleanup): no attendance polling, the Attendance card shows the m
     assert.deepEqual(h.remittance.portal_lines, ['General Tithe', 'THANKSGIVING'], 'from the newest portal item list');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('box month-end: submitted report missing checks resumes delivery without filing or RRR', { skip: !hasPython }, () => {
+  const scenario = happy();
+  scenario['api-fill.js precheck'] = { stdout: { ok: true, existingReport: { id: 123 }, createdByFlow: true } };
+  const state = { [KEY]: { month: '2026-10', status: 'submitted', portalReport: { createdByFlow: true }, boxEvent: cutoff() } };
+  const box = makeBox({ scenario, state });
+  try {
+    box.run();
+    assert.equal(box.entry().status, 'awaiting-reply');
+    assert.equal(only(box.calls(), 'mailer.py', 'send').length, 3);
+    assert.equal(only(box.calls(), 'api-fill.js', 'submit').length, 0);
+    assert.equal(only(box.calls(), 'att-fill.js', 'submit').length, 0);
+    assert.equal(only(box.calls(), 'api-fill.js', 'generate-rrr').length, 0);
+    box.run();
+    assert.equal(only(box.calls(), 'mailer.py', 'send').length, 3, 'no duplicate sends on the next cycle');
+  } finally { box.cleanup(); }
+});
+
+test('box month-end: incomplete checks on a report not owned by this flow stay untouched', { skip: !hasPython }, () => {
+  const state = { [KEY]: { month: '2026-10', status: 'submitted', portalReport: {}, boxEvent: cutoff() } };
+  const box = makeBox({ state });
+  try { box.run(); assert.equal(box.calls().length, 0); } finally { box.cleanup(); }
+});
+
+
+test('box month-end: recovery refuses a report whose live ownership cannot be verified', { skip: !hasPython }, () => {
+  const scenario = happy();
+  scenario['api-fill.js precheck'] = { stdout: { ok: true, existingReport: { id: 123 }, createdByFlow: false } };
+  const state = { [KEY]: { month: '2026-10', status: 'submitted', portalReport: { createdByFlow: true }, boxEvent: cutoff() } };
+  const box = makeBox({ scenario, state });
+  try {
+    box.run();
+    assert.equal(box.entry().status, 'failed');
+    assert.equal(only(box.calls(), 'make-check-email.py').length, 0);
+    assert.equal(only(box.calls(), 'api-fill.js', 'submit').length, 0);
+    assert.equal(only(box.calls(), 'compute-remit.js').length, 0);
+  } finally { box.cleanup(); }
+});
+
+test('box month-end: recovery leaves paid or partially delivered runs alone', { skip: !hasPython }, () => {
+  for (const extra of [{ rrr: { code: '123' } }, { checkEmails: { david: { sentAt: 'yesterday' } } }]) {
+    const state = { [KEY]: { month: '2026-10', status: 'submitted', portalReport: { createdByFlow: true }, boxEvent: cutoff(), ...extra } };
+    const box = makeBox({ state });
+    try { box.run(); assert.equal(box.calls().length, 0); } finally { box.cleanup(); }
+  }
+});
