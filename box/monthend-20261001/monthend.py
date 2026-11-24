@@ -963,6 +963,38 @@ def handle(ev):
     return "done"
 
 
+def resume_submitted_checks():
+    """Finish only missing review delivery for our verified submitted reports. Never file or generate RRR."""
+    for key, e in list((rjson(STATE, {}) or {}).items()):
+        if not isinstance(e, dict) or e.get("status") != "submitted" or e.get("checkEmails") or e.get("rrr"):
+            continue
+        if not (e.get("portalReport") or {}).get("createdByFlow") or not isinstance(e.get("boxEvent"), dict):
+            continue
+        ev = e["boxEvent"]
+        if ev.get("handler") != "box":
+            continue
+        ctx = ctx_from(ev)
+        def recover():
+            rc, j, err = node("api-fill.js", "precheck", "--month", ctx["month"])
+            if rc or not j.get("existingReport") or not j.get("createdByFlow"):
+                stop(ctx, "review recovery", "the submitted report could not be verified; nothing was refiled", wake=True,
+                     report_state="unverified")
+            log("resuming missing checks for an already submitted report; no filing or RRR", key)
+            compute(ctx, os.path.join(REMIT, "runs", f"app-{ctx['month']}-breakdown.json"),
+                    os.path.join(MD, "appjs", "app.js"),
+                    lambda step, msg, wake: stop(ctx, step, msg, wake=wake, report_state="submitted"))
+            rc, j, err = node("api-fill.js", "preview", "--month", ctx["month"])
+            if rc:
+                stop(ctx, "review recovery read-back", f"portal preview failed: {short(j, err)}", wake=True,
+                     report_state="submitted")
+            links_file = os.path.join(REMIT, "runs", f"links-{ctx['month']}.json")
+            if ev.get("links") and not os.path.exists(links_file):
+                wjson(links_file, {"parish": ev.get("parish"), "month": ctx["month"], "links": ev["links"],
+                                  "linksExpireAt": ev.get("linksExpireAt")})
+            check_round(ctx, ["Review delivery resumed after filing. The submitted report was not changed."], refresh=None)
+        safe(recover, ev)
+
+
 def resume_held():
     for key, e in list((rjson(STATE, {}) or {}).items()):
         if isinstance(e, dict) and e.get("status") == "held" and isinstance(e.get("boxEvent"), dict):
@@ -1005,6 +1037,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return  # already running; it picks up anything new before it finishes
+    resume_submitted_checks()
     if "--resume" in sys.argv:
         resume_held()
     waiting = set()
