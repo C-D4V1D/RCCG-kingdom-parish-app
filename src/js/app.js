@@ -1448,7 +1448,10 @@ function parseYmdDate(value){
 }
 
 function isMummyQuotaLabel(label){
-  return String(label||'').toLowerCase().includes('mummy');
+  const name=String(label||'').toLowerCase();
+  // Mummy GO Project is an authority project, not the local pastoral stipend.
+  if(/mummy\s+g[.\s]*o[.\s]*project/.test(name)) return false;
+  return name.includes('mummy');
 }
 
 /**
