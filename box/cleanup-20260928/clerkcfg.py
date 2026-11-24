@@ -310,6 +310,16 @@ def start_monthend(*extra):
     """Start monthend.py (detached) when its inbox has work or a held month may now go ahead. It locks itself."""
     inbox = os.path.join(MONTHEND_DIR, "inbox")
     busy = os.path.isdir(inbox) and any(f.endswith(".json") for f in os.listdir(inbox))
+    # A manually filed report can have no pending inbox event but still owe its first review.
+    try:
+        state_file = os.path.join(os.path.dirname(os.path.dirname(MONTHEND_DIR)), "rccg-remit", "state", "remit-runs.json")
+        runs = json.load(open(state_file))
+        busy = busy or any(isinstance(e, dict) and e.get("status") == "submitted" and not e.get("checkEmails")
+                           and not e.get("rrr") and (e.get("portalReport") or {}).get("createdByFlow")
+                           and isinstance(e.get("boxEvent"), dict) and e["boxEvent"].get("handler") == "box"
+                           for e in runs.values())
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
     if (busy or extra) and os.path.exists(MONTHEND):
         subprocess.Popen(["python3", MONTHEND, "run", *extra], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
